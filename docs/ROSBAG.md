@@ -37,6 +37,8 @@ The integration test is considered a true "SLAM is working" check when all of th
 - `/sim/loop_factor` published at least once
 - `/cdwm/backend_status` reports `mode: "SLAM_ACTIVE"`
 
+**Note:** Use `scripts/record_test_bag.sh` to record a proper test bag with loop closures from Gazebo.
+
 If you want a weaker check (anchors-only), run:
 
 `REQUIRE_LOOP=0 REQUIRE_SLAM_ACTIVE=0 ./scripts/test-integration.sh`
