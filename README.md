@@ -44,6 +44,56 @@ ros2 launch fl_slam_poc poc_3d_rosbag.launch.py \
 
 ---
 
+## Validation & Evaluation
+
+FL-SLAM includes publication-quality validation against ground truth using standard SLAM metrics.
+
+### Run with Evaluation
+
+```bash
+# Full pipeline: SLAM + metrics + plots
+bash scripts/run_and_evaluate.sh
+```
+
+This computes:
+- **ATE (Absolute Trajectory Error)**: Global consistency (translation + rotation)
+- **RPE (Relative Pose Error)**: Local drift at multiple scales (1m, 5m, 10m)
+- **Trajectory Validation**: Checks for timestamp issues and coordinate ranges
+- **Publication-Quality Plots**: 4-view trajectory, error heatmap, pose graph
+
+### Output Files
+
+Results are saved to `results/m3dgr_YYYYMMDD_HHMMSS/` with:
+
+**Trajectory Plots:**
+- `trajectory_comparison.png` - 4-view overlay (XY, XZ, YZ, 3D)
+- `trajectory_heatmap.png` - Trajectory colored by error magnitude
+- `pose_graph.png` - Pose nodes with odometry edges
+
+**Error Analysis:**
+- `error_analysis.png` - Error over time + histogram distribution
+
+**Metrics:**
+- `metrics.txt` - Human-readable summary (ATE/RPE translation + rotation)
+- `metrics.csv` - Spreadsheet-ready with all statistics
+
+**Trajectories:**
+- `estimated_trajectory.tum` - SLAM output in TUM format
+- `ground_truth_aligned.tum` - Aligned ground truth
+
+### Expected Performance (M3DGR Dynamic01)
+
+Based on system design:
+- **ATE Translation RMSE**: Target < 5m (outdoor dynamic sequence)
+- **ATE Rotation RMSE**: Target < 5 deg
+- **RPE @ 1m**: Target < 0.1 m/m (10% local drift)
+- **Loop closures**: Detected via ICP + NIG descriptors
+- **Map consistency**: Verified via anchor point clouds
+
+See [`docs/EVALUATION.md`](docs/EVALUATION.md) for detailed guide.
+
+---
+
 ## Documentation
 
 ### Essential

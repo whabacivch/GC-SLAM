@@ -254,9 +254,33 @@ class Tb3OdomBridge(Node):
         curr_cov = self.cov_from_msg(msg.pose.covariance)
         
         if self.prev_pose is None:
+            # First message: publish ZERO delta (identity transform)
+            # The delta from pose to itself is zero - this is the correct initialization
             self.prev_pose = curr_pose.copy()
             self.prev_cov = curr_cov.copy()
             self.prev_frame = input_frame
+            
+            # Publish zero delta (identity transform)
+            out = Odometry()
+            out.header.stamp = msg.header.stamp
+            out.header.frame_id = self.output_frame
+            out.child_frame_id = self.child_frame
+            # Identity pose: position=0, orientation=[0,0,0,1]
+            out.pose.pose.position.x = 0.0
+            out.pose.pose.position.y = 0.0
+            out.pose.pose.position.z = 0.0
+            out.pose.pose.orientation.x = 0.0
+            out.pose.pose.orientation.y = 0.0
+            out.pose.pose.orientation.z = 0.0
+            out.pose.pose.orientation.w = 1.0
+            out.pose.covariance = curr_cov.reshape(-1).tolist()
+            out.twist = msg.twist
+            self.pub.publish(out)
+
+            self.get_logger().info(
+                f"Odom bridge initialized at ({curr_pose[0]:.3f}, {curr_pose[1]:.3f}, {curr_pose[2]:.3f}), "
+                f"published zero delta"
+            )
             return
 
         # Compute delta: delta = T_prev^{-1} ∘ T_curr

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from fl_slam_poc.backend.backend_node import main
+from fl_slam_poc.utility_nodes.livox_converter import main
 
 
 if __name__ == "__main__":

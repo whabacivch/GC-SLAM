@@ -37,7 +37,7 @@ import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String
 
 # Import modular helpers (orchestration only, call operators/models)
@@ -75,7 +75,22 @@ class Frontend(Node):
         self._init_publishers()
         self._init_timer()
         
-        self.get_logger().info("Frontend (refactored) initialized - rosbag compatible")
+        # Startup banner (after all modules initialized)
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("FL-SLAM Frontend initialized")
+        self.get_logger().info("=" * 60)
+        mode = "3D PointCloud" if self.sensor_io.use_3d_pointcloud else "2D LaserScan + RGB-D"
+        self.get_logger().info(f"Mode: {mode}")
+        self.get_logger().info(f"Birth intensity: {float(self.get_parameter('birth_intensity').value)}")
+        self.get_logger().info(f"Using GPU: {bool(self.get_parameter('use_gpu').value)}")
+        if self.sensor_io.depth_intrinsics:
+            fx, fy, cx, cy = self.sensor_io.depth_intrinsics
+            self.get_logger().info(f"Camera intrinsics: fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}")
+        else:
+            self.get_logger().warn("NO camera intrinsics - RGB-D evidence DISABLED until set")
+        self.get_logger().info("")
+        self.get_logger().info("Waiting for sensor data to start processing...")
+        self.get_logger().info("=" * 60)
     
     def _declare_parameters(self):
         """Declare all ROS parameters with defaults."""
@@ -89,6 +104,12 @@ class Frontend(Node):
         self.declare_parameter("enable_image", True)
         self.declare_parameter("enable_depth", True)
         self.declare_parameter("enable_camera_info", True)
+        # If no CameraInfo is available in the bag, you can provide intrinsics directly.
+        # Set all four > 0 to enable.
+        self.declare_parameter("camera_fx", 0.0)
+        self.declare_parameter("camera_fy", 0.0)
+        self.declare_parameter("camera_cx", 0.0)
+        self.declare_parameter("camera_cy", 0.0)
         self.declare_parameter("publish_rgbd_evidence", True)
         self.declare_parameter("rgbd_evidence_topic", "/sim/rgbd_evidence")
         self.declare_parameter("rgbd_publish_every_n_scans", 5)
@@ -137,6 +158,8 @@ class Frontend(Node):
         self.declare_parameter("use_3d_pointcloud", False)  # Enable 3D point cloud mode
         self.declare_parameter("enable_pointcloud", False)  # Subscribe to PointCloud2
         self.declare_parameter("pointcloud_topic", "/camera/depth/points")
+        self.declare_parameter("pointcloud_range_min", 0.1)
+        self.declare_parameter("pointcloud_range_max", 50.0)
         
         # Point Cloud Processing
         self.declare_parameter("voxel_size", 0.05)  # Voxel grid filter size (meters)
@@ -192,12 +215,32 @@ class Frontend(Node):
         
         # Initialize SensorIO (pure I/O, no math)
         self.sensor_io = SensorIO(self, sensor_config)
-        self.sensor_io.set_scan_callback(self._on_scan)
+        if sensor_config["use_3d_pointcloud"]:
+            self.sensor_io.set_pointcloud_callback(self._on_pointcloud)
+        else:
+            self.sensor_io.set_scan_callback(self._on_scan)
         self.sensor_io.set_odom_callback(lambda _msg: self.status_monitor.mark_received("odom"))
         if sensor_config["enable_image"]:
             self.sensor_io.set_image_callback(lambda _msg: self.status_monitor.mark_received("camera"))
         if sensor_config["enable_depth"]:
             self.sensor_io.set_depth_callback(lambda _msg: self.status_monitor.mark_received("depth"))
+
+        # Optional: set intrinsics from parameters if CameraInfo is absent.
+        fx = float(self.get_parameter("camera_fx").value)
+        fy = float(self.get_parameter("camera_fy").value)
+        cx = float(self.get_parameter("camera_cx").value)
+        cy = float(self.get_parameter("camera_cy").value)
+        if fx > 0.0 and fy > 0.0 and cx > 0.0 and cy > 0.0:
+            self.sensor_io.depth_intrinsics = (fx, fy, cx, cy)
+            self.get_logger().info(
+                f"Frontend: Using camera intrinsics from parameters: "
+                f"fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}"
+            )
+        else:
+            self.get_logger().warn(
+                "Frontend: No camera intrinsics set (all values must be > 0). "
+                "RGB-D evidence will NOT be published until CameraInfo is received or parameters are set."
+            )
         
         # Initialize DescriptorBuilder (uses models.nig)
         descriptor_bins = int(self.get_parameter("descriptor_bins").value)
@@ -267,11 +310,16 @@ class Frontend(Node):
         
         # Status monitoring
         self.status_monitor = StatusMonitor(self)
-        self.status_monitor.add_sensor("scan", str(self.get_parameter("scan_topic").value))
+        if use_3d_pointcloud:
+            self.status_monitor.add_sensor("pointcloud", sensor_config["pointcloud_topic"])
+        else:
+            self.status_monitor.add_sensor("scan", str(self.get_parameter("scan_topic").value))
         self.status_monitor.add_sensor("odom", str(self.get_parameter("odom_topic").value))
         if sensor_config["enable_image"]:
             self.status_monitor.add_sensor("camera", sensor_config["camera_topic"])
-        if sensor_config["enable_depth"]:
+        # Only register depth sensor if NOT in 3D pointcloud mode
+        # (in 3D mode we use PointCloud2 directly, not depth images)
+        if sensor_config["enable_depth"] and not sensor_config["use_3d_pointcloud"]:
             self.status_monitor.add_sensor("depth", sensor_config["depth_topic"])
     
     def _init_publishers(self):
@@ -303,59 +351,85 @@ class Frontend(Node):
     def _on_scan(self, msg: LaserScan):
         """
         Main scan processing callback (orchestration only).
-        
+
         All math operations call operators/ and models/ via helper modules.
         """
         self.status_monitor.mark_received("scan")
-        
-        # Check if pose available
-        if self.sensor_io.last_pose is None:
-            if not hasattr(self, '_logged_no_pose'):
-                self._logged_no_pose = True
-                self.get_logger().warn(
-                    "Frontend: Dropping scans - no pose data yet. "
-                    "Waiting for /odom messages..."
+
+        scan_stamp = stamp_to_sec(msg.header.stamp)
+
+        # Get aligned sensor data with probabilistic weights
+        pose, pose_dt = self.sensor_io.get_nearest_pose(scan_stamp)
+
+        # If no pose available yet, buffer the scan for later processing
+        if pose is None:
+            if not hasattr(self, '_scan_buffer'):
+                self._scan_buffer = []
+            self._scan_buffer.append(msg)
+
+            # Log buffer status occasionally
+            if len(self._scan_buffer) % 10 == 1:
+                self.get_logger().info(
+                    f"Frontend: Buffered {len(self._scan_buffer)} scans waiting for odometry. "
+                    f"Odom buffer size: {len(self.sensor_io.odom_buffer)}"
                 )
             return
-        
-        # Log first successful scan processing
-        if not hasattr(self, '_logged_first_scan'):
-            self._logged_first_scan = True
-            self.get_logger().info(
-                f"Frontend: Processing first scan with pose data available. "
-                f"Odom buffer size: {len(self.sensor_io.odom_buffer)}"
-            )
-        
+
+        # Process any buffered scans first
+        if hasattr(self, '_scan_buffer') and self._scan_buffer:
+            self.get_logger().info(f"Frontend: Processing {len(self._scan_buffer)} buffered scans")
+            for buffered_msg in self._scan_buffer:
+                self._process_scan(buffered_msg)
+            self._scan_buffer.clear()
+
+        # Process current scan
+        self._process_scan(msg)
+
+    def _process_scan(self, msg: LaserScan):
+        """Process a single scan message."""
         scan_stamp = stamp_to_sec(msg.header.stamp)
-        
+
         # Get aligned sensor data with probabilistic weights
         pose, pose_dt = self.sensor_io.get_nearest_pose(scan_stamp)
         if pose is None:
+            # This shouldn't happen since we check before calling
             return
-        
+
         self.align_pose.update(pose_dt)
         pose_weight = self.align_pose.weight(pose_dt)
-        
+
         # Get image features if enabled
         image_feat, image_dt = self.sensor_io.get_nearest_image(scan_stamp)
         if image_dt is not None:
             self.align_image.update(image_dt)
         image_weight = self.align_image.weight(image_dt)
-        
+
         # Get synchronized RGB-D pair for true evidence extraction
         rgb_array, depth_array, rgbd_dt, depth_frame = self.sensor_io.get_synchronized_rgbd(scan_stamp, max_dt=0.1)
         if rgbd_dt is not None:
             self.align_depth.update(rgbd_dt)
         depth_weight = self.align_depth.weight(rgbd_dt)
-        
-        # For legacy descriptor/ICP: get depth points from buffer
-        depth_item = self.sensor_io.get_nearest_depth(scan_stamp)
-        depth_points = depth_item[2] if depth_item else None  # 3D points only
-        
-        # Convert scan to points
+
+        # Convert scan to points (LaserScan is the sparse anchor / loop source).
+        # Prefer LaserScan points for ICP; if TF is missing, fall back to depth points
+        # but cap the number of points to keep ICP tractable.
         scan_points = self.sensor_io.scan_to_points(msg)
-        points = depth_points if depth_points is not None else scan_points
-        point_source = "depth" if depth_points is not None else ("scan" if scan_points is not None else "none")
+        depth_item = self.sensor_io.get_nearest_depth(scan_stamp)
+        depth_points = depth_item[2] if depth_item else None
+
+        points = scan_points
+        point_source = "scan"
+        if points is None and depth_points is not None:
+            max_pts = 1000
+            if len(depth_points) > max_pts:
+                idx = np.linspace(0, len(depth_points) - 1, max_pts, dtype=int)
+                points = depth_points[idx]
+            else:
+                points = depth_points
+            point_source = "depth_fallback"
+
+        if points is None:
+            point_source = "none"
 
         # Publish dense RGB-D evidence with TRUE colors/normals (no silent pipeline)
         self._scan_count += 1
@@ -372,26 +446,26 @@ class Frontend(Node):
                 camera_frame=depth_frame or str(self.get_parameter("camera_frame").value),
                 stamp=msg.header.stamp,
             )
-        
+
         # Build descriptor (uses models.nig via descriptor_builder)
         scan_desc = self.descriptor_builder.scan_descriptor(msg)
         image_feat_desc = self.descriptor_builder.image_descriptor(None)  # TODO: extract image features
         depth_feat_desc = self.descriptor_builder.depth_descriptor(depth_points)
         desc = self.descriptor_builder.compose_descriptor(scan_desc, image_feat_desc, depth_feat_desc)
-        
+
         obs_weight = pose_weight * image_weight * depth_weight
-        
+
         # Initialize global model if needed
         self.descriptor_builder.init_global_model(desc)
-        
+
         # Compute responsibilities (uses models.nig.fisher_rao_distance - exact)
         anchors = self.anchor_manager.get_all_anchors()
         global_model = self.descriptor_builder.get_global_model()
         base_weight = self.anchor_manager.get_base_weight()
-        
+
         responsibilities, r_new = self.loop_processor.compute_responsibilities(
             desc, anchors, global_model, base_weight)
-        
+
         # Debug: log responsibilities
         if not hasattr(self, '_resp_debug_count'):
             self._resp_debug_count = 0
@@ -401,28 +475,36 @@ class Frontend(Node):
             self.get_logger().info(
                 f"Responsibilities: n_anchors={len(anchors)}, r_new={r_new:.4f}, [{resp_str}]"
             )
-        
+
         # Update anchors (uses models.nig.update - exact)
         r_new_eff = self.anchor_manager.update_anchors(desc, responsibilities, r_new, obs_weight)
-        
+
         # Update global model (uses models.nig.update - exact)
         self.descriptor_builder.update_global_model(desc, obs_weight)
-        
+
         # Stochastic birth decision (uses models.birth.sample_birth - exact Poisson)
         birth_prob = self.anchor_manager.get_birth_probability(r_new_eff)
         should_birth = self.anchor_manager.should_birth_anchor(r_new_eff)
-        
+
         # Debug logging for first few scans
         if not hasattr(self, '_birth_debug_count'):
             self._birth_debug_count = 0
         if self._birth_debug_count < 10:
             self._birth_debug_count += 1
             self.get_logger().info(
-                f"Birth check: r_new_eff={r_new_eff:.6f}, birth_prob={birth_prob:.4f}, "
-                f"should_birth={should_birth}, obs_weight={obs_weight:.4f}, "
-                f"pose_weight={pose_weight:.4f}, points={'OK' if points is not None else 'NONE'}"
+                f"Scan #{self._birth_debug_count} processed: r_new_eff={r_new_eff:.6f}, "
+                f"birth_prob={birth_prob:.4f}, should_birth={should_birth}, "
+                f"obs_weight={obs_weight:.4f}, points={'OK' if points is not None else 'NONE'}, "
+                f"anchors={len(anchors)}"
             )
-        
+
+            if points is None:
+                self.get_logger().warn(
+                    f"Scan #{self._birth_debug_count}: NO POINTS available! "
+                    f"Check TF transforms between scan/pointcloud frame and base_link. "
+                    f"Anchors CANNOT be created without points."
+                )
+
         if should_birth and points is not None:
             global_model_copy = self.descriptor_builder.copy_global_model()
             anchor_id = self.anchor_manager.create_anchor(
@@ -434,10 +516,10 @@ class Frontend(Node):
                 points=points,
                 frame_id=self.odom_frame
             )
-            
+
             self._publish_anchor_create(anchor_id, msg.header.stamp, points)
             self.get_logger().info(f"✓ Created anchor {anchor_id} with {len(points)} points")
-            
+
             self._publish_report(OpReport(
                 name="StochasticAnchorBirth",
                 exact=True,
@@ -447,18 +529,149 @@ class Frontend(Node):
                 metrics={"anchor_id": anchor_id, "r_new_eff": r_new_eff, "birth_probability": birth_prob},
                 notes="Poisson birth with intensity λ = λ₀ * r_new.",
             ))
-        
+
         # Apply anchor budget if needed (uses operators.third_order_correct)
         anchor_budget = int(self.get_parameter("anchor_budget").value)
         if anchor_budget > 0:
             budget_report = self.anchor_manager.apply_budget(anchor_budget)
             if budget_report is not None:
                 self._publish_report(budget_report)
-        
+
         # Publish loop factors
         self._publish_loop_factors(responsibilities, msg, points, obs_weight, point_source)
+
+    def _on_pointcloud(self, msg: PointCloud2, points: np.ndarray):
+        """
+        Main 3D point cloud processing callback.
+
+        Mirrors `_on_scan` but uses PointCloud2 as the triggering sensor.
+        """
+        self.status_monitor.mark_received("pointcloud")
+
+        pc_stamp = stamp_to_sec(msg.header.stamp)
+
+        # Get aligned odometry pose (absolute)
+        pose, pose_dt = self.sensor_io.get_nearest_pose(pc_stamp)
+
+        # If no pose available yet, buffer the point cloud for later processing
+        if pose is None:
+            if not hasattr(self, '_pointcloud_buffer'):
+                self._pointcloud_buffer = []
+            self._pointcloud_buffer.append((msg, points))
+
+            # Log buffer status occasionally
+            if len(self._pointcloud_buffer) % 5 == 1:
+                self.get_logger().info(
+                    f"Frontend: Buffered {len(self._pointcloud_buffer)} point clouds waiting for odometry. "
+                    f"Odom buffer size: {len(self.sensor_io.odom_buffer)}"
+                )
+            return
+
+        # Process any buffered point clouds first
+        if hasattr(self, '_pointcloud_buffer') and self._pointcloud_buffer:
+            self.get_logger().info(f"Frontend: Processing {len(self._pointcloud_buffer)} buffered point clouds")
+            for buffered_msg, buffered_points in self._pointcloud_buffer:
+                self._process_pointcloud(buffered_msg, buffered_points)
+            self._pointcloud_buffer.clear()
+
+        # Process current point cloud
+        self._process_pointcloud(msg, points)
+
+    def _process_pointcloud(self, msg: PointCloud2, points: np.ndarray):
+        """Process a single point cloud message."""
+        pc_stamp = stamp_to_sec(msg.header.stamp)
+
+        # Get aligned odometry pose (absolute)
+        pose, pose_dt = self.sensor_io.get_nearest_pose(pc_stamp)
+        if pose is None:
+            # This shouldn't happen since we check before calling
+            return
+
+        self.align_pose.update(pose_dt)
+        pose_weight = self.align_pose.weight(pose_dt)
+
+        # Build a scan-like range histogram descriptor from point ranges.
+        rmin = float(self.get_parameter("pointcloud_range_min").value)
+        rmax = float(self.get_parameter("pointcloud_range_max").value)
+        ranges = np.linalg.norm(points.astype(np.float64), axis=1)
+        valid = np.isfinite(ranges) & (ranges >= rmin) & (ranges <= rmax)
+        if np.any(valid):
+            hist, _ = np.histogram(
+                ranges[valid],
+                bins=self.descriptor_builder.descriptor_bins,
+                range=(rmin, rmax),
+            )
+            scan_desc = np.asarray(hist, dtype=float)
+            desc_sum = float(np.sum(scan_desc))
+            if desc_sum > 1e-12:
+                scan_desc = scan_desc / desc_sum
+        else:
+            scan_desc = np.zeros(self.descriptor_builder.descriptor_bins, dtype=float)
+
+        image_feat_desc = self.descriptor_builder.image_descriptor(None)
+        depth_feat_desc = self.descriptor_builder.depth_descriptor(None)
+        desc = self.descriptor_builder.compose_descriptor(scan_desc, image_feat_desc, depth_feat_desc)
+
+        obs_weight = pose_weight
+
+        # Initialize global model if needed
+        self.descriptor_builder.init_global_model(desc)
+
+        anchors = self.anchor_manager.get_all_anchors()
+        global_model = self.descriptor_builder.get_global_model()
+        base_weight = self.anchor_manager.get_base_weight()
+
+        responsibilities, r_new = self.loop_processor.compute_responsibilities(
+            desc, anchors, global_model, base_weight
+        )
+
+        r_new_eff = self.anchor_manager.update_anchors(desc, responsibilities, r_new, obs_weight)
+        self.descriptor_builder.update_global_model(desc, obs_weight)
+
+        should_birth = self.anchor_manager.should_birth_anchor(r_new_eff)
+
+        # Debug logging for first few pointcloud scans
+        if not hasattr(self, '_pc_birth_debug_count'):
+            self._pc_birth_debug_count = 0
+        if self._pc_birth_debug_count < 10:
+            self._pc_birth_debug_count += 1
+            self.get_logger().info(
+                f"PointCloud #{self._pc_birth_debug_count} processed: r_new_eff={r_new_eff:.6f}, "
+                f"should_birth={should_birth}, points={len(points) if points is not None else 0}, "
+                f"anchors={len(anchors)}"
+            )
+
+            if points is None or len(points) == 0:
+                self.get_logger().warn(
+                    f"PointCloud #{self._pc_birth_debug_count}: NO POINTS! "
+                    f"Check TF transforms and point cloud validity."
+                )
+
+        if should_birth and points is not None and len(points) > 0:
+            global_model_copy = self.descriptor_builder.copy_global_model()
+            anchor_id = self.anchor_manager.create_anchor(
+                stamp_sec=pc_stamp,
+                pose=pose,
+                descriptor=desc,
+                desc_model=global_model_copy,
+                r_new_eff=r_new_eff,
+                points=points,
+                frame_id=self.odom_frame,
+            )
+            self._publish_anchor_create(anchor_id, msg.header.stamp, points)
+            self.get_logger().info(f"✓ Created anchor {anchor_id} with {len(points)} points (PointCloud2)")
+
+        # Apply anchor budget if needed (uses operators.third_order_correct)
+        anchor_budget = int(self.get_parameter("anchor_budget").value)
+        if anchor_budget > 0:
+            budget_report = self.anchor_manager.apply_budget(anchor_budget)
+            if budget_report is not None:
+                self._publish_report(budget_report)
+
+        # Publish loop factors
+        self._publish_loop_factors(responsibilities, msg, points, obs_weight, "pointcloud")
     
-    def _publish_loop_factors(self, responsibilities: dict, msg: LaserScan,
+    def _publish_loop_factors(self, responsibilities: dict, msg,
                               points: Optional[np.ndarray], obs_weight: float, point_source: str):
         """
         Publish loop factors with ICP registration.

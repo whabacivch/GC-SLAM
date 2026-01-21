@@ -40,6 +40,7 @@ from typing import Optional, Dict, List
 
 import numpy as np
 import rclpy
+from rclpy.clock import Clock, ClockType
 import tf2_ros
 from geometry_msgs.msg import Point, PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry, Path
@@ -212,11 +213,12 @@ class FLBackend(Node):
         self.rgbd_evidence_topic = str(self.get_parameter("rgbd_evidence_topic").value)
 
         # QoS profile for subscriptions (MUST match frontend RELIABLE QoS)
-        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10
+            depth=100,  # Increased to match odom bridge publisher depth
+            durability=DurabilityPolicy.VOLATILE,
         )
 
         # Subscriptions (with RELIABLE QoS to match frontend)
@@ -241,6 +243,16 @@ class FLBackend(Node):
         # Trajectory path publisher for Foxglove visualization
         self.pub_path = self.create_publisher(Path, "/cdwm/trajectory", 10)
         self.trajectory_poses: list[PoseStamped] = []
+        
+        # Trajectory export for ground truth comparison
+        self.trajectory_export_path = self.declare_parameter(
+            "trajectory_export_path", "/tmp/fl_slam_trajectory.tum"
+        ).value
+        self.trajectory_file = None
+        if self.trajectory_export_path:
+            self.trajectory_file = open(self.trajectory_export_path, "w")
+            self.trajectory_file.write("# timestamp x y z qx qy qz qw\n")
+            self.get_logger().info(f"Exporting trajectory to: {self.trajectory_export_path}")
         self.max_path_length = 1000  # Limit path history
 
         # State belief in information form
@@ -295,25 +307,44 @@ class FLBackend(Node):
         self.anchor_count = 0
         self.last_odom_time: Optional[float] = None
         self.last_loop_time: Optional[float] = None
+        self.last_odom_stamp: Optional[float] = None  # Odometry message timestamp for trajectory export
         self.node_start_time = time.time()
         self.status_period = 5.0
         self.warned_no_loops = False
         
-        # Status timer
-        self.status_timer = self.create_timer(self.status_period, self._check_status)
+        # Status timer uses wall time so it continues even when /clock pauses.
+        self._status_clock = Clock(clock_type=ClockType.SYSTEM_TIME)
+        self.status_timer = self.create_timer(
+            self.status_period, self._check_status, clock=self._status_clock
+        )
         
         # Startup log
         self.get_logger().info("=" * 60)
         self.get_logger().info("FL-SLAM Backend starting")
-        self.get_logger().info("  Listening for delta odom on /sim/odom")
-        self.get_logger().info("  Listening for loop factors on /sim/loop_factor")
-        self.get_logger().info("  Listening for anchors on /sim/anchor_create")
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("Subscriptions:")
+        self.get_logger().info("  Delta odom:    /sim/odom (MUST come from tb3_odom_bridge)")
+        self.get_logger().info("  Loop factors:  /sim/loop_factor (from frontend)")
+        self.get_logger().info("  Anchors:       /sim/anchor_create (from frontend)")
+        self.get_logger().info("  RGB-D evidence: " + self.rgbd_evidence_topic)
+        self.get_logger().info("")
+        self.get_logger().info("Status monitoring: Will report DEAD_RECKONING if no loop factors")
+        self.get_logger().info("  Check /cdwm/backend_status for real-time status")
         self.get_logger().info("=" * 60)
 
     def on_odom(self, msg: Odometry):
         """Process delta odometry with adjoint covariance transport."""
         self.odom_count += 1
         self.last_odom_time = time.time()
+        # Store odometry message timestamp for trajectory export (NOT wall clock!)
+        self.last_odom_stamp = stamp_to_sec(msg.header.stamp)
+        
+        # Log first few odom messages for debugging
+        if self.odom_count <= 3:
+            self.get_logger().info(
+                f"Backend received odom #{self.odom_count}, "
+                f"delta=({msg.pose.pose.position.x:.3f}, {msg.pose.pose.position.y:.3f}, {msg.pose.pose.position.z:.3f})"
+            )
         
         # Extract delta
         dx = float(msg.pose.pose.position.x)
@@ -497,6 +528,14 @@ class FLBackend(Node):
         
         anchor_data = self.anchors.get(anchor_id)
 
+        # Debug: Check if anchor exists
+        if self.loop_factor_count <= 5:
+            self.get_logger().info(
+                f"Loop factor #{self.loop_factor_count}: anchor {anchor_id} "
+                f"{'FOUND' if anchor_data is not None else 'NOT FOUND'}, "
+                f"total anchors: {len(self.anchors)}"
+            )
+
         if anchor_data is None:
             # Race condition: loop factor arrived before anchor creation
             # Buffer it for later processing
@@ -639,6 +678,14 @@ class FLBackend(Node):
         self._publish_loop_marker(int(msg.anchor_id), mu_anchor_new, mu_updated)
         self._publish_state(tag="loop")
 
+        # Debug: Log state update
+        if self.loop_factor_count <= 3:
+            self.get_logger().info(
+                f"Loop #{self.loop_factor_count} processed: innovation_norm={np.linalg.norm(innovation):.6f}, "
+                f"weight={weight:.6f}, cov_trace_before={float(np.trace(cov_current)):.3f}, "
+                f"cov_trace_after={float(np.trace(cov_updated)):.3f}"
+            )
+
     def _check_status(self):
         """Periodic status check - warns if running dead-reckoning only."""
         elapsed = time.time() - self.node_start_time
@@ -774,6 +821,16 @@ class FLBackend(Node):
         path.header = out.header
         path.poses = self.trajectory_poses
         self.pub_path.publish(path)
+        
+        # Export trajectory to file with ODOMETRY timestamp (not wall clock!)
+        # Using odometry msg timestamp ensures proper alignment with ground truth
+        if self.trajectory_file and self.last_odom_stamp is not None:
+            timestamp = self.last_odom_stamp  # Use odometry message timestamp
+            self.trajectory_file.write(
+                f"{timestamp:.6f} {mu[0]:.6f} {mu[1]:.6f} {mu[2]:.6f} "
+                f"{qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
+            )
+            self.trajectory_file.flush()
 
     def _publish_report(self, report: OpReport):
         try:
@@ -874,7 +931,10 @@ class FLBackend(Node):
             ))
         
         if len(points_with_color) == 0:
+            self.get_logger().debug("No points to publish in map")
             return
+        
+        self.get_logger().info(f"Publishing map with {len(points_with_color)} points to /cdwm/map")
         
         # Create PointCloud2 message with XYZRGB
         msg = self.PointCloud2()
@@ -885,24 +945,25 @@ class FLBackend(Node):
         msg.is_dense = True
         msg.is_bigendian = False
         
-        # Define fields (XYZRGB)
-        # Using packed RGB in a single float32 for compatibility
+        # Define fields (XYZRGB) - Foxglove compatible format
+        # Pack RGB as a single float32 for maximum compatibility
         msg.fields = [
             self.PointField(name='x', offset=0, datatype=self.PointField.FLOAT32, count=1),
             self.PointField(name='y', offset=4, datatype=self.PointField.FLOAT32, count=1),
             self.PointField(name='z', offset=8, datatype=self.PointField.FLOAT32, count=1),
-            self.PointField(name='r', offset=12, datatype=self.PointField.UINT8, count=1),
-            self.PointField(name='g', offset=13, datatype=self.PointField.UINT8, count=1),
-            self.PointField(name='b', offset=14, datatype=self.PointField.UINT8, count=1),
+            self.PointField(name='rgb', offset=12, datatype=self.PointField.FLOAT32, count=1),
         ]
-        msg.point_step = 16  # 3 floats + 3 bytes + 1 padding = 16 bytes
+        msg.point_step = 16  # 4 floats = 16 bytes
         msg.row_step = msg.point_step * msg.width
         
         # Pack points to bytes
         cloud_data = bytearray()
         for pt in points_with_color:
-            # Pack as 3 floats + 3 uint8 + 1 padding byte
-            cloud_data.extend(struct.pack('<fffBBBx', pt[0], pt[1], pt[2], pt[3], pt[4], pt[5]))
+            # Pack RGB into a single float32 - Foxglove/RViz use BGR order (little-endian)
+            r, g, b = int(pt[3]), int(pt[4]), int(pt[5])
+            # BGR order: blue in LSB, then green, then red in MSB
+            rgb_packed = struct.unpack('f', struct.pack('I', (r << 16) | (g << 8) | b))[0]
+            cloud_data.extend(struct.pack('<ffff', pt[0], pt[1], pt[2], rgb_packed))
         
         msg.data = bytes(cloud_data)
         self.pub_map.publish(msg)
@@ -1003,6 +1064,13 @@ class FLBackend(Node):
         # Phase 3: Create new dense modules for unassigned evidence
         for evidence in unassigned_evidence:
             self.add_dense_module(evidence)
+    
+    def destroy_node(self):
+        """Clean up trajectory file on shutdown."""
+        if self.trajectory_file:
+            self.trajectory_file.close()
+            self.get_logger().info("Trajectory export closed")
+        super().destroy_node()
 
 
 def main():

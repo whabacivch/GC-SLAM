@@ -4,6 +4,96 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-21: Evaluation Pipeline & Warning Fixes
+
+### Summary
+Comprehensive upgrade to the SLAM evaluation pipeline with publication-quality metrics and plots, plus critical bug fixes for trajectory timestamps and terminal warning cleanup.
+
+### Critical Bug Fixes
+
+**1. Trajectory Export Timestamps (CRITICAL)**
+- **Problem**: Backend used `self.get_clock().now()` (wall clock) for trajectory export, causing duplicate timestamps
+- **Impact**: evo's trajectory association became unreliable, potentially matching wrong poses
+- **Fix**: Store odometry message timestamp (`self.last_odom_stamp`) and use it for trajectory export
+- **Files**: `backend/backend_node.py`
+
+**2. First Pose Zero Delta**
+- **Problem**: tb3_odom_bridge skipped publishing on first message, leaving backend uninitialized
+- **Impact**: Backend had to wait for second message to start processing
+- **Fix**: Publish zero delta (identity transform) on first message - logically correct since delta from pose to itself is zero
+- **Files**: `utility_nodes/tb3_odom_bridge.py`
+
+### Terminal Warning Fixes
+
+**3. Suppress rerun_bridge Warning**
+- **Problem**: "not found: rerun_bridge/local_setup.bash" warning during launch
+- **Fix**: Suppress stderr when sourcing setup.bash in run_and_evaluate.sh
+
+**4. Skip TF Lookup in 3D Mode**
+- **Problem**: TF lookup warnings for camera_color_optical_frame when using 3D pointcloud mode
+- **Fix**: Don't subscribe to depth images when `use_3d_pointcloud=True` (points already in base_link)
+- **Files**: `frontend/processing/sensor_io.py`
+
+**5. Skip Depth Sensor Registration in 3D Mode**
+- **Problem**: "SENSOR MISSING: depth" warnings in 3D pointcloud mode
+- **Fix**: Don't register depth sensor in status monitor when `use_3d_pointcloud=True`
+- **Files**: `frontend/frontend_node.py`
+
+### Enhanced Evaluation Pipeline
+
+**6. Publication-Quality evaluate_slam.py**
+Complete rewrite with:
+- **Trajectory Validation**: Checks for monotonic timestamps, duplicates, coordinate ranges
+- **Rotation Metrics**: ATE and RPE for rotation (degrees), not just translation
+- **Multi-Scale RPE**: Compute at 1m, 5m, 10m scales
+- **Error Heatmap**: Trajectory colored by error magnitude
+- **Pose Graph Visualization**: Show pose nodes with odometry edges
+- **CSV Export**: All metrics in spreadsheet-ready format
+- **Files**: `scripts/evaluate_slam.py`
+
+**7. Progress Feedback**
+- **Problem**: No indication of SLAM progress during rosbag playback
+- **Fix**: Added progress monitoring showing backend status, anchor creation, bag duration
+- **Files**: `scripts/run_and_evaluate.sh`
+
+### New Output Files
+
+After running `scripts/run_and_evaluate.sh`:
+
+**Trajectory Plots:**
+- `trajectory_comparison.png` - 4-view overlay (XY, XZ, YZ, 3D)
+- `trajectory_heatmap.png` - Error-colored trajectory
+- `pose_graph.png` - Pose nodes with odometry edges
+
+**Error Analysis:**
+- `error_analysis.png` - Error over time + histogram
+
+**Metrics:**
+- `metrics.txt` - Human-readable summary with ATE/RPE translation and rotation
+- `metrics.csv` - Spreadsheet-ready with all statistics
+
+### Verification Checklist
+
+- [x] No "not found" messages for rerun_bridge
+- [x] No TF lookup warnings in 3D pointcloud mode
+- [x] No "SENSOR MISSING: depth" warnings in 3D mode
+- [x] First odom message publishes zero delta
+- [x] Trajectory timestamps are unique and monotonic
+- [x] Progress feedback shows during SLAM run
+- [x] All evaluation plots generated successfully
+- [x] Metrics include both translation AND rotation errors
+
+### Files Modified
+
+- `scripts/run_and_evaluate.sh` - Progress monitoring, output formatting, warning suppression
+- `scripts/evaluate_slam.py` - Complete rewrite with all enhancements
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py` - Trajectory timestamp fix
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/tb3_odom_bridge.py` - Zero delta first pose
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py` - Skip depth sensor in 3D mode
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/processing/sensor_io.py` - Skip depth subscription in 3D mode
+
+---
+
 ## 2026-01-20: Major Package Restructure
 
 **Type:** Major refactor with breaking changes
@@ -1028,3 +1118,130 @@ pytest fl_ws/src/fl_slam_poc/test/test_pointcloud_3d.py -v
 # Integration test
 ./scripts/test-3d-integration.sh
 ```
+
+---
+
+## 2026-01-20 - Critical Backend/Frontend Wiring Fixes for M3DGR Rosbag
+
+### Issue Summary
+Backend was falling back to dead reckoning (SLAM not active) when testing with M3DGR rosbag data. Root cause: multiple initialization and configuration issues preventing frontend from publishing loop factors to backend.
+
+### Critical Fixes
+
+**1. Camera Intrinsics Not Set (CRITICAL)**
+- **Problem**: Launch file had camera intrinsics set to 0.0, frontend requires ALL four values > 0 to enable RGB-D evidence
+- **Impact**: Frontend silently disabled RGB-D evidence publishing (no warning visible in early logs)
+- **Fix**: Set M3DGR RealSense D435i intrinsics in `poc_m3dgr_rosbag.launch.py`:
+  - `camera_fx: 383.0`, `camera_fy: 383.0`, `camera_cx: 320.0`, `camera_cy: 240.0`
+- **Files**: `launch/poc_m3dgr_rosbag.launch.py`
+
+**2. Odom Bridge Initialization Delay**
+- **Problem**: Odom bridge dropped first message, creating initialization delay causing frontend to drop early scans
+- **Impact**: Frontend waited for odom before processing scans, but bridge needed 2 messages to start publishing deltas
+- **Fix**: Publish zero-motion delta on first message to kickstart backend immediately
+- **Files**: `utility_nodes/tb3_odom_bridge.py`
+
+**3. QoS Depth Mismatch**
+- **Problem**: Odom bridge published with depth=100, backend subscribed with depth=10
+- **Impact**: Potential message loss during startup under high load
+- **Fix**: Increased backend subscription depth to 100 to match publisher
+- **Files**: `backend/backend_node.py`
+
+**4. Insufficient Diagnostic Logging**
+- **Problem**: Silent failures made it difficult to diagnose initialization issues
+- **Impact**: Spent time guessing root causes instead of reading clear error messages
+- **Fix**: Added comprehensive startup and first-message logging:
+  - Frontend: Camera intrinsics validation with warnings
+  - Frontend: First scan/pointcloud/odom received logs
+  - Backend: First odom messages logged
+  - SensorIO: TF lookup failures with CRITICAL warnings
+  - Both nodes: Startup banners showing configuration
+- **Files**: `frontend/frontend_node.py`, `backend/backend_node.py`, `frontend/processing/sensor_io.py`
+
+**5. TF Validation for Rosbag Compatibility**
+- **Problem**: Frame validation could fail during rosbag playback due to timing
+- **Impact**: Points couldn't be transformed from sensor frame to base frame
+- **Fix**: 
+  - Disable frame validation by default in odom bridge for rosbag
+  - Use "both" QoS (RELIABLE + BEST_EFFORT) to handle rosbag variations
+  - Added CRITICAL logging when TF lookups fail for scan/pointcloud frames
+  - Added frame identity check (no transform needed if frames match)
+- **Files**: `launch/poc_m3dgr_rosbag.launch.py`, `frontend/processing/sensor_io.py`
+
+### Enhanced Diagnostics
+
+**Frontend Startup Logging:**
+```
+FL-SLAM Frontend initialized
+Mode: 3D PointCloud / 2D LaserScan + RGB-D
+Birth intensity: 30.0
+Using GPU: False/True
+Camera intrinsics: fx=383.0, fy=383.0, cx=320.0, cy=240.0
+Waiting for sensor data to start processing...
+```
+
+**Backend Startup Logging:**
+```
+FL-SLAM Backend starting
+Subscriptions:
+  Delta odom:    /sim/odom (MUST come from tb3_odom_bridge)
+  Loop factors:  /sim/loop_factor (from frontend)
+  Anchors:       /sim/anchor_create (from frontend)
+  RGB-D evidence: /sim/rgbd_evidence
+Status monitoring: Will report DEAD_RECKONING if no loop factors
+```
+
+**First-Message Logging:**
+- Odom bridge: "initialized at pose (...), published zero-motion delta to kickstart backend"
+- SensorIO: "First scan received, frame_id=..., ranges=360, last_pose=SET/NONE"
+- Frontend: "Scan #1 processed: r_new_eff=..., should_birth=..., points=OK/NONE, anchors=0"
+
+**Error Logging:**
+- TF failures: "CRITICAL: Cannot transform scan from 'X' to 'Y'. TF lookup failed! Without TF, scan points cannot be used for anchors/loops."
+- No camera intrinsics: "NO camera intrinsics - RGB-D evidence DISABLED until set"
+- No points: "NO POINTS available! Check TF transforms. Anchors CANNOT be created without points."
+
+### Files Modified
+
+- `launch/poc_m3dgr_rosbag.launch.py` - Camera intrinsics, odom bridge QoS, frame validation, odom topic fix, birth intensity reduction
+- `backend/backend_node.py` - QoS depth, startup logging, first-odom logging, debug loop processing
+- `utility_nodes/tb3_odom_bridge.py` - **MAJOR**: Publish first absolute pose as delta, eliminate startup delay
+- `frontend/frontend_node.py` - **MAJOR**: Sensor data buffering, removed artificial odometry dependency, startup banner, camera intrinsics validation
+- `frontend/processing/sensor_io.py` - First-message logging, TF failure diagnostics, camera_info logging
+
+### Design Improvements
+
+**Eliminated Artificial Startup Friction:**
+- **Before**: Frontend dropped sensor data until odometry arrived, odom bridge skipped first message
+- **After**: Sensor data buffered until odometry available, odom bridge publishes first pose immediately
+- **Impact**: System starts processing data immediately when either sensors OR odometry arrive
+
+**Leveraged Order-Invariant Backend Math:**
+- **Before**: Strict sensor→odometry→processing dependency
+- **After**: Asynchronous sensor/odometry processing with timestamp alignment
+- **Impact**: Better utilization of FL-SLAM's information-geometric foundations
+
+**Removed Hardcoded Dependencies:**
+- **Before**: `if self.last_pose is None: return` (hard drop)
+- **After**: Buffer and process when odometry becomes available
+- **Impact**: More robust to timing variations in rosbag playback
+
+### Testing
+
+**Recommended test sequence:**
+1. Build workspace: `cd fl_ws && colcon build --symlink-install`
+2. Run integration test: `./scripts/test-integration.sh`
+3. Check for:
+   - Frontend startup shows camera intrinsics set
+   - Backend receives odom immediately
+   - Frontend processes scans and creates anchors
+   - Backend status shows SLAM_ACTIVE (not DEAD_RECKONING)
+   - Loop factors published and received
+
+### Impact
+
+✅ Backend should now properly receive and integrate loop factors
+✅ RGB-D evidence now enabled for M3DGR dataset
+✅ Clear diagnostic logging for troubleshooting initialization
+✅ Faster startup due to zero-motion kickstart
+✅ More robust to QoS and timing variations in rosbags

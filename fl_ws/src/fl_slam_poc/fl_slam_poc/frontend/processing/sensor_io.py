@@ -24,7 +24,7 @@ try:
 except ImportError:
     CvBridge = None
 
-from fl_slam_poc.common.transforms.se3 import quat_to_rotmat
+from fl_slam_poc.common.transforms.se3 import quat_to_rotmat, se3_compose, rotmat_to_rotvec, rotvec_to_rotmat
 
 
 def pointcloud2_to_array(msg: PointCloud2) -> np.ndarray:
@@ -177,7 +177,9 @@ class SensorIO:
                 self.node.create_subscription(
                     Image, self.config["camera_topic"], self._on_image, qos)
             
-            if self.config.get("enable_depth", False):
+            # Only subscribe to depth images if NOT in 3D pointcloud mode
+            # (in 3D mode we use PointCloud2 directly, not depth images)
+            if self.config.get("enable_depth", False) and not self.use_3d_pointcloud:
                 self.node.create_subscription(
                     Image, self.config["depth_topic"], self._on_depth, qos)
             
@@ -304,11 +306,25 @@ class SensorIO:
             frame_id = msg.header.frame_id or self.config.get("camera_frame", "camera_link")
             
             # Transform to base_frame if needed
-            if frame_id != self.config.get("base_frame", "base_link"):
-                transform = self._lookup_transform(self.config["base_frame"], frame_id, msg.header.stamp)
+            base_frame = self.config.get("base_frame", "base_link")
+            if frame_id != base_frame:
+                transform = self._lookup_transform(base_frame, frame_id, msg.header.stamp)
                 if transform is not None:
                     points = self._transform_points(points, transform)
-                    frame_id = self.config.get("base_frame", "base_link")
+                    frame_id = base_frame
+                else:
+                    if not hasattr(self, '_logged_pc_tf_fail'):
+                        self._logged_pc_tf_fail = True
+                        self.node.get_logger().error(
+                            f"CRITICAL: Cannot transform pointcloud from '{frame_id}' to '{base_frame}'. "
+                            f"TF lookup failed! Points will be in wrong frame, anchors/loops may fail."
+                        )
+            else:
+                if not hasattr(self, '_logged_pc_no_tf'):
+                    self._logged_pc_no_tf = True
+                    self.node.get_logger().info(
+                        f"PointCloud frame '{frame_id}' matches base_frame, no TF transform needed"
+                    )
             
             # Buffer management
             buffer_len = self.config.get("feature_buffer_len", 10)
@@ -337,16 +353,22 @@ class SensorIO:
             )
         
         if self.config.get("odom_is_delta", False):
-            # Accumulate deltas (for sim_world_node delta odom)
+            # Accumulate deltas using proper SE(3) composition
             pos = msg.pose.pose.position
             ori = msg.pose.pose.orientation
-            delta = np.array([pos.x, pos.y, pos.z, ori.x, ori.y, ori.z], dtype=float)
+            
+            # CRITICAL FIX: Convert quaternion to rotation vector (not just qx,qy,qz!)
+            # The odometry message contains a quaternion, not a rotation vector
+            R_delta = quat_to_rotmat(ori.x, ori.y, ori.z, ori.w)
+            rotvec_delta = rotmat_to_rotvec(R_delta)
+            delta = np.array([pos.x, pos.y, pos.z, rotvec_delta[0], rotvec_delta[1], rotvec_delta[2]], dtype=float)
             
             if self.last_pose is None:
                 self.last_pose = np.zeros(6, dtype=float)
-            self.last_pose[:3] += delta[:3]
-            # Simplified rotation accumulation (proper SE(3) composition in operators)
-            self.last_pose[3:6] += delta[3:6]
+            
+            # CRITICAL FIX: Use proper SE(3) composition instead of addition
+            # pose_new = pose_old ∘ delta (compose in the body frame)
+            self.last_pose = se3_compose(self.last_pose, delta)
             pose = self.last_pose.copy()
         else:
             # Absolute pose - convert quaternion to rotation vector
@@ -355,7 +377,6 @@ class SensorIO:
             
             # Use geometry.se3 for exact conversion
             R = quat_to_rotmat(ori.x, ori.y, ori.z, ori.w)
-            from fl_slam_poc.geometry.se3 import rotmat_to_rotvec
             rotvec = rotmat_to_rotvec(R)
             
             pose = np.array([pos.x, pos.y, pos.z, rotvec[0], rotvec[1], rotvec[2]], dtype=float)
@@ -432,6 +453,15 @@ class SensorIO:
         if self._is_duplicate("camera_info", msg.header.stamp, msg.header.frame_id):
             return
         self.depth_intrinsics = (msg.k[0], msg.k[4], msg.k[2], msg.k[5])  # fx, fy, cx, cy
+        
+        # Log first camera info received
+        if not hasattr(self, '_first_camera_info_logged'):
+            self._first_camera_info_logged = True
+            fx, fy, cx, cy = self.depth_intrinsics
+            self.node.get_logger().info(
+                f"SensorIO: Camera intrinsics received from CameraInfo: "
+                f"fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}"
+            )
     
     def _depth_to_points(self, depth: np.ndarray, header) -> Optional[np.ndarray]:
         """Convert depth image to 3D points in base_frame."""
@@ -486,8 +516,26 @@ class SensorIO:
         
         # Transform to base_frame
         frame_id = msg.header.frame_id or self.config.get("scan_frame", "base_link")
-        transform = self._lookup_transform(self.config["base_frame"], frame_id, msg.header.stamp)
+        base_frame = self.config["base_frame"]
+        
+        # If frames are the same, no transform needed
+        if frame_id == base_frame:
+            if not hasattr(self, '_logged_scan_no_tf'):
+                self._logged_scan_no_tf = True
+                self.node.get_logger().info(
+                    f"Scan frame '{frame_id}' matches base_frame, no TF transform needed"
+                )
+            return points_scan
+        
+        transform = self._lookup_transform(base_frame, frame_id, msg.header.stamp)
         if transform is None:
+            if not hasattr(self, '_logged_scan_tf_fail'):
+                self._logged_scan_tf_fail = True
+                self.node.get_logger().error(
+                    f"CRITICAL: Cannot transform scan from '{frame_id}' to '{base_frame}'. "
+                    f"TF lookup failed! Check that TF tree is published in rosbag or by robot. "
+                    f"Without TF, scan points cannot be used for anchors/loops."
+                )
             return None
         
         return self._transform_points(points_scan, transform)
@@ -520,19 +568,29 @@ class SensorIO:
         """Lookup TF transform as SE(3) pose."""
         try:
             from rclpy.duration import Duration
+            from rclpy.time import Time
             timeout = Duration(seconds=self.config.get("tf_timeout_sec", 0.05))
             
             query_time = self._coerce_time(stamp)
-            t = self.tf_buffer.lookup_transform(
-                target_frame, source_frame, query_time,
-                timeout=timeout)
+            try:
+                t = self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, query_time, timeout=timeout
+                )
+            except (TransformException, TypeError, ValueError) as e_first:
+                # Bag playback often contains static transforms; if a time-specific lookup
+                # fails (extrapolation), fall back to "latest available".
+                try:
+                    t = self.tf_buffer.lookup_transform(
+                        target_frame, source_frame, Time(), timeout=timeout
+                    )
+                except (TransformException, TypeError, ValueError):
+                    raise e_first
             
             trans = t.transform.translation
             rot = t.transform.rotation
             
             # Convert to rotation vector using geometry.se3
             R = quat_to_rotmat(rot.x, rot.y, rot.z, rot.w)
-            from fl_slam_poc.geometry.se3 import rotmat_to_rotvec
             rotvec = rotmat_to_rotvec(R)
             
             return np.array([trans.x, trans.y, trans.z, rotvec[0], rotvec[1], rotvec[2]], dtype=float)
@@ -551,8 +609,6 @@ class SensorIO:
     
     def _transform_points(self, points: np.ndarray, transform: np.ndarray) -> np.ndarray:
         """Apply SE(3) transform to points."""
-        from fl_slam_poc.geometry.se3 import rotvec_to_rotmat
-        
         R = rotvec_to_rotmat(transform[3:6])
         t = transform[:3]
         
