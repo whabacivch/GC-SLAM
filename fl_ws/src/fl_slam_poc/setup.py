@@ -38,11 +38,6 @@ setup(
             "tb3_odom_bridge = fl_slam_poc.utility_nodes.tb3_odom_bridge:main",
             "image_decompress = fl_slam_poc.utility_nodes.image_decompress:main",
             "livox_converter = fl_slam_poc.utility_nodes.livox_converter:main",
-            # Legacy aliases (backward compatibility)
-            "fl_backend_node = fl_slam_poc.backend.backend_node:main",
-            "tb3_odom_bridge_node = fl_slam_poc.utility_nodes.tb3_odom_bridge:main",
-            "image_decompress_node = fl_slam_poc.utility_nodes.image_decompress:main",
-            "livox_converter_node = fl_slam_poc.utility_nodes.livox_converter:main",
         ],
     },
 )

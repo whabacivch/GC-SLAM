@@ -173,6 +173,7 @@ def hellinger_squared_gaussian(
 # Main IMU Projection Kernel
 # =============================================================================
 
+@jax.jit
 def imu_batched_projection_kernel(
     anchor_mus: jnp.ndarray,
     anchor_covs: jnp.ndarray,
@@ -184,6 +185,7 @@ def imu_batched_projection_kernel(
     R_nom: jnp.ndarray,
     dt: float,
     gravity: jnp.ndarray,
+    bias_ref: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, dict]:
     """
     Batched IMU projection kernel with Hellinger-tilted likelihood.
@@ -217,6 +219,7 @@ def imu_batched_projection_kernel(
         R_nom: Nominal residual covariance for Hellinger (9, 9)
         dt: Integration time
         gravity: Gravity vector (3,)
+        bias_ref: Bias reference used for anchoring (6,)
 
     Returns:
         mu_new: Updated state mean (15,)
@@ -226,6 +229,7 @@ def imu_batched_projection_kernel(
     M = anchor_mus.shape[0]
     state_dim = 15
     joint_dim = 2 * state_dim  # 30D joint: [anchor, current]
+    _ = bias_ref  # Reserved for future bias-sensitive residuals
 
     # -------------------------------------------------------------------------
     # Sigma-support for block-diagonal joint prior (batched across anchors)
@@ -292,7 +296,6 @@ def imu_batched_projection_kernel(
     r_bar = jnp.einsum("s,msd->md", W, residuals)
     r_centered = residuals - r_bar[:, None, :]
     S = jnp.einsum("s,msi,msj->mij", W, r_centered, r_centered)
-    S = S + R_imu[None, :, :]
     S = 0.5 * (S + jnp.swapaxes(S, 1, 2)) + jnp.eye(9, dtype=S.dtype)[None, :, :] * COV_REGULARIZATION
 
     h_sq = jax.vmap(lambda rb, Si: hellinger_squared_gaussian(rb, Si, jnp.zeros(9, dtype=rb.dtype), R_nom))(r_bar, S)  # (M,)

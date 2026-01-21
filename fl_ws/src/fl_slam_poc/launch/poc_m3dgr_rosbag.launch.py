@@ -52,6 +52,9 @@ def generate_launch_description():
     imu_accel_random_walk = LaunchConfiguration("imu_accel_random_walk")
     keyframe_translation_threshold = LaunchConfiguration("keyframe_translation_threshold")
     keyframe_rotation_threshold = LaunchConfiguration("keyframe_rotation_threshold")
+    gravity_x = LaunchConfiguration("gravity_x")
+    gravity_y = LaunchConfiguration("gravity_y")
+    gravity_z = LaunchConfiguration("gravity_z")
 
     return LaunchDescription(
         [
@@ -115,6 +118,10 @@ def generate_launch_description():
             # Motion-based keyframe thresholds
             DeclareLaunchArgument("keyframe_translation_threshold", default_value="0.5"),
             DeclareLaunchArgument("keyframe_rotation_threshold", default_value="0.26"),
+            # Gravity vector (world frame)
+            DeclareLaunchArgument("gravity_x", default_value="0.0"),
+            DeclareLaunchArgument("gravity_y", default_value="0.0"),
+            DeclareLaunchArgument("gravity_z", default_value="-9.81"),
 
             # Livox converter node
             Node(
@@ -197,6 +204,7 @@ def generate_launch_description():
                         "imu_accel_random_walk": imu_accel_random_walk,
                         "keyframe_translation_threshold": keyframe_translation_threshold,
                         "keyframe_rotation_threshold": keyframe_rotation_threshold,
+                        "gravity": [gravity_x, gravity_y, gravity_z],
 
                         # Reduced birth intensity to prevent too many anchors diluting responsibilities
                         "birth_intensity": 5.0,
@@ -243,6 +251,7 @@ def generate_launch_description():
                         "enable_imu_fusion": enable_imu,
                         "imu_gyro_random_walk": imu_gyro_random_walk,
                         "imu_accel_random_walk": imu_accel_random_walk,
+                        "gravity": [gravity_x, gravity_y, gravity_z],
                     }
                 ],
                 condition=IfCondition(enable_backend),

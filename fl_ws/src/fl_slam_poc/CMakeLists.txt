@@ -22,13 +22,10 @@ install(DIRECTORY fl_slam_poc/
 
 install(PROGRAMS
   scripts/backend_node
-  scripts/fl_backend_node
   scripts/frontend_node
   scripts/image_decompress
-  scripts/image_decompress_node
   scripts/livox_converter
   scripts/tb3_odom_bridge
-  scripts/tb3_odom_bridge_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

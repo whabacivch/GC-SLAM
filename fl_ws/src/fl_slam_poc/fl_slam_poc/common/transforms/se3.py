@@ -113,13 +113,27 @@ def rotmat_to_rotvec(R: np.ndarray) -> np.ndarray:
         return np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], dtype=float) / 2.0
     
     if abs(theta - math.pi) < SINGULARITY_EPSILON:
-        # Near π: use eigenvalue decomposition for stability
-        eigvals, eigvecs = np.linalg.eig(R)
-        # Find eigenvector with eigenvalue ≈ 1 (rotation axis)
-        idx = np.argmin(np.abs(eigvals - 1.0))
-        axis = np.real(eigvecs[:, idx])
-        axis = axis / np.linalg.norm(axis)
-        return axis * theta
+        # Near π: use deterministic axis extraction from diagonal
+        axis = np.zeros(3, dtype=float)
+        axis[0] = math.sqrt(max((R[0, 0] + 1.0) * 0.5, 0.0))
+        axis[1] = math.sqrt(max((R[1, 1] + 1.0) * 0.5, 0.0))
+        axis[2] = math.sqrt(max((R[2, 2] + 1.0) * 0.5, 0.0))
+
+        # Resolve sign ambiguity using off-diagonal elements
+        if axis[0] > 1e-6:
+            axis[1] = math.copysign(axis[1], R[0, 1])
+            axis[2] = math.copysign(axis[2], R[0, 2])
+        elif axis[1] > 1e-6:
+            axis[0] = math.copysign(axis[0], R[0, 1])
+            axis[2] = math.copysign(axis[2], R[1, 2])
+        else:
+            axis[0] = math.copysign(axis[0], R[0, 2])
+            axis[1] = math.copysign(axis[1], R[1, 2])
+
+        axis_norm = np.linalg.norm(axis)
+        if axis_norm < 1e-12:
+            return np.zeros(3, dtype=float)
+        return axis / axis_norm * theta
     
     # General case: axis from skew-symmetric part
     axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], dtype=float)
@@ -231,6 +245,13 @@ def quat_to_rotvec(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     axis = np.array([qx/v_norm, qy/v_norm, qz/v_norm], dtype=float)
     
     return angle * axis
+
+
+def se3_relative(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Compute group-consistent relative transform: a ⊖ b = b^{-1} ∘ a.
+    """
+    return se3_compose(se3_inverse(b), a)
 
 
 # =============================================================================

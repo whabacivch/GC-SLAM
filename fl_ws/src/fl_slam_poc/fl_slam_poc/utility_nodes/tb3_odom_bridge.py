@@ -32,9 +32,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from std_msgs.msg import String
 
 from fl_slam_poc.common.transforms.se3 import (
-    quat_to_rotmat,
+    quat_to_rotvec,
     rotmat_to_quat,
-    rotmat_to_rotvec,
     rotvec_to_rotmat,
     se3_compose,
     se3_inverse,
@@ -166,8 +165,7 @@ class Tb3OdomBridge(Node):
         qy = float(pose.orientation.y)
         qz = float(pose.orientation.z)
         qw = float(pose.orientation.w)
-        R = quat_to_rotmat(qx, qy, qz, qw)
-        rotvec = rotmat_to_rotvec(R)
+        rotvec = quat_to_rotvec(qx, qy, qz, qw)
         return np.array([
             float(pose.position.x),
             float(pose.position.y),

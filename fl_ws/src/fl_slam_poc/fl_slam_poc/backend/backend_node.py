@@ -50,9 +50,8 @@ from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from fl_slam_poc.common.transforms.se3 import (
-    quat_to_rotmat,
+    quat_to_rotvec,
     rotmat_to_quat,
-    rotmat_to_rotvec,
     rotvec_to_rotmat,
     se3_compose,
     se3_inverse,
@@ -216,6 +215,7 @@ class FLBackend(Node):
         self.declare_parameter("enable_imu_fusion", True)
         self.declare_parameter("imu_gyro_random_walk", constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
         self.declare_parameter("imu_accel_random_walk", constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
+        self.declare_parameter("gravity", list(constants.GRAVITY_DEFAULT))
 
     def _init_from_params(self):
         self.odom_frame = str(self.get_parameter("odom_frame").value)
@@ -229,7 +229,8 @@ class FLBackend(Node):
         self.enable_imu_fusion = bool(enable_imu_param.value if enable_imu_param.value is not None else True)
         self.imu_gyro_random_walk = float(gyro_walk_param.value if gyro_walk_param.value is not None else constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
         self.imu_accel_random_walk = float(accel_walk_param.value if accel_walk_param.value is not None else constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
-        self.gravity = np.array(constants.GRAVITY_DEFAULT, dtype=float)
+        gravity_param = self.get_parameter("gravity").value
+        self.gravity = np.array(gravity_param, dtype=float)
 
         # QoS profile for subscriptions (MUST match frontend RELIABLE QoS)
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -328,7 +329,7 @@ class FLBackend(Node):
         self.timestamp_model = TimeAlignmentModel(align_sigma, align_strength, align_floor)
 
         # Anchor storage: anchor_id -> (mu, cov, L, h, points)
-        # LEGACY: Kept for backward compatibility, new code should use sparse_anchors
+        # Primary anchor storage for pose estimation (used by odom, loop, IMU factors)
         self.anchors: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         
         # Dual-layer module atlas (NEW)
@@ -344,6 +345,8 @@ class FLBackend(Node):
         # Stores loop factors that arrive before their anchor is created
         self.pending_loop_factors: dict[int, list] = {}
         self.max_pending_loops_per_anchor = 100  # Prevent unbounded growth
+        self.pending_imu_factors: dict[int, list] = {}
+        self.max_pending_imu_per_anchor = 100  # Prevent unbounded growth
         
         # State buffer for timestamp alignment
         self.state_buffer = deque(maxlen=500)
@@ -402,6 +405,9 @@ class FLBackend(Node):
         self.get_logger().info("  Check /cdwm/backend_status for real-time status")
         self.get_logger().info("=" * 60)
 
+        if self.enable_imu_fusion:
+            self._warmup_imu_kernel()
+
     def on_odom(self, msg: Odometry):
         """Process delta odometry with adjoint covariance transport."""
         # Duplicate detection: skip if we've already processed this exact message
@@ -431,8 +437,7 @@ class FLBackend(Node):
         qy = float(msg.pose.pose.orientation.y)
         qz = float(msg.pose.pose.orientation.z)
         qw = float(msg.pose.pose.orientation.w)
-        R_delta = quat_to_rotmat(qx, qy, qz, qw)
-        rotvec_delta = rotmat_to_rotvec(R_delta)
+        rotvec_delta = quat_to_rotvec(qx, qy, qz, qw)
         
         delta_pose = np.array([dx, dy, dz, rotvec_delta[0], rotvec_delta[1], rotvec_delta[2]], dtype=float)
 
@@ -563,6 +568,8 @@ class FLBackend(Node):
         
         L_anchor, h_anchor = make_evidence(mu, cov_scaled)
         self.anchors[anchor_id] = (mu.copy(), cov_scaled.copy(), L_anchor.copy(), h_anchor.copy(), points.copy())
+        # Map keyframe id to anchor id (keyframe ids align to anchor ids)
+        self.keyframe_to_anchor[anchor_id] = anchor_id
         self._publish_anchor_marker(anchor_id, mu)
         
         # Publish updated map
@@ -598,6 +605,15 @@ class FLBackend(Node):
             )
             for pending_msg in pending:
                 self.on_loop(pending_msg)
+
+        # Process any pending IMU factors waiting on this anchor
+        if anchor_id in self.pending_imu_factors:
+            pending_imu = self.pending_imu_factors.pop(anchor_id)
+            self.get_logger().info(
+                f"Processing {len(pending_imu)} pending IMU factors for anchor {anchor_id}"
+            )
+            for imu_msg in pending_imu:
+                self.on_imu_factor(imu_msg)
 
     def on_rgbd_evidence(self, msg: String):
         """
@@ -700,8 +716,7 @@ class FLBackend(Node):
         qy = float(msg.rel_pose.orientation.y)
         qz = float(msg.rel_pose.orientation.z)
         qw = float(msg.rel_pose.orientation.w)
-        R_rel = quat_to_rotmat(qx, qy, qz, qw)
-        rotvec_rel = rotmat_to_rotvec(R_rel)
+        rotvec_rel = quat_to_rotvec(qx, qy, qz, qw)
         rel = np.array([rx, ry, rz, rotvec_rel[0], rotvec_rel[1], rotvec_rel[2]], dtype=float)
 
         cov_rel = np.array(msg.covariance, dtype=float).reshape(6, 6)
@@ -778,10 +793,28 @@ class FLBackend(Node):
 
         # Update anchor belief (preserve points)
         anchor_points = anchor_data[4]
-        L_anchor_new, h_anchor_new = make_evidence(mu_anchor_new, cov_anchor_new)
-        self.anchors[anchor_id] = (
-            mu_anchor_new, cov_anchor_new, L_anchor_new.copy(), h_anchor_new.reshape(-1).copy(), anchor_points
-        )
+        
+        # Embed 6D pose update back into 15D anchor state (preserve velocity and biases)
+        if self.state_dim == constants.STATE_DIM_FULL:
+            mu_anchor_full = mu_anchor.copy()  # Start with full 15D anchor
+            mu_anchor_full[:6] = mu_anchor_new  # Update pose part
+            
+            cov_anchor_full = cov_anchor.copy()  # Start with full 15D covariance
+            cov_anchor_full[:6, :6] = cov_anchor_new  # Update pose block
+            # Cross-terms: assume pose-velocity/bias correlation is preserved (or zero)
+            cov_anchor_full[:6, 6:] = 0.0
+            cov_anchor_full[6:, :6] = 0.0
+            
+            L_anchor_new, h_anchor_new = make_evidence(mu_anchor_full, cov_anchor_full)
+            self.anchors[anchor_id] = (
+                mu_anchor_full.copy(), cov_anchor_full.copy(), L_anchor_new.copy(), h_anchor_new.reshape(-1).copy(), anchor_points
+            )
+        else:
+            # 6D state: direct update
+            L_anchor_new, h_anchor_new = make_evidence(mu_anchor_new, cov_anchor_new)
+            self.anchors[anchor_id] = (
+                mu_anchor_new, cov_anchor_new, L_anchor_new.copy(), h_anchor_new.reshape(-1).copy(), anchor_points
+            )
 
         mu_updated, cov_updated = mean_cov(self.L, self.h)
         cov_current = cov_full  # For logging below
@@ -895,9 +928,25 @@ class FLBackend(Node):
         # =====================================================================
         # Validation
         # =====================================================================
-        if len(self.anchors) == 0:
+        if len(self.anchors) == 0 or keyframe_i not in self.anchors:
+            if keyframe_i not in self.pending_imu_factors:
+                self.pending_imu_factors[keyframe_i] = []
+            if len(self.pending_imu_factors[keyframe_i]) < self.max_pending_imu_per_anchor:
+                self.pending_imu_factors[keyframe_i].append(msg)
             if self.imu_factor_count <= 3:
-                self.get_logger().debug("IMU factor ignored: no anchors yet")
+                self.get_logger().info(
+                    f"IMU factor buffered: kf_{keyframe_i} (anchors={len(self.anchors)})"
+                )
+            self._publish_report(OpReport(
+                name="IMUFactorBuffered",
+                exact=True,
+                family_in="IMU",
+                family_out="Gaussian",
+                closed_form=True,
+                domain_projection=False,
+                metrics={"keyframe_i": keyframe_i, "buffered": True},
+                notes="IMU factor arrived before anchor creation - buffered for processing.",
+            ))
             return
         
         if self.state_dim != constants.STATE_DIM_FULL:
@@ -1017,6 +1066,7 @@ class FLBackend(Node):
             R_nom=jnp.array(R_nom),
             dt=dt,
             gravity=jnp.array(self.gravity),
+            bias_ref=jnp.array(bias_ref),
         )
         
         # Convert back to NumPy
@@ -1102,8 +1152,9 @@ class FLBackend(Node):
         else:
             mode = "SLAM_STALE"
         
-        # Count pending loop factors
+        # Count pending factors
         total_pending = sum(len(v) for v in self.pending_loop_factors.values())
+        total_pending_imu = sum(len(v) for v in self.pending_imu_factors.values())
         
         status = {
             "timestamp": time.time(),
@@ -1117,6 +1168,7 @@ class FLBackend(Node):
             "anchor_count": self.anchor_count,
             "anchors_stored": len(self.anchors),
             "pending_loop_factors": total_pending,
+            "pending_imu_factors": total_pending_imu,
             "last_loop_age_sec": (time.time() - self.last_loop_time) if self.last_loop_time else None,
             "last_imu_age_sec": (time.time() - self.last_imu_time) if self.last_imu_time else None,
             # Dual-layer statistics
@@ -1174,6 +1226,39 @@ class FLBackend(Node):
         out.pose.pose.orientation.w = qw
         out.pose.covariance = cov_pose.reshape(-1).tolist()  # Always 6x6 = 36 elements
         self.pub_state.publish(out)
+
+    def _warmup_imu_kernel(self):
+        """Warm up JAX IMU kernel compilation to avoid first-call latency."""
+        try:
+            import jax.numpy as jnp
+            from fl_slam_poc.backend.fusion.imu_jax_kernel import imu_batched_projection_kernel
+
+            anchor_mus = jnp.zeros((1, 15), dtype=jnp.float64)
+            anchor_covs = jnp.eye(15, dtype=jnp.float64)[None, :, :] * 1e-3
+            current_mu = jnp.zeros((15,), dtype=jnp.float64)
+            current_cov = jnp.eye(15, dtype=jnp.float64) * 1e-3
+            routing_weights = jnp.array([1.0], dtype=jnp.float64)
+            z_imu = jnp.zeros((9,), dtype=jnp.float64)
+            R_imu = jnp.eye(9, dtype=jnp.float64) * 1e-3
+            R_nom = R_imu.copy()
+            bias_ref = jnp.zeros((6,), dtype=jnp.float64)
+
+            imu_batched_projection_kernel(
+                anchor_mus=anchor_mus,
+                anchor_covs=anchor_covs,
+                current_mu=current_mu,
+                current_cov=current_cov,
+                routing_weights=routing_weights,
+                z_imu=z_imu,
+                R_imu=R_imu,
+                R_nom=R_nom,
+                dt=1e-3,
+                gravity=jnp.array(self.gravity, dtype=jnp.float64),
+                bias_ref=bias_ref,
+            )
+            self.get_logger().info("IMU kernel warmup complete.")
+        except Exception as exc:
+            self.get_logger().warn(f"IMU kernel warmup failed: {exc}")
 
         # Publish TF: odom -> base_link using the same pose we publish in /cdwm/state
         tf_msg = TransformStamped()

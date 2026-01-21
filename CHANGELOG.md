@@ -39,6 +39,33 @@ This implementation follows the "maximal by-construction" plan with:
   - Updated `on_odom` for 15D compatibility (embeds 6D delta into 15D)
   - Updated `on_loop` for 15D compatibility (extracts 6D pose, updates, re-embeds)
 
+## 2026-01-21: IMU/Rotation Audit Fixes (Frontend Wiring + Frame Stability)
+
+### Summary
+
+Restored IMU factor publishing in the frontend, buffered IMU factors in the backend for race-free processing, and hardened rotation handling near π to reduce frame convention errors.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
+  - Added IMU parameters, IMU preintegration setup, and `/sim/imu_factor` publisher.
+  - Publish IMU factors between anchor keyframes with OpReport diagnostics and buffer clearing.
+  - Added IMU status monitoring and gravity parameter passthrough.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
+  - Buffer IMU factors until anchor is available to avoid drops.
+  - Use quaternion → rotvec conversion directly for odom and loop factors.
+  - Added gravity parameter in backend config.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/imu_jax_kernel.py`
+  - JIT-compiled kernel and restored plan-correct residual covariance for Hellinger tilt.
+  - Added bias reference parameter plumbing.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/transforms/se3.py`
+  - Added `se3_relative(a, b)` (group-consistent relative transform).
+  - Stabilized `rotmat_to_rotvec` near π with deterministic axis extraction.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/tb3_odom_bridge.py`
+  - Use quaternion → rotvec conversion directly to reduce antipodal flips.
+- `fl_ws/src/fl_slam_poc/launch/poc_m3dgr_rosbag.launch.py`
+  - Added gravity vector parameters for frontend/backend.
+
 ## 2026-01-21: Compliance Fixes - Remove Schur Complement + Enforce Batched IMU Fusion
 
 ### Summary

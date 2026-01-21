@@ -239,7 +239,7 @@ IMU_ACCEL_RANDOM_WALK_DEFAULT = 1.0e-4      # m/s^3/sqrt(Hz)
 # Default IMU topic (M3DGR dataset uses /camera/imu)
 IMU_TOPIC_DEFAULT = "/camera/imu"
 
-# Gravity vector (world frame, z-up convention)
+# Gravity vector (world frame, z-down by default; override via ROS params if needed)
 GRAVITY_DEFAULT = (0.0, 0.0, -9.81)
 
 # =============================================================================
