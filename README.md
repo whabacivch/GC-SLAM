@@ -4,7 +4,23 @@
 
 ---
 
-## Quick Start
+## MVP Status
+
+The current **MVP (Minimum Viable Product)** focuses on the **M3DGR Dynamic01 rosbag** evaluation pipeline. This is the smallest reproducible case for validating the FL-SLAM algorithm.
+
+**MVP Components:**
+- M3DGR rosbag processing (Livox LiDAR + RGB-D)
+- Frontend: sensor association, ICP loop detection, anchor management
+- Backend: information-geometric fusion, trajectory estimation
+- Evaluation: ATE/RPE metrics and publication-quality plots
+
+**Phase 2 (Future/Experimental):** Alternative datasets, Gazebo simulation, Dirichlet semantic SLAM, and other experimental features are kept in `phase2/` to maintain a minimal MVP surface area. See [`phase2/README.md`](phase2/README.md) for details.
+
+**Current Priorities:** See [`ROADMAP.md`](ROADMAP.md) for algorithm fixes (SE(3) drift, timestamp issues) and planned features.
+
+---
+
+## Quick Start (MVP)
 
 ### Build
 ```bash
@@ -14,34 +30,20 @@ colcon build --packages-select fl_slam_poc
 source install/setup.bash
 ```
 
-### Run (M3DGR Rosbag + Evaluation)
+### Run MVP Pipeline
 ```bash
 # Full pipeline: SLAM + metrics + plots
 bash scripts/run_and_evaluate.sh
 ```
 
-### Run (3D Point Cloud Mode)
-```bash
-# Download NVIDIA r2b dataset
-./scripts/download_r2b_dataset.sh
+This runs the M3DGR Dynamic01 rosbag through the complete SLAM pipeline and generates evaluation metrics/plots in `results/m3dgr_YYYYMMDD_HHMMSS/`.
 
-# Phase 2: alternative launches live under `phase2/` and are not installed by the MVP package.
-# To use them, move the corresponding launch file back under `fl_ws/src/fl_slam_poc/launch/`
-# and rebuild, or treat Phase 2 as a separate package.
+### Alternative Datasets (Phase 2)
 
-# See docs/3D_POINTCLOUD.md for full documentation
-```
-
-### Run (Gazebo / Alternative)
-```bash
-# Phase 2: see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
-```
-
-### Run (TB3 Rosbag / Alternative)
-```bash
-./scripts/download_tb3_rosbag.sh
-./scripts/test-integration.sh
-```
+For TB3 rosbags, Gazebo simulation, or 3D point cloud datasets, see:
+- [`phase2/README.md`](phase2/README.md) - How to re-enable Phase 2 features
+- [`docs/GAZEBO_INTEGRATION.md`](docs/GAZEBO_INTEGRATION.md) - Gazebo setup
+- [`docs/3D_POINTCLOUD.md`](docs/3D_POINTCLOUD.md) - 3D point cloud mode
 
 ---
 
@@ -91,25 +93,30 @@ Based on system design:
 - **Loop closures**: Detected via ICP + NIG descriptors
 - **Map consistency**: Verified via anchor point clouds
 
-See [`docs/EVALUATION.md`](docs/EVALUATION.md) for detailed guide.
+See [`docs/EVALUATION.md`](docs/EVALUATION.md) for detailed evaluation guide.
 
-See [`ROADMAP.md`](ROADMAP.md) for prioritized next steps.
+**Current Status & Next Steps:** See [`ROADMAP.md`](ROADMAP.md) for:
+- Priority 1: Algorithm fixes (SE(3) drift, timestamp monotonicity)
+- Priority 2-4: Alternative datasets, GPU acceleration, research features
 
 ---
 
 ## Documentation
 
-### Essential
+### Essential (Start Here)
+- **[ROADMAP.md](ROADMAP.md)** - Current priorities and planned work (MVP status, algorithm fixes, future features)
 - **[AGENTS.md](AGENTS.md)** - Design invariants and rules (P1-P7)
 - **[CHANGELOG.md](CHANGELOG.md)** - Project history and decisions
-- **[docs/POC_Testing_Status.md](docs/POC_Testing_Status.md)** - Current testing state
-- **[ROADMAP.md](ROADMAP.md)** - Planned work and file map
+- **[phase2/README.md](phase2/README.md)** - Phase 2 features and how to re-enable them
 
-### Operational
-- **[docs/GAZEBO_INTEGRATION.md](docs/GAZEBO_INTEGRATION.md)** - Gazebo setup and troubleshooting
+### MVP Workflow
+- **[docs/EVALUATION.md](docs/EVALUATION.md)** - Evaluation metrics and plots
 - **[docs/ROSBAG.md](docs/ROSBAG.md)** - Rosbag testing workflow
 - **[docs/TESTING.md](docs/TESTING.md)** - Testing framework and workflows
 - **[docs/INSTALLATION.md](docs/INSTALLATION.md)** - Installation and setup guide
+
+### Phase 2 / Advanced
+- **[docs/GAZEBO_INTEGRATION.md](docs/GAZEBO_INTEGRATION.md)** - Gazebo setup (Phase 2)
 - **[docs/3D_POINTCLOUD.md](docs/3D_POINTCLOUD.md)** - 3D point cloud mode with GPU acceleration
 
 ### Reference
@@ -117,7 +124,7 @@ See [`ROADMAP.md`](ROADMAP.md) for prioritized next steps.
 - **[docs/Project_Implimentation_Guide.sty](docs/Project_Implimentation_Guide.sty)** - Formal specification
 - **[docs/MAP_VISUALIZATION.md](docs/MAP_VISUALIZATION.md)** - Visualization guide
 - **[docs/ORDER_INVARIANCE.md](docs/ORDER_INVARIANCE.md)** - Order invariance documentation
-- **[docs/PROJECT_RESOURCES_SUMMARY.md](docs/PROJECT_RESOURCES_SUMMARY.md)** - Project resources overview
+- **[docs/POC_Testing_Status.md](docs/POC_Testing_Status.md)** - Current testing state
 
 ---
 
@@ -132,16 +139,26 @@ See [`ROADMAP.md`](ROADMAP.md) for prioritized next steps.
 6. **P6**: One-shot loop correction by recomposition
 7. **P7**: Local modularity
 
-### Code Structure
+### Code Structure (MVP)
 ```
 fl_slam_poc/
-├── backend/        # Backend SLAM inference node + fusion + parameter models
-├── frontend/       # Frontend orchestration + sensor I/O + loop/anchor processing
-├── common/         # Shared transforms/constants/op reports
-├── operators/      # Experimental Dirichlet operators + legacy compat exports
-├── geometry/       # Legacy SE(3) import compatibility
-├── utility_nodes/  # Utility ROS nodes (decompress, converters, odom bridge)
-└── nodes/          # Experimental ROS nodes (Dirichlet/semantics)
+├── frontend/        # Frontend orchestration + sensor I/O + loop/anchor processing
+│   ├── frontend_node.py
+│   ├── processing/  # Sensor subscriptions, RGB-D processing
+│   ├── loops/       # ICP registration, loop detection
+│   └── anchors/     # Anchor management, descriptor building
+├── backend/         # Backend SLAM inference + fusion
+│   ├── backend_node.py
+│   ├── fusion/      # Information-geometric fusion operators
+│   └── parameters/  # Adaptive parameter models (NIG, birth, etc.)
+├── common/          # Shared transforms/constants/op reports
+│   └── transforms/  # SE(3) operations
+└── utility_nodes/   # MVP utility nodes
+    ├── tb3_odom_bridge.py    # Absolute → delta odometry
+    ├── image_decompress.py   # Rosbag image decompression
+    └── livox_converter.py     # Livox → PointCloud2
+
+# Phase 2 (in phase2/): Gazebo sim, Dirichlet nodes, alternative launches
 ```
 
 ### Data Flow
@@ -150,11 +167,14 @@ Sensors → Frontend (association + ICP) → LoopFactor → Backend (fusion) →
 Ground Truth Odom → Odom Bridge (abs→delta) ──────────────────────────────┘
 ```
 
-### Key Nodes
+### Key Nodes (MVP)
 - **frontend_node**: Data association via Fisher-Rao distances, ICP registration, anchor management
-- **fl_backend_node**: Bregman barycenters, loop closure fusion, state estimation
-- **sim_world_node**: Ground truth + noise simulation (for Gazebo)
-- **tb3_odom_bridge_node**: Absolute → delta odometry conversion
+- **backend_node**: Bregman barycenters, loop closure fusion, state estimation
+- **tb3_odom_bridge**: Absolute → delta odometry conversion (generic, not TB3-specific)
+- **image_decompress**: Rosbag image decompression for RGB-D processing
+- **livox_converter**: Livox LiDAR message conversion
+
+**Phase 2 nodes** (Gazebo simulation, Dirichlet semantic SLAM) are in `phase2/`.
 
 ---
 
@@ -186,10 +206,10 @@ Ground Truth Odom → Odom Bridge (abs→delta) ──────────�
 - Python 3.10+
 - NumPy, SciPy
 
-### Optional
-- Gazebo (for simulation)
-- TurtleBot3 packages (for Gazebo demo)
-- Foxglove Bridge (for visualization)
+### Optional (Phase 2)
+- Gazebo (for simulation) - see `phase2/`
+- TurtleBot3 packages (for Gazebo demo) - see `phase2/`
+- GPU acceleration (CUDA) - for 3D point cloud processing
 
 ### Install
 ```bash
@@ -207,14 +227,18 @@ See **[docs/TESTING.md](docs/TESTING.md)** for complete testing documentation.
 bash scripts/run_and_evaluate.sh
 ```
 
-Runs the full rosbag pipeline and produces metrics/plots under `results/`.
+Runs the full M3DGR rosbag pipeline and produces metrics/plots under `results/`.
 
-### Full System Test (Alternative Integration)
+### Integration Tests
 ```bash
+# MVP integration test
 ./scripts/test-integration.sh
+
+# Alternative datasets (Phase 2)
+# See phase2/README.md for re-enabling Phase 2 features
 ```
 
-Runs an alternative integration scenario (dataset/launch dependent).
+See [`docs/TESTING.md`](docs/TESTING.md) for complete testing documentation.
 
 ---
 
@@ -250,12 +274,7 @@ Runs an alternative integration scenario (dataset/launch dependent).
 
 ---
 
-## License
-
-[To be determined]
-
----
-
 ## Contact
 
-[Project contact information]
+**William Habacivch**  
+Email: whab13@mit.edu
