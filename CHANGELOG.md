@@ -26,6 +26,11 @@ Fixes a key wiring issue where LiDAR data was being published into a camera-name
 - No ground-truth ingestion: `/vrpn_client_node/*` remains evaluation-only.
 - No heuristic gating added: association remains responsibility-based; descriptors only change the likelihood model inputs.
 
+## 2026-01-21: Roadmap Clarifications (Frames, Keyframes, No-TF)
+
+### Summary
+Documentation hardening to prevent silent frame/intrinsics assumptions: records bag-observed frames (`odom_combined`/`base_footprint`, `camera_color_optical_frame`), notes absence of `CameraInfo` and TF, and clarifies that IMU factors must be scheduled on explicit keyframes (not anchor birth).
+
 ## 2026-01-21: Evaluation Pipeline & Warning Fixes
 
 ### Summary
