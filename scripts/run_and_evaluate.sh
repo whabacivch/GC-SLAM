@@ -94,6 +94,11 @@ if [ ! -f "$EST_FILE" ]; then
     exit 1
 fi
 
+# Activate venv if it exists (for evo package)
+if [ -d "$HOME/.venv" ]; then
+  source "$HOME/.venv/bin/activate" 2>/dev/null || true
+fi
+
 # Align ground truth timestamps
 echo "Aligning ground truth timestamps..."
 python3 "$PROJECT_ROOT/scripts/align_ground_truth.py" \
