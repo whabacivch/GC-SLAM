@@ -178,8 +178,11 @@ Once you have Newer College `01_short_experiment`:
 # 3D Mode (PointCloud2)
 POINTCLOUD_TOPIC=/os1_cloud_node/points \
 ODOM_TOPIC=/integrated/odom \
-ros2 launch fl_slam_poc poc_3d_rosbag.launch.py \
-  play_bag:=true
+## Phase 2 note
+Alternative launch files are stored under `phase2/` and are not installed by the MVP package by default.
+See: `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
+
+ros2 launch fl_slam_poc poc_3d_rosbag.launch.py play_bag:=true
 
 # Or create a custom launch config
 ```
@@ -220,4 +223,4 @@ gdown --folder https://drive.google.com/drive/folders/[FOLDER_ID]
 3. Configure `poc_3d_rosbag.launch.py` with correct topic names:
    - `pointcloud_topic=/livox/mid360/lidar`
    - `odom_topic=/odom`
-4. Run: `ros2 launch fl_slam_poc poc_3d_rosbag.launch.py play_bag:=true`
+4. Run: `ros2 launch fl_slam_poc poc_3d_rosbag.launch.py play_bag:=true` (Phase 2)

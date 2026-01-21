@@ -77,19 +77,15 @@ Set these parameters in your launch file:
 ### 3D Rosbag Playback
 
 ```bash
-ros2 launch fl_slam_poc poc_3d_rosbag.launch.py \
-    bag:=/path/to/bag \
-    play_bag:=true
+# Phase 2 note: this launch file lives under `phase2/` and is not installed by the MVP package by default.
+# See: `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
 ```
 
 ### Enable 3D in Existing Launch
 
 ```bash
-ros2 launch fl_slam_poc poc_tb3_rosbag.launch.py \
-    use_3d_pointcloud:=true \
-    use_gpu:=true \
-    bag:=/path/to/bag \
-    play_bag:=true
+# Phase 2 note: this launch file lives under `phase2/` and is not installed by the MVP package by default.
+# See: `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
 ```
 
 ## Compatible Datasets
@@ -103,9 +99,7 @@ The ROS2 Benchmark dataset contains RealSense D455 data with point clouds:
 ./scripts/download_r2b_dataset.sh
 
 # Test with FL-SLAM
-ros2 launch fl_slam_poc poc_3d_rosbag.launch.py \
-    bag:=rosbags/r2b_storage \
-    play_bag:=true
+# Phase 2 note: see `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
 ```
 
 ### Custom Rosbags
@@ -249,10 +243,8 @@ pytest src/fl_slam_poc/test/test_pointcloud_3d.py -v
 # Download test data
 ./scripts/download_r2b_dataset.sh
 
-# Run 3D rosbag launch (adjust bag path as needed)
-ros2 launch fl_slam_poc poc_3d_rosbag.launch.py \
-  bag:=rosbags/r2b_storage \
-  play_bag:=true
+# Phase 2 note: the 3D alternative launch file lives under `phase2/` and is not installed by the MVP package.
+# See: `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
 ```
 
 ## Troubleshooting

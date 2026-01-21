@@ -12,9 +12,6 @@ setup(
         (
             "share/" + package_name + "/launch",
             [
-                "launch/poc_3d_rosbag.launch.py",
-                "launch/poc_tb3.launch.py",
-                "launch/poc_tb3_rosbag.launch.py",
                 "launch/poc_m3dgr_rosbag.launch.py",
             ],
         ),
@@ -38,13 +35,11 @@ setup(
             "frontend_node = fl_slam_poc.frontend.frontend_node:main",
             "backend_node = fl_slam_poc.backend.backend_node:main",
             # Utility nodes
-            "sim_world = fl_slam_poc.utility_nodes.sim_world:main",
             "tb3_odom_bridge = fl_slam_poc.utility_nodes.tb3_odom_bridge:main",
             "image_decompress = fl_slam_poc.utility_nodes.image_decompress:main",
             "livox_converter = fl_slam_poc.utility_nodes.livox_converter:main",
             # Legacy aliases (backward compatibility)
             "fl_backend_node = fl_slam_poc.backend.backend_node:main",
-            "sim_world_node = fl_slam_poc.utility_nodes.sim_world:main",
             "tb3_odom_bridge_node = fl_slam_poc.utility_nodes.tb3_odom_bridge:main",
             "image_decompress_node = fl_slam_poc.utility_nodes.image_decompress:main",
             "livox_converter_node = fl_slam_poc.utility_nodes.livox_converter:main",

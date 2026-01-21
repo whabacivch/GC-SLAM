@@ -25,18 +25,16 @@ bash scripts/run_and_evaluate.sh
 # Download NVIDIA r2b dataset
 ./scripts/download_r2b_dataset.sh
 
-# Run with GPU acceleration
-ros2 launch fl_slam_poc poc_3d_rosbag.launch.py \
-    bag:=rosbags/r2b_storage \
-    play_bag:=true \
-    use_gpu:=true
+# Phase 2: alternative launches live under `phase2/` and are not installed by the MVP package.
+# To use them, move the corresponding launch file back under `fl_ws/src/fl_slam_poc/launch/`
+# and rebuild, or treat Phase 2 as a separate package.
 
 # See docs/3D_POINTCLOUD.md for full documentation
 ```
 
 ### Run (Gazebo / Alternative)
 ```bash
-ros2 launch fl_slam_poc poc_tb3.launch.py model:=waffle use_sim_time:=true
+# Phase 2: see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
 ```
 
 ### Run (TB3 Rosbag / Alternative)

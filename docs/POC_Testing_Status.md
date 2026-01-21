@@ -28,17 +28,17 @@ This document is a **truthful status** of the current SLAM “proof of concept�
   - **`weights.py`**: stable product of independent weights in log space.
 
 - **ROS nodes (`fl_slam_poc/nodes/`)**
-  - **`sim_world_node.py`**: synthetic odometry and synthetic sensors (scan/image/depth) + simple world markers.
+  - **Phase 2**: Gazebo/simulation nodes live under `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/` (e.g. `sim_world.py`).
   - **`frontend_node.py`**: descriptor formation + Fisher‑Rao association + stochastic births + ICP loop‑factor publication.
   - **`fl_backend_node.py`**: Gaussian state inference + two‑pose loop update + markers + TF publication.
   - **`tb3_odom_bridge_node.py`**: converts TB3 absolute odometry to delta odometry for backend interface.
-  - **`sim_semantics_node.py` / `dirichlet_backend_node.py`**: Dirichlet projection demo path.
+  - **Phase 2**: `sim_semantics_node.py` / `dirichlet_backend_node.py` live under `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/`.
 
 - **Launch files (`fl_ws/src/fl_slam_poc/launch/`)**
   - **`poc_a.launch.py`**: synthetic sim wiring demo (sim_world + frontend + backend + basic TF).
   - **`poc_all.launch.py`**: synthetic sim + Dirichlet demo nodes (+ optional foxglove bridge).
   - **`poc_b.launch.py`**: Dirichlet demo only.
-  - **`poc_tb3.launch.py`**: TurtleBot3 Gazebo world + odom bridge + frontend + backend (+ optional foxglove bridge).
+  - **Phase 2**: Gazebo and alternative launches are stored under `phase2/fl_ws/src/fl_slam_poc/launch/`.
 
 - **Messages (`fl_ws/src/fl_slam_poc/msg/`)**
   - **`LoopFactor.msg`**: loop closure factor with explicit convention + covariance + solver metadata.
@@ -196,7 +196,7 @@ These are candidates we can reuse, but **must be audited** against the by-constr
 
 #### Candidate sources
 - **Coherent sensors + world** (Gazebo, real sensor topics): `Phantom Fellowship MIT/AIF2/frobenius_nav_v2/README.md`
-- **Ground truth publisher** (already in POC): `fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/sim_world_node.py` (publishes `/sim/ground_truth`)
+- **Ground truth publisher** (Phase 2): `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/sim_world.py` (publishes `/sim/ground_truth`)
 - **Deterministic test harness pattern** (seeded configs + JSON results): `Info_Geo-FORK1/Other_test/run_opencda_validation.py`
 - **Closed-loop command interface** (`/cmd_vel`, `/goal_pose`): `Phantom Fellowship MIT/AIF2/frobenius_nav_v2/frobenius_nav/navigator_node.py`
 - **Deterministic waypoint planning** (geodesic paths): `Info_Geo-FORK1/cognitive_agent/planning.py`

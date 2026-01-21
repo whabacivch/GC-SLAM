@@ -42,11 +42,6 @@ __all__ = [
     "wishart_bregman",
     "bhattacharyya_coefficient_gaussian",
     "bhattacharyya_distance_gaussian",
-    # Multi-modal fusion (future feature; lazy import)
-    "laser_2d_to_3d_constraint",
-    "fuse_laser_rgbd",
-    "fuse_multimodal_3d",
-    "spatial_association_weight",
 ]
 
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
@@ -86,11 +81,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "fl_slam_poc.backend.fusion.information_distances",
         "bhattacharyya_distance_gaussian",
     ),
-    # Multi-modal fusion (future feature; lazy import)
-    "laser_2d_to_3d_constraint": ("fl_slam_poc.backend.fusion.multimodal_fusion", "laser_2d_to_3d_constraint"),
-    "fuse_laser_rgbd": ("fl_slam_poc.backend.fusion.multimodal_fusion", "fuse_laser_rgbd"),
-    "fuse_multimodal_3d": ("fl_slam_poc.backend.fusion.multimodal_fusion", "fuse_multimodal_3d"),
-    "spatial_association_weight": ("fl_slam_poc.backend.fusion.multimodal_fusion", "spatial_association_weight"),
 }
 
 
@@ -105,4 +95,3 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals().keys()) | set(_LAZY_ATTRS.keys()))
-

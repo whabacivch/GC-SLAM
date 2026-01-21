@@ -64,7 +64,7 @@ This is **information form addition** (exact, closed-form, associative).
   - `vmf_make_evidence()`, `vmf_mean_param()`: Parameter conversions
 
 ### Multi-Modal Fusion Operators
-- **File**: `operators/multimodal_fusion.py`
+- **File (Phase 2)**: `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/multimodal_fusion.py`
 - **Functions**:
   - `laser_2d_to_3d_constraint()`: Lift laser 2D to 3D with weak Z prior
   - `fuse_laser_rgbd()`: Exact information form fusion
@@ -131,6 +131,10 @@ ws://localhost:8765
 cd "/home/will/Documents/Coding/Phantom Fellowship MIT/Impact Project_v1"
 source /opt/ros/jazzy/setup.bash
 source fl_ws/install/setup.bash
+
+## Phase 2 note
+Alternative launch files are stored under `phase2/` and are not installed by the MVP package by default.
+See: `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
 
 ros2 launch fl_slam_poc poc_tb3_rosbag.launch.py \
   bag:=rosbags/tb3_slam3d_small_ros2 \

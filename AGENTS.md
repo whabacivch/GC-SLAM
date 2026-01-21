@@ -29,8 +29,9 @@ These rules apply only to this project. Other projects have their own rules.
 ## Gazebo Workflow (Recommended)
 - Principle: Gazebo is a sensor/world *source* only; do not move estimation invariants into the simulator layer.
 - Prereqs: ROS 2 Jazzy + Gazebo + `turtlebot3_gazebo`; if using camera/depth with `cv_bridge`, prefer `numpy<2.0`.
-- Launch (TB3 world + SLAM stack): `ros2 launch fl_slam_poc poc_tb3.launch.py model:=waffle use_sim_time:=true`
-- Launch (external Gazebo already running): `ros2 launch fl_slam_poc poc_tb3.launch.py launch_gazebo:=false use_sim_time:=true`
+- Phase 2 note: Gazebo launch files are stored under `phase2/` and are not installed by the MVP package by default.
+- Launch (TB3 world + SLAM stack): see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
+- Launch (external Gazebo already running): see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
 - Validate wiring: watch `/cdwm/frontend_status` and `/cdwm/backend_status`; verify `/sim/odom`, `/sim/loop_factor`, `/cdwm/state` are active.
 - Topics are configurable in the launch file; detailed crosswalk + debug checklist lives in `docs/GAZEBO_INTEGRATION.md`.
 

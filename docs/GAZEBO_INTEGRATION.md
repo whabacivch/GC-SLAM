@@ -38,7 +38,8 @@ If you use camera/depth topics via `cv_bridge`, keep NumPy compatible (common RO
 From `Impact Project_v1/fl_ws` (after building and sourcing):
 
 ```bash
-ros2 launch fl_slam_poc poc_tb3.launch.py model:=waffle use_sim_time:=true
+# Phase 2 note: Gazebo launch files are stored under `phase2/` and are not installed by the MVP package by default.
+# See: `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
 ```
 
 Optional toggles:
@@ -50,7 +51,7 @@ Optional toggles:
 Run Gazebo separately, then launch only the SLAM nodes:
 
 ```bash
-ros2 launch fl_slam_poc poc_tb3.launch.py launch_gazebo:=false use_sim_time:=true
+# Phase 2 note: see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
 ```
 
 ## Topic crosswalk (Gazebo → FL-SLAM)
@@ -83,4 +84,4 @@ Backend subscriptions (currently fixed):
 ## Common gotchas
 
 - If **depth topics are missing**, the frontend will run but will report SLAM as not operational and will skip anchor births (see `/cdwm/frontend_status`).
-- If timestamps look inconsistent, set `use_sim_time:=true` for all nodes in the launch file (default in `poc_tb3.launch.py`).
+- If timestamps look inconsistent, set `use_sim_time:=true` for all nodes in the launch file (see Phase 2 `poc_tb3.launch.py`).

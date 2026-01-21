@@ -1271,6 +1271,15 @@ Status monitoring: Will report DEAD_RECKONING if no loop factors
   - `README.md`, `AGENTS.md`, `docs/TESTING.md`, `docs/ROSBAG.md`, `docs/EVALUATION.md`, `docs/INSTALLATION.md`, `archive/README.md`
 - Added clear “future/optional” headers to non-MVP launch files and Gazebo-only node.
 
+### Phase 2 Extraction (Physical MVP Minimization)
+- Moved non-MVP code into `phase2/` to keep the active workspace as the smallest reproducible failing case:
+  - Alternative launches: `phase2/fl_ws/src/fl_slam_poc/launch/`
+  - Gazebo-only sim: `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/sim_world.py`
+  - Experimental Dirichlet nodes: `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/`
+  - Future fusion/config: `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/multimodal_fusion.py`, `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/common/config.py`
+  - Phase 2 tests: `phase2/fl_ws/src/fl_slam_poc/test/`
+- Updated `fl_ws/src/fl_slam_poc/setup.py` to install only the MVP launch and to remove the Gazebo `sim_world` entry points.
+
 ### Repo Hygiene
 - Updated `.gitignore` to ignore evaluation output and user RViz configs:
   - `results/`
@@ -1279,4 +1288,4 @@ Status monitoring: Will report DEAD_RECKONING if no loop factors
 ### Verification
 - `pytest -q` under `fl_ws/src/fl_slam_poc` passes.
 - `colcon build --packages-select fl_slam_poc` succeeds.
-- `bash scripts/run_and_evaluate.sh` runs end-to-end on M3DGR (trajectory drift remains an open algorithm issue).
+- `bash scripts/run_and_evaluate.sh` runs end-to-end on M3DGR (trajectory quality remains under investigation).

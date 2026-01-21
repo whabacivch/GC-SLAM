@@ -81,11 +81,8 @@ echo "=========================================="
 echo "Log: ${RUN_LOG}"
 echo ""
 
-# Choose a launch file based on bag contents (best-effort).
+# MVP integration test targets the M3DGR rosbag launch only.
 LAUNCH_FILE="poc_m3dgr_rosbag.launch.py"
-if ros2 bag info "${BAG_PATH}" 2>/dev/null | rg -q "Topic: /scan\\b"; then
-  LAUNCH_FILE="poc_tb3_rosbag.launch.py"
-fi
 
 setsid timeout "${TIMEOUT_SEC}" ros2 launch fl_slam_poc "${LAUNCH_FILE}" \
   play_bag:=true \
@@ -228,4 +225,3 @@ else
   echo ""
   exit 1
 fi
-

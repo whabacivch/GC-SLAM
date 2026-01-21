@@ -4,11 +4,10 @@
 # subscribers receive static transforms. This matches the intended semantics of
 # TF static transforms.
 #
-# Used by: `launch/poc_tb3_rosbag.launch.py`
+# Used by (Phase 2): `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
 
 /tf_static:
   reliability: reliable
   durability: transient_local
   history: keep_last
   depth: 100
-

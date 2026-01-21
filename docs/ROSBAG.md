@@ -54,7 +54,7 @@ If you want a weaker check (anchors-only), run:
 
 Rosbag launch file:
 - MVP: `fl_ws/src/fl_slam_poc/launch/poc_m3dgr_rosbag.launch.py`
-- Alternative: `fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
+- Alternative (Phase 2): `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
 
 ## Troubleshooting
 

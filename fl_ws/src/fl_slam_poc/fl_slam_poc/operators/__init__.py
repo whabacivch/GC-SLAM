@@ -75,11 +75,6 @@ __all__ = [
     "vmf_fisher_rao_distance",
     "vmf_third_order_correction",
     "vmf_hellinger_distance",
-    # Multi-modal fusion (future feature)
-    "laser_2d_to_3d_constraint",
-    "fuse_laser_rgbd",
-    "fuse_multimodal_3d",
-    "spatial_association_weight",
     # GPU point cloud processing
     "GPUPointCloudProcessor",
     "is_gpu_available",
@@ -154,11 +149,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "vmf_fisher_rao_distance": ("fl_slam_poc.frontend.loops.vmf_geometry", "vmf_fisher_rao_distance"),
     "vmf_third_order_correction": ("fl_slam_poc.frontend.loops.vmf_geometry", "vmf_third_order_correction"),
     "vmf_hellinger_distance": ("fl_slam_poc.frontend.loops.vmf_geometry", "vmf_hellinger_distance"),
-    # Multi-modal fusion (future)
-    "laser_2d_to_3d_constraint": ("fl_slam_poc.backend.fusion.multimodal_fusion", "laser_2d_to_3d_constraint"),
-    "fuse_laser_rgbd": ("fl_slam_poc.backend.fusion.multimodal_fusion", "fuse_laser_rgbd"),
-    "fuse_multimodal_3d": ("fl_slam_poc.backend.fusion.multimodal_fusion", "fuse_multimodal_3d"),
-    "spatial_association_weight": ("fl_slam_poc.backend.fusion.multimodal_fusion", "spatial_association_weight"),
     # GPU point cloud processing
     "GPUPointCloudProcessor": ("fl_slam_poc.frontend.loops.pointcloud_gpu", "GPUPointCloudProcessor"),
     "is_gpu_available": ("fl_slam_poc.frontend.loops.pointcloud_gpu", "is_gpu_available"),
@@ -180,4 +170,3 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals().keys()) | set(_LAZY_ATTRS.keys()))
-

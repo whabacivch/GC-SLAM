@@ -55,13 +55,13 @@ This roadmap is organized around the current **M3DGR rosbag MVP** pipeline and a
 ### A) TurtleBot3 (2D) validation
 
 **Files**
-- `fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
+- `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
 - `scripts/download_tb3_rosbag.sh`
 
 ### B) NVIDIA r2b (3D) validation / GPU
 
 **Files**
-- `fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
+- `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
 - `scripts/download_r2b_dataset.sh`
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/loops/pointcloud_gpu.py`
 
@@ -72,21 +72,20 @@ This roadmap is organized around the current **M3DGR rosbag MVP** pipeline and a
 
 ### B) RGB-D dense reconstruction integration
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/processing/rgbd_processor.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/multimodal_fusion.py`
+- `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/multimodal_fusion.py`
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/loops/vmf_geometry.py`
 
 ### C) Gazebo live testing
-- `fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/sim_world.py`
+- `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
+- `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/sim_world.py`
 
 ## 5) Long-Term (Priority 4): Research Features
 
 ### A) Dirichlet semantic SLAM integration
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/dirichlet_backend_node.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/sim_semantics_node.py`
+- `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/dirichlet_backend_node.py`
+- `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/sim_semantics_node.py`
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/operators/dirichlet_geom.py`
 
 ### B) Visualization
 - RViz: `config/fl_slam_rviz.rviz` (local/optional)
 - Rerun bridge: removed from MVP; revisit later if needed
-

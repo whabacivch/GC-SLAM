@@ -14,7 +14,6 @@ from typing import Any
 
 __all__ = [
     "OpReport",
-    "config",
     "constants",
 ]
 
@@ -22,7 +21,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "OpReport": ("fl_slam_poc.common.op_report", "OpReport"),
     # Expose these as submodules, but do not eagerly import them at package import time.
     "constants": ("fl_slam_poc.common.constants", None),
-    "config": ("fl_slam_poc.common.config", None),
 }
 
 
