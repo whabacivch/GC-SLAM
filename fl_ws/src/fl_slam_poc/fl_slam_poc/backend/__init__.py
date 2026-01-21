@@ -6,6 +6,7 @@ Information-geometric fusion and state estimation.
 Subpackages:
 - fusion/: Gaussian and multi-modal fusion operators
 - parameters/: Adaptive parameter estimation models
+- routing/: Dirichlet-categorical routing for compositional inference
 """
 
 from fl_slam_poc.backend.parameters import (
@@ -21,6 +22,8 @@ from fl_slam_poc.backend.parameters import (
     combine_independent_weights,
 )
 
+from fl_slam_poc.backend.routing import DirichletRoutingModule
+
 __all__ = [
     # Parameters
     "AdaptiveParameter",
@@ -33,4 +36,6 @@ __all__ = [
     "NIG_PRIOR_ALPHA",
     "NIG_PRIOR_BETA",
     "combine_independent_weights",
+    # Routing
+    "DirichletRoutingModule",
 ]

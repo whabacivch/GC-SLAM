@@ -30,6 +30,11 @@ mkdir -p "$RESULTS_DIR"
 source /opt/ros/jazzy/setup.bash
 source "$PROJECT_ROOT/fl_ws/install/setup.bash" 2>/dev/null || source "$PROJECT_ROOT/fl_ws/install/setup.bash" 2>&1 | grep -v "not found:"
 
+# Set ROS environment variables to writable locations (fixes permission issues)
+export ROS_HOME="${ROS_HOME:-/tmp/ros_home}"
+export ROS_LOG_DIR="${ROS_LOG_DIR:-/tmp/ros_log}"
+mkdir -p "$ROS_HOME" "$ROS_LOG_DIR"
+
 # Run SLAM with rosbag
 echo "[1/3] Running SLAM system..."
 

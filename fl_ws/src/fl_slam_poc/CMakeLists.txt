@@ -9,6 +9,7 @@ find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AnchorCreate.msg"
+  "msg/IMUFactor.msg"
   "msg/LoopFactor.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )

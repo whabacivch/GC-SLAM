@@ -154,6 +154,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "is_gpu_available": ("fl_slam_poc.frontend.loops.pointcloud_gpu", "is_gpu_available"),
     "voxel_filter_gpu": ("fl_slam_poc.frontend.loops.pointcloud_gpu", "voxel_filter_gpu"),
     "icp_gpu": ("fl_slam_poc.frontend.loops.pointcloud_gpu", "icp_gpu"),
+    # IMU preintegration
+    "IMUPreintegrator": ("fl_slam_poc.operators.imu_preintegration", "IMUPreintegrator"),
     # OpReport
     "OpReport": ("fl_slam_poc.common.op_report", "OpReport"),
 }

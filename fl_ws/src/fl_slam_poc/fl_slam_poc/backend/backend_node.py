@@ -8,9 +8,10 @@ Loop Factor Convention (EXPLICIT):
     Z = T_anchor^{-1} ∘ T_current
     Backend reconstruction: T_current = T_anchor ∘ Z
 
-Two-Pose Factor Semantics (G1 Compliance):
-    Loop factors update BOTH anchor and current pose beliefs via joint
-    Gaussian update, then marginalize anchor.
+Loop Closure Semantics (G1 Compliance):
+    Loop factors update BOTH anchor and current pose beliefs via one-shot
+    recomposition (bidirectional message passing + Gaussian fusion).
+    No Schur complement, no per-anchor loop, and no Jacobians in core fusion.
 
 Hybrid Dual-Layer Architecture:
     - Sparse Anchor Modules: Laser-based keyframes for pose estimation
@@ -21,7 +22,7 @@ Following information geometry principles:
 - Gaussian fusion in information form (exact, closed-form)
 - vMF fusion for surface normals (exact via Bessel barycenter)
 - Covariance transport via adjoint (exact)
-- Linearization only for predict step (explicit ablation)
+- Linearization only where explicitly declared (e.g., predict)
 - Probabilistic timestamp model (no hard gates)
 
 Observability:
@@ -57,13 +58,16 @@ from fl_slam_poc.common.transforms.se3 import (
     se3_inverse,
     se3_adjoint,
     se3_cov_compose,
+    se3_relative,
 )
 from fl_slam_poc.backend.parameters import TimeAlignmentModel, AdaptiveProcessNoise
 from fl_slam_poc.backend.fusion.gaussian_info import make_evidence, fuse_info, mean_cov
 from fl_slam_poc.backend.fusion.gaussian_geom import gaussian_frobenius_correction
+from fl_slam_poc.backend.fusion.information_distances import hellinger_gaussian
 from fl_slam_poc.frontend.loops.vmf_geometry import vmf_barycenter, vmf_mean_param
 from fl_slam_poc.common.op_report import OpReport
-from fl_slam_poc.msg import AnchorCreate, LoopFactor
+from fl_slam_poc.common import constants
+from fl_slam_poc.msg import AnchorCreate, IMUFactor, LoopFactor
 
 
 def stamp_to_sec(stamp) -> float:
@@ -207,10 +211,25 @@ class FLBackend(Node):
         self.declare_parameter("process_noise_trans_prior", 0.03)
         self.declare_parameter("process_noise_rot_prior", 0.015)
         self.declare_parameter("process_noise_prior_strength", 10.0)
+        
+        # IMU Integration (15D state extension)
+        self.declare_parameter("enable_imu_fusion", True)
+        self.declare_parameter("imu_gyro_random_walk", constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
+        self.declare_parameter("imu_accel_random_walk", constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
 
     def _init_from_params(self):
         self.odom_frame = str(self.get_parameter("odom_frame").value)
         self.rgbd_evidence_topic = str(self.get_parameter("rgbd_evidence_topic").value)
+
+        # IMU fusion configuration (must be read before subscriptions)
+        enable_imu_param = self.get_parameter("enable_imu_fusion")
+        gyro_walk_param = self.get_parameter("imu_gyro_random_walk")
+        accel_walk_param = self.get_parameter("imu_accel_random_walk")
+
+        self.enable_imu_fusion = bool(enable_imu_param.value if enable_imu_param.value is not None else True)
+        self.imu_gyro_random_walk = float(gyro_walk_param.value if gyro_walk_param.value is not None else constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
+        self.imu_accel_random_walk = float(accel_walk_param.value if accel_walk_param.value is not None else constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
+        self.gravity = np.array(constants.GRAVITY_DEFAULT, dtype=float)
 
         # QoS profile for subscriptions (MUST match frontend RELIABLE QoS)
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -226,6 +245,12 @@ class FLBackend(Node):
         self.sub_loop = self.create_subscription(LoopFactor, "/sim/loop_factor", self.on_loop, qos)
         self.sub_anchor = self.create_subscription(AnchorCreate, "/sim/anchor_create", self.on_anchor_create, qos)
         self.sub_rgbd = self.create_subscription(String, self.rgbd_evidence_topic, self.on_rgbd_evidence, qos)
+        
+        # IMU Factor subscription (Phase 2: 15D state extension)
+        if self.enable_imu_fusion:
+            self.sub_imu_factor = self.create_subscription(
+                IMUFactor, "/sim/imu_factor", self.on_imu_factor, qos
+            )
 
         # Publishers
         self.pub_state = self.create_publisher(Odometry, "/cdwm/state", 10)
@@ -254,18 +279,47 @@ class FLBackend(Node):
             self.trajectory_file.write("# timestamp x y z qx qy qz qw\n")
             self.get_logger().info(f"Exporting trajectory to: {self.trajectory_export_path}")
         self.max_path_length = 1000  # Limit path history
-
+        
+        # State dimension: 15D when IMU enabled, 6D otherwise
+        self.state_dim = constants.STATE_DIM_FULL if self.enable_imu_fusion else constants.STATE_DIM_POSE
+        
         # State belief in information form
-        mu0 = np.zeros(6)
-        cov0 = np.diag([0.2**2, 0.2**2, 0.2**2, 0.1**2, 0.1**2, 0.1**2])
+        # 15D state: [p(3), R(3), v(3), b_g(3), b_a(3)]
+        if self.enable_imu_fusion:
+            mu0 = np.zeros(constants.STATE_DIM_FULL)
+            cov0_diag = np.concatenate([
+                np.array([constants.STATE_PRIOR_POSE_TRANS_STD**2] * 3),   # Position [0:3]
+                np.array([constants.STATE_PRIOR_POSE_ROT_STD**2] * 3),     # Rotation [3:6]
+                np.array([constants.STATE_PRIOR_VELOCITY_STD**2] * 3),     # Velocity [6:9]
+                np.array([constants.STATE_PRIOR_GYRO_BIAS_STD**2] * 3),    # Gyro bias [9:12]
+                np.array([constants.STATE_PRIOR_ACCEL_BIAS_STD**2] * 3),   # Accel bias [12:15]
+            ])
+            cov0 = np.diag(cov0_diag)
+            self.get_logger().info(f"Backend: 15D state enabled (pose + velocity + biases)")
+        else:
+            mu0 = np.zeros(6)
+            cov0 = np.diag([0.2**2, 0.2**2, 0.2**2, 0.1**2, 0.1**2, 0.1**2])
+            self.get_logger().info(f"Backend: 6D state (pose only, IMU fusion disabled)")
         self.L, self.h = make_evidence(mu0, cov0)
 
-        # Adaptive process noise
+        # Adaptive process noise (matches state dimension)
         trans_prior = float(self.get_parameter("process_noise_trans_prior").value)
         rot_prior = float(self.get_parameter("process_noise_rot_prior").value)
         noise_strength = float(self.get_parameter("process_noise_prior_strength").value)
-        prior_diag = np.array([trans_prior**2] * 3 + [rot_prior**2] * 3)
-        self.process_noise = AdaptiveProcessNoise.create(6, prior_diag, noise_strength)
+        
+        if self.enable_imu_fusion:
+            # 15D process noise: pose + velocity + bias random walks
+            prior_diag = np.concatenate([
+                np.array([trans_prior**2] * 3),                            # Position
+                np.array([rot_prior**2] * 3),                              # Rotation
+                np.array([constants.PROCESS_NOISE_VELOCITY_STD**2] * 3),   # Velocity
+                np.array([constants.PROCESS_NOISE_GYRO_BIAS_STD**2] * 3),  # Gyro bias
+                np.array([constants.PROCESS_NOISE_ACCEL_BIAS_STD**2] * 3), # Accel bias
+            ])
+            self.process_noise = AdaptiveProcessNoise.create(constants.STATE_DIM_FULL, prior_diag, noise_strength)
+        else:
+            prior_diag = np.array([trans_prior**2] * 3 + [rot_prior**2] * 3)
+            self.process_noise = AdaptiveProcessNoise.create(6, prior_diag, noise_strength)
 
         # Timestamp alignment
         align_sigma = float(self.get_parameter("alignment_sigma_prior").value)
@@ -305,13 +359,24 @@ class FLBackend(Node):
         self.odom_count = 0
         self.loop_factor_count = 0
         self.anchor_count = 0
+        self.imu_factor_count = 0  # IMU factor tracking
         self.last_odom_time: Optional[float] = None
         self.last_loop_time: Optional[float] = None
+        self.last_imu_time: Optional[float] = None  # IMU factor tracking
         self.last_odom_stamp: Optional[float] = None  # Odometry message timestamp for trajectory export
         self._last_odom_key: Optional[tuple] = None  # For duplicate detection
         self.node_start_time = time.time()
         self.status_period = 5.0
         self.warned_no_loops = False
+        
+        # Keyframe to anchor mapping (for IMU factor fusion)
+        # Maps frontend keyframe IDs to backend anchor IDs
+        self.keyframe_to_anchor: Dict[int, int] = {}
+        
+        # Post-rosbag queue: buffer last messages for processing on shutdown
+        # This ensures complete trajectory coverage when rosbag playback ends
+        self.post_rosbag_odom_queue = deque(maxlen=10)  # Last 10 odom messages
+        self.post_rosbag_imu_queue = deque(maxlen=10)   # Last 10 IMU factors
         
         # Status timer uses wall time so it continues even when /clock pauses.
         self._status_clock = Clock(clock_type=ClockType.SYSTEM_TIME)
@@ -323,10 +388,14 @@ class FLBackend(Node):
         self.get_logger().info("=" * 60)
         self.get_logger().info("FL-SLAM Backend starting")
         self.get_logger().info("=" * 60)
+        self.get_logger().info(f"State dimension: {self.state_dim}D")
+        self.get_logger().info(f"IMU fusion: {'ENABLED' if self.enable_imu_fusion else 'DISABLED'}")
         self.get_logger().info("Subscriptions:")
         self.get_logger().info("  Delta odom:    /sim/odom (MUST come from tb3_odom_bridge)")
         self.get_logger().info("  Loop factors:  /sim/loop_factor (from frontend)")
         self.get_logger().info("  Anchors:       /sim/anchor_create (from frontend)")
+        if self.enable_imu_fusion:
+            self.get_logger().info("  IMU factors:   /sim/imu_factor (from frontend)")
         self.get_logger().info("  RGB-D evidence: " + self.rgbd_evidence_topic)
         self.get_logger().info("")
         self.get_logger().info("Status monitoring: Will report DEAD_RECKONING if no loop factors")
@@ -353,7 +422,7 @@ class FLBackend(Node):
                 f"delta=({msg.pose.pose.position.x:.3f}, {msg.pose.pose.position.y:.3f}, {msg.pose.pose.position.z:.3f})"
             )
         
-        # Extract delta
+        # Extract delta (6D pose)
         dx = float(msg.pose.pose.position.x)
         dy = float(msg.pose.pose.position.y)
         dz = float(msg.pose.pose.position.z)
@@ -365,34 +434,81 @@ class FLBackend(Node):
         R_delta = quat_to_rotmat(qx, qy, qz, qw)
         rotvec_delta = rotmat_to_rotvec(R_delta)
         
-        delta = np.array([dx, dy, dz, rotvec_delta[0], rotvec_delta[1], rotvec_delta[2]], dtype=float)
+        delta_pose = np.array([dx, dy, dz, rotvec_delta[0], rotvec_delta[1], rotvec_delta[2]], dtype=float)
 
         # Get current state
         mu, cov = mean_cov(self.L, self.h)
-        linearization_point = mu.copy()
         
-        # Compose pose
-        mu_pred = se3_compose(mu, delta)
-        
-        # Get adaptive process noise and transport covariance
-        Q = self.process_noise.estimate()
-        cov_pred = se3_cov_compose(cov, Q, mu)
+        if self.state_dim == constants.STATE_DIM_FULL:
+            # 15D state: Extract pose, compose, then rebuild
+            mu_pose = mu[:6]
+            mu_vel = mu[6:9]
+            mu_bias = mu[9:15]
+            
+            linearization_point = mu_pose.copy()
+            
+            # Compose pose (6D)
+            mu_pose_pred = se3_compose(mu_pose, delta_pose)
+            
+            # Get process noise (15D) - extract 6x6 pose portion for se3_cov_compose
+            Q_full = self.process_noise.estimate()
+            Q_pose = Q_full[:6, :6]
+            
+            # Transport pose covariance
+            cov_pose = cov[:6, :6]
+            cov_pose_pred = se3_cov_compose(cov_pose, Q_pose, mu_pose)
+            
+            # Rebuild full 15D state
+            mu_pred = np.concatenate([mu_pose_pred, mu_vel, mu_bias])
+            
+            # Rebuild full 15D covariance
+            # Pose block is updated, velocity/bias blocks get process noise
+            cov_pred = cov.copy()
+            cov_pred[:6, :6] = cov_pose_pred
+            # Add process noise to velocity and bias (diagonal only)
+            cov_pred[6:9, 6:9] += Q_full[6:9, 6:9]
+            cov_pred[9:12, 9:12] += Q_full[9:12, 9:12]
+            cov_pred[12:15, 12:15] += Q_full[12:15, 12:15]
+            
+            # Residual for process noise adaptation (pose only)
+            residual_vec = np.zeros(self.state_dim, dtype=float)
+            if self.prev_mu is not None:
+                prev_pose = self.prev_mu[:6]
+                predicted_from_prev = se3_compose(prev_pose, delta_pose)
+                residual_vec[:6] = se3_relative(mu_pose_pred, predicted_from_prev).astype(float)
+                self.process_noise.update(residual_vec)
+            self.prev_mu = mu.copy()
+        else:
+            # 6D state: Original behavior
+            linearization_point = mu.copy()
+            
+            # Compose pose
+            mu_pred = se3_compose(mu, delta_pose)
+            
+            # Get adaptive process noise and transport covariance
+            Q = self.process_noise.estimate()
+            cov_pred = se3_cov_compose(cov, Q, mu)
+
+            # Residual for process noise adaptation
+            residual_vec = np.zeros(6, dtype=float)
+            if self.prev_mu is not None:
+                predicted_from_prev = se3_compose(self.prev_mu, delta_pose)
+                residual_vec = se3_relative(mu_pred, predicted_from_prev).astype(float)
+                self.process_noise.update(residual_vec)
+            self.prev_mu = mu.copy()
 
         # Update state
         self.L, self.h = make_evidence(mu_pred, cov_pred)
         self.state_buffer.append((stamp_to_sec(msg.header.stamp), mu_pred.copy(), cov_pred.copy()))
         
-        # Update process noise from residuals
-        residual_vec = np.zeros(6, dtype=float)
-        if self.prev_mu is not None:
-            predicted_from_prev = se3_compose(self.prev_mu, delta)
-            residual_vec = (mu_pred - predicted_from_prev).astype(float)
-            self.process_noise.update(residual_vec)
-        self.prev_mu = mu.copy()
-        
         self._publish_state(tag="odom")
 
-        _, frob_stats = gaussian_frobenius_correction(residual_vec)
+        # Frobenius correction (pose residual only for 15D)
+        residual_pose = residual_vec[:6] if self.state_dim == constants.STATE_DIM_FULL else residual_vec
+        _, frob_stats = gaussian_frobenius_correction(residual_pose)
+        
+        # Get process noise trace (full state)
+        Q_full = self.process_noise.estimate()
         
         self._publish_report(OpReport(
             name="GaussianPredictSE3",
@@ -408,8 +524,9 @@ class FLBackend(Node):
             frobenius_output_stats=dict(frob_stats["output_stats"]),
             metrics={
                 "covariance_transport": "adjoint",
+                "state_dim": self.state_dim,
                 "linearization_point": linearization_point.tolist(),
-                "process_noise_trace": float(np.trace(Q)),
+                "process_noise_trace": float(np.trace(Q_full)),
                 "process_noise_confidence": self.process_noise.confidence(),
             },
             notes="Delta-odom composed in SE(3) with adjoint covariance transport.",
@@ -521,7 +638,7 @@ class FLBackend(Node):
             )
 
     def on_loop(self, msg: LoopFactor):
-        """Two-pose factor update with bidirectional information flow."""
+        """Loop closure update via one-shot barycentric recomposition (no Schur complement)."""
         self.loop_factor_count += 1
         self.last_loop_time = time.time()
         
@@ -593,67 +710,85 @@ class FLBackend(Node):
         if weight < 1e-12:
             return
 
-        # Two-pose factor update
-        mu_current, cov_current = mean_cov(self.L, self.h)
-        
-        # Predicted relative transform
-        T_anchor_inv = se3_inverse(mu_anchor)
-        Z_pred = se3_compose(T_anchor_inv, mu_current)
-        innovation = rel - Z_pred
-        
-        # Jacobians
-        Ad_anchor_inv = se3_adjoint(T_anchor_inv)
-        H_anchor = -Ad_anchor_inv
-        H_current = np.eye(6)
-        
-        # Build joint system
-        L_joint = np.zeros((12, 12), dtype=float)
-        h_joint = np.zeros(12, dtype=float)
-        
-        L_joint[:6, :6] = L_anchor
-        h_joint[:6] = h_anchor.reshape(-1)
-        L_joint[6:12, 6:12] = self.L
-        h_joint[6:12] = self.h.reshape(-1)
-        
-        H = np.zeros((6, 12), dtype=float)
-        H[:, :6] = H_anchor
-        H[:, 6:12] = H_current
-        
-        try:
-            cov_rel_inv = np.linalg.inv(cov_rel)
-        except np.linalg.LinAlgError:
-            cov_rel_inv = np.linalg.pinv(cov_rel)
-        
-        cov_rel_inv_weighted = weight * cov_rel_inv
-        L_joint += H.T @ cov_rel_inv_weighted @ H
-        
-        mu_joint_prior = np.concatenate([mu_anchor, mu_current])
-        h_joint += H.T @ cov_rel_inv_weighted @ (innovation + H @ mu_joint_prior)
-        
-        # Marginalize anchor
-        L_aa = L_joint[:6, :6]
-        L_ac = L_joint[:6, 6:12]
-        L_ca = L_joint[6:12, :6]
-        L_cc = L_joint[6:12, 6:12]
-        h_a = h_joint[:6]
-        h_c = h_joint[6:12]
-        
-        try:
-            L_aa_inv = np.linalg.inv(L_aa)
-        except np.linalg.LinAlgError:
-            L_aa_inv = np.linalg.pinv(L_aa)
-        
-        self.L = L_cc - L_ca @ L_aa_inv @ L_ac
-        self.h = h_c - L_ca @ L_aa_inv @ h_a
-        
+        # ---------------------------------------------------------------------
+        # One-shot recomposition (no Jacobians; no Schur complement)
+        #
+        # Factor semantics: T_current ≈ T_anchor ∘ rel, with uncertainty cov_rel.
+        # We push anchor -> current, and current -> anchor (via rel^{-1}), then
+        # fuse each predicted Gaussian with the corresponding prior.
+        # ---------------------------------------------------------------------
+        mu_full, cov_full = mean_cov(self.L, self.h)
+        mu_current_pose = mu_full[:6]
+        cov_current_pose = cov_full[:6, :6]
+        mu_anchor_pose = mu_anchor[:6]
+        cov_anchor_pose = cov_anchor[:6, :6]
+
+        def _spd_solve(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+            try:
+                Lc = np.linalg.cholesky(A)
+                y = np.linalg.solve(Lc, b)
+                return np.linalg.solve(Lc.T, y)
+            except np.linalg.LinAlgError:
+                return np.linalg.lstsq(A, b, rcond=None)[0]
+
+        def _gaussian_product(mu_a: np.ndarray, cov_a: np.ndarray,
+                              mu_b: np.ndarray, cov_b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            cov_a = np.asarray(cov_a, dtype=float)
+            cov_b = np.asarray(cov_b, dtype=float)
+            mu_a = np.asarray(mu_a, dtype=float).reshape(-1)
+            mu_b = np.asarray(mu_b, dtype=float).reshape(-1)
+
+            # Σ = (Σa^{-1} + Σb^{-1})^{-1}, μ = Σ(Σa^{-1}μa + Σb^{-1}μb)
+            I_a = _spd_solve(cov_a, np.eye(cov_a.shape[0]))
+            I_b = _spd_solve(cov_b, np.eye(cov_b.shape[0]))
+            Sigma_inv = I_a + I_b
+            Sigma = _spd_solve(Sigma_inv, np.eye(Sigma_inv.shape[0]))
+            mu = Sigma @ (I_a @ mu_a + I_b @ mu_b)
+            Sigma = 0.5 * (Sigma + Sigma.T)
+            return mu, Sigma
+
+        # Apply factor weight as precision scaling (weight * Σ^{-1} == (Σ/weight)^{-1})
+        cov_rel_eff = cov_rel / max(weight, 1e-12)
+
+        # Predict current from anchor + measurement
+        mu_curr_pred = se3_compose(mu_anchor_pose, rel)
+        cov_curr_pred = se3_cov_compose(cov_anchor_pose, cov_rel_eff, mu_anchor_pose)
+
+        # Predict anchor from current + inverse(measurement)
+        rel_inv = se3_inverse(rel)
+        Ad_rel_inv = se3_adjoint(rel_inv)
+        cov_rel_inv = Ad_rel_inv @ cov_rel_eff @ Ad_rel_inv.T
+        mu_anchor_pred = se3_compose(mu_current_pose, rel_inv)
+        cov_anchor_pred = se3_cov_compose(cov_current_pose, cov_rel_inv, mu_current_pose)
+
+        # Fuse (product-of-experts) in moment space (no natural-parameter weighted sum)
+        mu_pose_new, cov_pose_new = _gaussian_product(mu_current_pose, cov_current_pose, mu_curr_pred, cov_curr_pred)
+        mu_anchor_new, cov_anchor_new = _gaussian_product(mu_anchor_pose, cov_anchor_pose, mu_anchor_pred, cov_anchor_pred)
+
+        # Embed updated current pose back into full state
+        if self.state_dim == constants.STATE_DIM_FULL:
+            mu_new = mu_full.copy()
+            mu_new[:6] = mu_pose_new
+
+            cov_new = cov_full.copy()
+            cov_new[:6, :6] = cov_pose_new
+            self.L, self.h = make_evidence(mu_new, cov_new)
+        else:
+            self.L, self.h = make_evidence(mu_pose_new, cov_pose_new)
+
         # Update anchor belief (preserve points)
-        mu_anchor_new, cov_anchor_new = mean_cov(L_aa, h_a)
-        anchor_points = anchor_data[4]  # Get existing points
-        self.anchors[int(msg.anchor_id)] = (
-            mu_anchor_new, cov_anchor_new, L_aa.copy(), h_a.reshape(-1).copy(), anchor_points
+        anchor_points = anchor_data[4]
+        L_anchor_new, h_anchor_new = make_evidence(mu_anchor_new, cov_anchor_new)
+        self.anchors[anchor_id] = (
+            mu_anchor_new, cov_anchor_new, L_anchor_new.copy(), h_anchor_new.reshape(-1).copy(), anchor_points
         )
 
         mu_updated, cov_updated = mean_cov(self.L, self.h)
+        cov_current = cov_full  # For logging below
+
+        # Innovation for logging/correction: rel - (T_anchor^{-1} ∘ T_current)
+        Z_pred = se3_compose(se3_inverse(mu_anchor_pose), mu_current_pose)
+        innovation = se3_relative(rel, Z_pred)
         
         # Publish updated map after loop closure
         self._publish_map()
@@ -661,7 +796,7 @@ class FLBackend(Node):
         _, frob_stats = gaussian_frobenius_correction(innovation)
         
         self._publish_report(OpReport(
-            name="TwoPoseFactorUpdate",
+            name="LoopFactorRecomposition",
             exact=False,
             approximation_triggers=["Linearization"],
             family_in="Gaussian",
@@ -676,10 +811,11 @@ class FLBackend(Node):
                 "anchor_id": int(msg.anchor_id),
                 "weight": weight,
                 "innovation_norm": float(np.linalg.norm(innovation)),
+                "cov_rel_trace": float(np.trace(cov_rel)),
                 "anchor_cov_trace_after": float(np.trace(cov_anchor_new)),
                 "current_cov_trace_after": float(np.trace(cov_updated)),
             },
-            notes="Two-pose factor with joint update and marginalization.",
+            notes="Loop closure via one-shot recomposition (anchor↔current message passing), no Jacobians and no Schur complement.",
         ))
 
         self._publish_loop_marker(int(msg.anchor_id), mu_anchor_new, mu_updated)
@@ -692,6 +828,259 @@ class FLBackend(Node):
                 f"weight={weight:.6f}, cov_trace_before={float(np.trace(cov_current)):.3f}, "
                 f"cov_trace_after={float(np.trace(cov_updated)):.3f}"
             )
+
+    def on_imu_factor(self, msg: IMUFactor):
+        """
+        Process IMU factor with batched moment matching across anchors.
+        
+        This is the core of the Hellinger-Dirichlet IMU integration (Phase 2).
+        
+        Algorithm:
+        1. Extract IMU measurement and covariance
+        2. Build batched anchor data (embed 6D anchors into 15D)
+        3. Initialize/update Dirichlet routing module
+        4. Call JAX batched projection kernel (one call per IMU packet)
+        5. Apply bias random walk noise
+        6. Update state to 15D posterior
+        
+        Key invariants:
+        - NO per-anchor loops (batched in kernel)
+        - Global moment matching (NOT natural-param weighted sum)
+        - Hellinger-tilted likelihood for robustness
+        - Dirichlet routing with Frobenius retention
+        """
+        import jax.numpy as jnp
+        from fl_slam_poc.backend.fusion.imu_jax_kernel import imu_batched_projection_kernel
+        from fl_slam_poc.backend.routing.dirichlet_routing import DirichletRoutingModule
+        
+        if not self.enable_imu_fusion:
+            return
+            
+        self.imu_factor_count += 1
+        self.last_imu_time = time.time()
+        
+        # =====================================================================
+        # Extract IMU factor data
+        # =====================================================================
+        keyframe_i = int(msg.keyframe_i)  # Reference keyframe (anchor)
+        keyframe_j = int(msg.keyframe_j)  # Current keyframe
+        dt = float(msg.dt)
+        
+        # Preintegrated measurements (9D: [delta_p, delta_v, delta_rotvec])
+        delta_p = np.array(msg.delta_p, dtype=np.float64)
+        delta_v = np.array(msg.delta_v, dtype=np.float64)
+        delta_rotvec = np.array(msg.delta_rotvec, dtype=np.float64)
+        z_imu = np.concatenate([delta_p, delta_v, delta_rotvec])
+        
+        # Covariance (9x9 in basis [p, v, theta])
+        R_imu = np.array(msg.cov_preint, dtype=np.float64).reshape(9, 9)
+        # Nominal residual covariance for Hellinger tilt (same as measurement cov)
+        R_nom = R_imu.copy()
+        
+        # Bias reference (used for anchor embedding)
+        bias_gyro = np.array(msg.bias_gyro, dtype=np.float64)
+        bias_accel = np.array(msg.bias_accel, dtype=np.float64)
+        bias_ref = np.concatenate([bias_gyro, bias_accel])
+        
+        n_measurements = int(msg.n_measurements)
+        
+        # Debug logging
+        if self.imu_factor_count <= 5:
+            self.get_logger().info(
+                f"IMU factor #{self.imu_factor_count}: kf_{keyframe_i}->kf_{keyframe_j}, "
+                f"dt={dt:.3f}s, n_meas={n_measurements}, "
+                f"delta_p_norm={np.linalg.norm(delta_p):.4f}m"
+            )
+        
+        # =====================================================================
+        # Validation
+        # =====================================================================
+        if len(self.anchors) == 0:
+            if self.imu_factor_count <= 3:
+                self.get_logger().debug("IMU factor ignored: no anchors yet")
+            return
+        
+        if self.state_dim != constants.STATE_DIM_FULL:
+            # 6D state cannot use IMU factors (no velocity/bias)
+            return
+        
+        # =====================================================================
+        # Get current state (15D)
+        # =====================================================================
+        mu_current, cov_current = mean_cov(self.L, self.h)
+        
+        # =====================================================================
+        # Build anchor data for batched processing
+        # Anchors are 6D (pose); embed into 15D with velocity=0 and bias=bias_ref
+        # =====================================================================
+        anchor_ids = sorted(self.anchors.keys())
+        M = len(anchor_ids)
+        
+        anchor_mus = np.zeros((M, 15), dtype=np.float64)
+        anchor_covs = np.zeros((M, 15, 15), dtype=np.float64)
+        
+        for idx, aid in enumerate(anchor_ids):
+            mu_a, cov_a, _, _, _ = self.anchors[aid]
+            
+            # Embed 6D anchor pose into 15D state
+            anchor_mus[idx, :6] = mu_a[:6]           # Pose
+            anchor_mus[idx, 6:9] = 0.0               # Velocity (unknown at anchor time)
+            anchor_mus[idx, 9:15] = bias_ref         # Bias from preintegration reference
+            
+            # Embed covariance
+            anchor_covs[idx, :6, :6] = cov_a[:6, :6]
+            anchor_covs[idx, 6:9, 6:9] = np.eye(3) * constants.STATE_PRIOR_VELOCITY_STD**2
+            anchor_covs[idx, 9:12, 9:12] = np.eye(3) * constants.STATE_PRIOR_GYRO_BIAS_STD**2
+            anchor_covs[idx, 12:15, 12:15] = np.eye(3) * constants.STATE_PRIOR_ACCEL_BIAS_STD**2
+        
+        # =====================================================================
+        # Enhanced Anchor Matching: keyframe_to_anchor mapping + Hellinger fallback
+        # =====================================================================
+        # Predict anchor pose from IMU factor: T_anchor_pred = T_current ∘ rel_inv
+        # where rel is the IMU measurement (T_anchor^{-1} ∘ T_current)
+        # IMU factor provides: rel = [delta_p, delta_v, delta_rotvec] (9D)
+        # Extract 6D pose part: [delta_p, delta_rotvec]
+        rel_pose = np.concatenate([delta_p, delta_rotvec])
+        rel_pose_inv = se3_inverse(rel_pose)
+        mu_current_pose = mu_current[:6]
+        mu_anchor_pred = se3_compose(mu_current_pose, rel_pose_inv)
+        
+        # Compute Hellinger distances to all anchors (for fallback matching)
+        # Extract 6x6 pose covariance from 9x9 IMU covariance
+        # R_imu is [p(3), v(3), R(3)] so pose part is [0:3, 6:9] for position and rotation
+        cov_pred_pose = np.zeros((6, 6), dtype=np.float64)
+        cov_pred_pose[:3, :3] = R_imu[:3, :3]  # Position covariance
+        cov_pred_pose[3:6, 3:6] = R_imu[6:9, 6:9]  # Rotation covariance
+        # Cross terms (position-rotation correlation)
+        cov_pred_pose[:3, 3:6] = R_imu[:3, 6:9]
+        cov_pred_pose[3:6, :3] = R_imu[6:9, :3]
+        
+        hellinger_distances = np.zeros(M, dtype=np.float64)
+        for idx, aid in enumerate(anchor_ids):
+            mu_a_pose = anchor_mus[idx, :6]
+            cov_a_pose = anchor_covs[idx, :6, :6]
+            h_dist = hellinger_gaussian(cov_a_pose, cov_pred_pose, mu_a_pose, mu_anchor_pred)
+            hellinger_distances[idx] = h_dist
+        
+        # =====================================================================
+        # Dirichlet routing with enhanced initial logits
+        # =====================================================================
+        if not hasattr(self, '_imu_routing_module') or self._imu_routing_module is None:
+            self._imu_routing_module = DirichletRoutingModule(n_anchors=M)
+        elif self._imu_routing_module.n_anchors != M:
+            self._imu_routing_module.resize(M)
+        
+        # Enhanced initial logits: use keyframe mapping if available, else Hellinger distance
+        initial_logits = np.zeros(M, dtype=np.float64)
+        
+        # Priority 1: Use keyframe_to_anchor mapping if available
+        if keyframe_i in self.keyframe_to_anchor:
+            mapped_anchor_id = self.keyframe_to_anchor[keyframe_i]
+            if mapped_anchor_id in anchor_ids:
+                mapped_idx = anchor_ids.index(mapped_anchor_id)
+                initial_logits[mapped_idx] = 5.0  # Strong prior for mapped anchor
+                if self.imu_factor_count <= 3:
+                    self.get_logger().info(
+                        f"IMU factor: using keyframe mapping kf_{keyframe_i} -> anchor_{mapped_anchor_id}"
+                    )
+        else:
+            # Priority 2: Nearest-neighbor with Hellinger distance
+            # Smaller Hellinger distance = better match = higher logit
+            min_h_idx = np.argmin(hellinger_distances)
+            min_h_dist = hellinger_distances[min_h_idx]
+            
+            # Convert Hellinger distance to logit (inverse relationship)
+            # H² ∈ [0, 1], so logit = -λ * H² where λ controls sensitivity
+            hellinger_logit_scale = 10.0  # Tune this based on typical Hellinger values
+            initial_logits[min_h_idx] = -hellinger_logit_scale * (min_h_dist ** 2)
+            
+            if self.imu_factor_count <= 3:
+                self.get_logger().info(
+                    f"IMU factor: using Hellinger nearest-neighbor (kf_{keyframe_i} -> anchor_{anchor_ids[min_h_idx]}, "
+                    f"H²={min_h_dist:.4f})"
+                )
+        
+        routing_weights = self._imu_routing_module.update(initial_logits)
+        
+        # =====================================================================
+        # JAX Batched Projection Kernel
+        # Convert to JAX arrays for kernel call
+        # =====================================================================
+        mu_new_jax, cov_new_jax, diagnostics = imu_batched_projection_kernel(
+            anchor_mus=jnp.array(anchor_mus),
+            anchor_covs=jnp.array(anchor_covs),
+            current_mu=jnp.array(mu_current),
+            current_cov=jnp.array(cov_current),
+            routing_weights=jnp.array(routing_weights),
+            z_imu=jnp.array(z_imu),
+            R_imu=jnp.array(R_imu),
+            R_nom=jnp.array(R_nom),
+            dt=dt,
+            gravity=jnp.array(self.gravity),
+        )
+        
+        # Convert back to NumPy
+        mu_new = np.array(mu_new_jax)
+        cov_new = np.array(cov_new_jax)
+        
+        # =====================================================================
+        # Apply bias random walk noise (Gaussian random walk prior)
+        # Q_bias ~ N(0, σ² * dt * I)
+        # =====================================================================
+        Q_bias = np.zeros((6, 6), dtype=np.float64)
+        Q_bias[:3, :3] = np.eye(3) * (self.imu_gyro_random_walk**2) * dt
+        Q_bias[3:6, 3:6] = np.eye(3) * (self.imu_accel_random_walk**2) * dt
+        cov_new[9:15, 9:15] += Q_bias
+        
+        # =====================================================================
+        # Update state
+        # =====================================================================
+        self.L, self.h = make_evidence(mu_new, cov_new)
+        self._publish_state(tag="imu")
+        
+        # =====================================================================
+        # Diagnostics
+        # =====================================================================
+        routing_diag = self._imu_routing_module.get_diagnostics()
+        
+        if self.imu_factor_count <= 5:
+            v_new = mu_new[6:9]
+            self.get_logger().info(
+                f"IMU factor #{self.imu_factor_count} applied: "
+                f"v_norm={np.linalg.norm(v_new):.3f}m/s, "
+                f"valid_anchors={diagnostics.get('valid_anchors', 0)}/{M}, "
+                f"hellinger_shift={routing_diag['hellinger_shift']:.4f}"
+            )
+        
+        # Emit OpReport
+        self._publish_report(OpReport(
+            name="IMUFactorUpdate",
+            exact=False,
+            approximation_triggers=["LegendreEProjection", "BiasFrozen"],
+            family_in="IMU",
+            family_out="Gaussian",
+            closed_form=False,  # Uses moment matching
+            frobenius_applied=True,
+            frobenius_operator="gaussian_identity_third_order",
+            metrics={
+                "keyframe_i": keyframe_i,
+                "keyframe_j": keyframe_j,
+                "dt_sec": dt,
+                "n_measurements": n_measurements,
+                "delta_p_norm_m": float(np.linalg.norm(delta_p)),
+                "delta_v_norm_ms": float(np.linalg.norm(delta_v)),
+                "delta_rot_norm_rad": float(np.linalg.norm(delta_rotvec)),
+                "bias_in_residual": False,
+                "state_dim": self.state_dim,
+                "n_anchors": M,
+                "valid_anchors": diagnostics.get("valid_anchors", 0),
+                "degenerate_weights": diagnostics.get("degenerate_weights", False),
+                "ess": diagnostics.get("ess", None),
+                "routing_hellinger_shift": routing_diag["hellinger_shift"],
+                "routing_max_resp": routing_diag["max_responsibility"],
+            },
+            notes="IMU factor fusion with batched moment matching and Dirichlet routing; bias sensitivity omitted (IMUFactor.msg lacks preintegration Jacobians).",
+        ))
 
     def _check_status(self):
         """Periodic status check - warns if running dead-reckoning only."""
@@ -720,14 +1109,17 @@ class FLBackend(Node):
             "timestamp": time.time(),
             "elapsed_sec": elapsed,
             "mode": mode,
+            "state_dim": self.state_dim,
             "odom_count": self.odom_count,
             "odom_rate_hz": round(odom_rate, 1),
             "loop_factor_count": self.loop_factor_count,
+            "imu_factor_count": self.imu_factor_count,
             "anchor_count": self.anchor_count,
             "anchors_stored": len(self.anchors),
             "pending_loop_factors": total_pending,
             "last_loop_age_sec": (time.time() - self.last_loop_time) if self.last_loop_time else None,
-            # Dual-layer statistics (NEW)
+            "last_imu_age_sec": (time.time() - self.last_imu_time) if self.last_imu_time else None,
+            # Dual-layer statistics
             "sparse_anchors": len(self.sparse_anchors),
             "dense_modules": len(self.dense_modules),
             "rgbd_fused_anchors": sum(1 for a in self.sparse_anchors.values() if a.rgbd_fused),
@@ -760,32 +1152,36 @@ class FLBackend(Node):
 
     def _publish_state(self, tag: str):
         mu, cov = mean_cov(self.L, self.h)
+        
+        # Extract pose (6D) from potentially 15D state
+        mu_pose = mu[:6]
+        cov_pose = cov[:6, :6]  # Pose covariance only
 
         out = Odometry()
         out.header.stamp = self.get_clock().now().to_msg()
         out.header.frame_id = self.odom_frame
         out.child_frame_id = "base_link"
 
-        out.pose.pose.position.x = float(mu[0])
-        out.pose.pose.position.y = float(mu[1])
-        out.pose.pose.position.z = float(mu[2])
+        out.pose.pose.position.x = float(mu_pose[0])
+        out.pose.pose.position.y = float(mu_pose[1])
+        out.pose.pose.position.z = float(mu_pose[2])
         
-        R = rotvec_to_rotmat(mu[3:6])
+        R = rotvec_to_rotmat(mu_pose[3:6])
         qx, qy, qz, qw = rotmat_to_quat(R)
         out.pose.pose.orientation.x = qx
         out.pose.pose.orientation.y = qy
         out.pose.pose.orientation.z = qz
         out.pose.pose.orientation.w = qw
-        out.pose.covariance = cov.reshape(-1).tolist()
+        out.pose.covariance = cov_pose.reshape(-1).tolist()  # Always 6x6 = 36 elements
         self.pub_state.publish(out)
 
         # Publish TF: odom -> base_link using the same pose we publish in /cdwm/state
         tf_msg = TransformStamped()
         tf_msg.header = out.header
         tf_msg.child_frame_id = out.child_frame_id
-        tf_msg.transform.translation.x = float(mu[0])
-        tf_msg.transform.translation.y = float(mu[1])
-        tf_msg.transform.translation.z = float(mu[2])
+        tf_msg.transform.translation.x = float(mu_pose[0])
+        tf_msg.transform.translation.y = float(mu_pose[1])
+        tf_msg.transform.translation.z = float(mu_pose[2])
         tf_msg.transform.rotation.x = float(out.pose.pose.orientation.x)
         tf_msg.transform.rotation.y = float(out.pose.pose.orientation.y)
         tf_msg.transform.rotation.z = float(out.pose.pose.orientation.z)
@@ -800,12 +1196,12 @@ class FLBackend(Node):
         m.id = 0
         m.type = Marker.SPHERE
         m.action = Marker.ADD
-        m.pose.position.x = float(mu[0])
-        m.pose.position.y = float(mu[1])
-        m.pose.position.z = float(mu[2])
-        m.scale.x = float(2.0 * math.sqrt(max(cov[0, 0], 1e-9)))
-        m.scale.y = float(2.0 * math.sqrt(max(cov[1, 1], 1e-9)))
-        m.scale.z = float(2.0 * math.sqrt(max(cov[2, 2], 1e-9)))
+        m.pose.position.x = float(mu_pose[0])
+        m.pose.position.y = float(mu_pose[1])
+        m.pose.position.z = float(mu_pose[2])
+        m.scale.x = float(2.0 * math.sqrt(max(cov_pose[0, 0], 1e-9)))
+        m.scale.y = float(2.0 * math.sqrt(max(cov_pose[1, 1], 1e-9)))
+        m.scale.z = float(2.0 * math.sqrt(max(cov_pose[2, 2], 1e-9)))
         m.color.a = 0.8
         m.color.r = 0.2
         m.color.g = 0.8
@@ -836,7 +1232,7 @@ class FLBackend(Node):
         if self.trajectory_file and self.last_odom_stamp is not None and tag == "odom":
             timestamp = self.last_odom_stamp  # Use odometry message timestamp
             self.trajectory_file.write(
-                f"{timestamp:.6f} {mu[0]:.6f} {mu[1]:.6f} {mu[2]:.6f} "
+                f"{timestamp:.6f} {mu_pose[0]:.6f} {mu_pose[1]:.6f} {mu_pose[2]:.6f} "
                 f"{qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
             )
             self.trajectory_file.flush()
@@ -1075,10 +1471,34 @@ class FLBackend(Node):
             self.add_dense_module(evidence)
     
     def destroy_node(self):
-        """Clean up trajectory file on shutdown."""
+        """Clean up trajectory file and process post-rosbag queue on shutdown."""
+        # Process post-rosbag queue: handle last messages that arrived after rosbag ended
+        if hasattr(self, 'post_rosbag_odom_queue') and len(self.post_rosbag_odom_queue) > 0:
+            self.get_logger().info(
+                f"Processing {len(self.post_rosbag_odom_queue)} queued odom messages on shutdown"
+            )
+            for odom_msg in self.post_rosbag_odom_queue:
+                try:
+                    self.on_odom(odom_msg)
+                except Exception as e:
+                    self.get_logger().warn(f"Error processing queued odom: {e}")
+        
+        if hasattr(self, 'post_rosbag_imu_queue') and len(self.post_rosbag_imu_queue) > 0:
+            self.get_logger().info(
+                f"Processing {len(self.post_rosbag_imu_queue)} queued IMU factors on shutdown"
+            )
+            for imu_msg in self.post_rosbag_imu_queue:
+                try:
+                    self.on_imu_factor(imu_msg)
+                except Exception as e:
+                    self.get_logger().warn(f"Error processing queued IMU factor: {e}")
+        
+        # Flush and close trajectory file
         if self.trajectory_file:
+            self.trajectory_file.flush()
             self.trajectory_file.close()
-            self.get_logger().info("Trajectory export closed")
+            self.get_logger().info("Trajectory export closed and flushed")
+        
         super().destroy_node()
 
 

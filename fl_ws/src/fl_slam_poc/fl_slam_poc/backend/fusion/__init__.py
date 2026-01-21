@@ -25,6 +25,9 @@ __all__ = [
     "marginalize",
     "condition",
     "product_of_experts",
+    "mixture_moment_match",
+    "embed_info_form",
+    "hellinger_squared_from_moments",
     # Gaussian geom
     "gaussian_frobenius_correction",
     # Information distances
@@ -42,6 +45,23 @@ __all__ = [
     "wishart_bregman",
     "bhattacharyya_coefficient_gaussian",
     "bhattacharyya_distance_gaussian",
+    # Lie operators (JAX - no NumPy fallback)
+    "skew",
+    "so3_exp",
+    "so3_log",
+    "se3_plus",
+    "se3_minus",
+    "so3_adjoint",
+    "se3_adjoint",
+    "so3_exp_batch",
+    "so3_log_batch",
+    "se3_plus_batch",
+    "se3_minus_batch",
+    # IMU kernel (JAX)
+    "imu_batched_projection_kernel",
+    "unscented_sigma_points",
+    "imu_prediction_residual",
+    "hellinger_squared_gaussian",
 ]
 
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
@@ -58,8 +78,28 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "marginalize": ("fl_slam_poc.backend.fusion.gaussian_info", "marginalize"),
     "condition": ("fl_slam_poc.backend.fusion.gaussian_info", "condition"),
     "product_of_experts": ("fl_slam_poc.backend.fusion.gaussian_info", "product_of_experts"),
+    "mixture_moment_match": ("fl_slam_poc.backend.fusion.gaussian_info", "mixture_moment_match"),
+    "embed_info_form": ("fl_slam_poc.backend.fusion.gaussian_info", "embed_info_form"),
+    "hellinger_squared_from_moments": ("fl_slam_poc.backend.fusion.gaussian_info", "hellinger_squared_from_moments"),
     # Gaussian geom
     "gaussian_frobenius_correction": ("fl_slam_poc.backend.fusion.gaussian_geom", "gaussian_frobenius_correction"),
+    # Lie operators (JAX - no NumPy fallback)
+    "skew": ("fl_slam_poc.backend.fusion.lie_jax", "skew"),
+    "so3_exp": ("fl_slam_poc.backend.fusion.lie_jax", "so3_exp"),
+    "so3_log": ("fl_slam_poc.backend.fusion.lie_jax", "so3_log"),
+    "se3_plus": ("fl_slam_poc.backend.fusion.lie_jax", "se3_plus"),
+    "se3_minus": ("fl_slam_poc.backend.fusion.lie_jax", "se3_minus"),
+    "so3_adjoint": ("fl_slam_poc.backend.fusion.lie_jax", "so3_adjoint"),
+    "se3_adjoint": ("fl_slam_poc.backend.fusion.lie_jax", "se3_adjoint"),
+    "so3_exp_batch": ("fl_slam_poc.backend.fusion.lie_jax", "so3_exp_batch"),
+    "so3_log_batch": ("fl_slam_poc.backend.fusion.lie_jax", "so3_log_batch"),
+    "se3_plus_batch": ("fl_slam_poc.backend.fusion.lie_jax", "se3_plus_batch"),
+    "se3_minus_batch": ("fl_slam_poc.backend.fusion.lie_jax", "se3_minus_batch"),
+    # IMU kernel (JAX)
+    "imu_batched_projection_kernel": ("fl_slam_poc.backend.fusion.imu_jax_kernel", "imu_batched_projection_kernel"),
+    "unscented_sigma_points": ("fl_slam_poc.backend.fusion.imu_jax_kernel", "unscented_sigma_points"),
+    "imu_prediction_residual": ("fl_slam_poc.backend.fusion.imu_jax_kernel", "imu_prediction_residual"),
+    "hellinger_squared_gaussian": ("fl_slam_poc.backend.fusion.imu_jax_kernel", "hellinger_squared_gaussian"),
     # Information distances
     "hellinger_sq_expfam": ("fl_slam_poc.backend.fusion.information_distances", "hellinger_sq_expfam"),
     "hellinger_expfam": ("fl_slam_poc.backend.fusion.information_distances", "hellinger_expfam"),

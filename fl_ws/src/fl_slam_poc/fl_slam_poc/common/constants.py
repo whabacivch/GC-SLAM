@@ -224,3 +224,55 @@ POINTCLOUD_QUEUE_SIZE = 2
 
 # Point cloud processing rate limit (Hz) - prevent overload
 POINTCLOUD_RATE_LIMIT_HZ = 30.0
+
+# =============================================================================
+# IMU Constants
+# =============================================================================
+
+# Default IMU noise parameters (typical for consumer-grade IMU like RealSense)
+# Reference: Forster et al. (2017) "On-Manifold Preintegration"
+IMU_GYRO_NOISE_DENSITY_DEFAULT = 1.0e-3     # rad/s/sqrt(Hz)
+IMU_ACCEL_NOISE_DENSITY_DEFAULT = 1.0e-2    # m/s^2/sqrt(Hz)
+IMU_GYRO_RANDOM_WALK_DEFAULT = 1.0e-5       # rad/s^2/sqrt(Hz)
+IMU_ACCEL_RANDOM_WALK_DEFAULT = 1.0e-4      # m/s^3/sqrt(Hz)
+
+# Default IMU topic (M3DGR dataset uses /camera/imu)
+IMU_TOPIC_DEFAULT = "/camera/imu"
+
+# Gravity vector (world frame, z-up convention)
+GRAVITY_DEFAULT = (0.0, 0.0, -9.81)
+
+# =============================================================================
+# Keyframe Constants
+# =============================================================================
+
+# Motion-based keyframe thresholds
+KEYFRAME_TRANSLATION_THRESHOLD_DEFAULT = 0.5   # meters
+KEYFRAME_ROTATION_THRESHOLD_DEFAULT = 0.26     # radians (~15 degrees)
+
+# =============================================================================
+# 15D State Extension Constants (Backend Phase 2)
+# =============================================================================
+# State ordering: [p(3), R(3), v(3), b_g(3), b_a(3)]
+
+# Initial state prior standard deviations
+STATE_PRIOR_POSE_TRANS_STD = 0.2       # meters
+STATE_PRIOR_POSE_ROT_STD = 0.1         # radians
+STATE_PRIOR_VELOCITY_STD = 1.0         # m/s (high uncertainty at init)
+STATE_PRIOR_GYRO_BIAS_STD = 0.01       # rad/s
+STATE_PRIOR_ACCEL_BIAS_STD = 0.1       # m/s^2
+
+# Process noise for bias random walk (per-second variance)
+PROCESS_NOISE_VELOCITY_STD = 0.1       # m/s per sqrt(s)
+PROCESS_NOISE_GYRO_BIAS_STD = 1.0e-5   # rad/s per sqrt(s) (matches IMU_GYRO_RANDOM_WALK_DEFAULT)
+PROCESS_NOISE_ACCEL_BIAS_STD = 1.0e-4  # m/s^2 per sqrt(s) (matches IMU_ACCEL_RANDOM_WALK_DEFAULT)
+
+# State dimension
+STATE_DIM_POSE = 6      # [x, y, z, rx, ry, rz]
+STATE_DIM_VELOCITY = 3  # [vx, vy, vz]
+STATE_DIM_BIAS = 6      # [bg_x, bg_y, bg_z, ba_x, ba_y, ba_z]
+STATE_DIM_FULL = 15     # Pose + Velocity + Bias
+
+# IMU factor message ordering (from IMUFactor.msg)
+# Covariance is 9x9 in basis [delta_p(3), delta_v(3), delta_theta(3)]
+IMU_FACTOR_COV_DIM = 9

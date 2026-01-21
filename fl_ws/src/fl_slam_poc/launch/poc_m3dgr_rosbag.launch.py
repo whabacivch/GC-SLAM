@@ -43,6 +43,16 @@ def generate_launch_description():
 
     sensor_qos_reliability = LaunchConfiguration("sensor_qos_reliability")
 
+    # IMU Integration
+    enable_imu = LaunchConfiguration("enable_imu")
+    imu_topic = LaunchConfiguration("imu_topic")
+    imu_gyro_noise_density = LaunchConfiguration("imu_gyro_noise_density")
+    imu_accel_noise_density = LaunchConfiguration("imu_accel_noise_density")
+    imu_gyro_random_walk = LaunchConfiguration("imu_gyro_random_walk")
+    imu_accel_random_walk = LaunchConfiguration("imu_accel_random_walk")
+    keyframe_translation_threshold = LaunchConfiguration("keyframe_translation_threshold")
+    keyframe_rotation_threshold = LaunchConfiguration("keyframe_rotation_threshold")
+
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="true"),
@@ -67,7 +77,8 @@ def generate_launch_description():
             DeclareLaunchArgument("base_frame", default_value="base_link"),
 
             # RGB-D decompression (M3DGR: compressed RGB + compressedDepth)
-            DeclareLaunchArgument("enable_decompress", default_value="true"),
+            # DISABLED: NumPy 2.x compatibility issues in sandbox
+            DeclareLaunchArgument("enable_decompress", default_value="false"),
             DeclareLaunchArgument("rgb_compressed_topic", default_value="/camera/color/image_raw/compressed"),
             DeclareLaunchArgument("depth_compressed_topic", default_value="/camera/aligned_depth_to_color/image_raw/compressedDepth"),
             DeclareLaunchArgument("camera_topic", default_value="/camera/image_raw"),
@@ -75,10 +86,10 @@ def generate_launch_description():
             # M3DGR Dynamic01 has no CameraInfo topic in the bag by default.
             DeclareLaunchArgument("camera_info_topic", default_value="/camera/depth/camera_info"),
 
-            DeclareLaunchArgument("publish_rgbd_evidence", default_value="true"),
+            DeclareLaunchArgument("publish_rgbd_evidence", default_value="false"),
             DeclareLaunchArgument("rgbd_evidence_topic", default_value="/sim/rgbd_evidence"),
-            DeclareLaunchArgument("enable_image", default_value="true"),
-            DeclareLaunchArgument("enable_depth", default_value="true"),
+            DeclareLaunchArgument("enable_image", default_value="false"),
+            DeclareLaunchArgument("enable_depth", default_value="false"),
             DeclareLaunchArgument("enable_camera_info", default_value="false"),
             # Intrinsics fallback (used when enable_camera_info=false)
             # M3DGR RealSense D435i camera intrinsics (640x480)
@@ -93,6 +104,17 @@ def generate_launch_description():
                 default_value="reliable",  # Use single subscription to avoid duplicate processing
                 description="QoS reliability for sensor subscriptions: reliable, best_effort, system_default, both",
             ),
+
+            # IMU Integration (enabled by default for M3DGR)
+            DeclareLaunchArgument("enable_imu", default_value="true"),
+            DeclareLaunchArgument("imu_topic", default_value="/camera/imu"),
+            DeclareLaunchArgument("imu_gyro_noise_density", default_value="1.0e-3"),
+            DeclareLaunchArgument("imu_accel_noise_density", default_value="1.0e-2"),
+            DeclareLaunchArgument("imu_gyro_random_walk", default_value="1.0e-5"),
+            DeclareLaunchArgument("imu_accel_random_walk", default_value="1.0e-4"),
+            # Motion-based keyframe thresholds
+            DeclareLaunchArgument("keyframe_translation_threshold", default_value="0.5"),
+            DeclareLaunchArgument("keyframe_rotation_threshold", default_value="0.26"),
 
             # Livox converter node
             Node(
@@ -166,6 +188,16 @@ def generate_launch_description():
 
                         "sensor_qos_reliability": sensor_qos_reliability,
 
+                        # IMU Integration
+                        "enable_imu": enable_imu,
+                        "imu_topic": imu_topic,
+                        "imu_gyro_noise_density": imu_gyro_noise_density,
+                        "imu_accel_noise_density": imu_accel_noise_density,
+                        "imu_gyro_random_walk": imu_gyro_random_walk,
+                        "imu_accel_random_walk": imu_accel_random_walk,
+                        "keyframe_translation_threshold": keyframe_translation_threshold,
+                        "keyframe_rotation_threshold": keyframe_rotation_threshold,
+
                         # Reduced birth intensity to prevent too many anchors diluting responsibilities
                         "birth_intensity": 5.0,
                     }
@@ -206,6 +238,11 @@ def generate_launch_description():
                         "odom_frame": odom_frame,
                         "rgbd_evidence_topic": rgbd_evidence_topic,
                         "trajectory_export_path": "/tmp/fl_slam_trajectory.tum",
+
+                        # IMU Integration parameters
+                        "enable_imu_fusion": enable_imu,
+                        "imu_gyro_random_walk": imu_gyro_random_walk,
+                        "imu_accel_random_walk": imu_accel_random_walk,
                     }
                 ],
                 condition=IfCondition(enable_backend),

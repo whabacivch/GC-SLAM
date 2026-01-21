@@ -16,7 +16,7 @@ import numpy as np
 import tf2_ros
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointField
+from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan, PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformException
 try:
@@ -105,6 +105,8 @@ class SensorIO:
         self.image_buffer = []  # (timestamp, rgb_array, frame_id)
         self.depth_buffer = []  # (timestamp, depth_array, points, frame_id)
         self.pointcloud_buffer = []  # (timestamp, points_array, frame_id)
+        self.imu_buffer = []  # (timestamp, accel_xyz, gyro_xyz) - event-driven clearing
+        self.last_imu_frame_id = None
         
         # State
         self.last_pose = None
@@ -140,8 +142,18 @@ class SensorIO:
             static_qos=tf_static_qos,
         )
         
-        # CV Bridge
-        self.cv_bridge = CvBridge() if CvBridge is not None else None
+        # CV Bridge (handle NumPy 2.x incompatibility gracefully)
+        if CvBridge is not None:
+            try:
+                self.cv_bridge = CvBridge()
+            except (ImportError, AttributeError, RuntimeError) as e:
+                self.node.get_logger().warn(
+                    f"cv_bridge initialization failed (NumPy 2.x compatibility issue): {e}. "
+                    "Image processing will be disabled."
+                )
+                self.cv_bridge = None
+        else:
+            self.cv_bridge = None
         
         # Subscribe to sensors
         self._setup_subscriptions()
@@ -187,7 +199,13 @@ class SensorIO:
             if self.config.get("enable_camera_info", False):
                 self.node.create_subscription(
                     CameraInfo, self.config["camera_info_topic"], self._on_camera_info, qos)
-        
+
+            # IMU subscription (high-rate sensor for preintegration)
+            if self.config.get("enable_imu", False):
+                imu_topic = self.config.get("imu_topic", constants.IMU_TOPIC_DEFAULT)
+                self.node.create_subscription(Imu, imu_topic, self._on_imu, qos)
+                self.node.get_logger().info(f"SensorIO: IMU subscription enabled on {imu_topic}")
+
         mode_str = "3D PointCloud" if self.use_3d_pointcloud else "2D LaserScan"
         self.node.get_logger().info(
             f"SensorIO ({mode_str} mode) subscribed to {self.config['odom_topic']} "
@@ -261,6 +279,10 @@ class SensorIO:
     def set_pointcloud_callback(self, callback):
         """Set external callback for point cloud processing."""
         self._pointcloud_callback = callback
+
+    def set_imu_callback(self, callback):
+        """Set external callback for IMU processing."""
+        self._imu_callback = callback
     
     def _on_scan_internal(self, msg: LaserScan):
         """Internal scan handler - calls external callback if set."""
@@ -465,7 +487,45 @@ class SensorIO:
                 f"SensorIO: Camera intrinsics received from CameraInfo: "
                 f"fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}"
             )
-    
+
+    def _on_imu(self, msg: Imu):
+        """
+        Buffer IMU measurements for preintegration.
+
+        Uses event-driven clearing: measurements accumulate until explicitly
+        cleared after preintegration (no automatic sliding window).
+        """
+        if self._is_duplicate("imu", msg.header.stamp, msg.header.frame_id):
+            return
+
+        stamp = stamp_to_sec(msg.header.stamp)
+        accel = np.array([
+            msg.linear_acceleration.x,
+            msg.linear_acceleration.y,
+            msg.linear_acceleration.z
+        ], dtype=float)
+        gyro = np.array([
+            msg.angular_velocity.x,
+            msg.angular_velocity.y,
+            msg.angular_velocity.z
+        ], dtype=float)
+
+        self.last_imu_frame_id = msg.header.frame_id
+        self.imu_buffer.append((stamp, accel, gyro))
+
+        # Debug: Log first IMU received
+        if not hasattr(self, '_first_imu_logged'):
+            self._first_imu_logged = True
+            self.node.get_logger().info(
+                f"SensorIO: First IMU received, frame_id={msg.header.frame_id}, "
+                f"accel=({accel[0]:.2f}, {accel[1]:.2f}, {accel[2]:.2f}), "
+                f"gyro=({gyro[0]:.4f}, {gyro[1]:.4f}, {gyro[2]:.4f})"
+            )
+
+        # Call external callback if set
+        if hasattr(self, '_imu_callback'):
+            self._imu_callback(msg)
+
     def _depth_to_points(self, depth: np.ndarray, header) -> Optional[np.ndarray]:
         """Convert depth image to 3D points in base_frame."""
         if self.depth_intrinsics is None:
@@ -699,3 +759,46 @@ class SensorIO:
     def is_3d_mode(self) -> bool:
         """Check if running in 3D point cloud mode."""
         return self.use_3d_pointcloud
+
+    def get_imu_measurements(self, start_sec: float, end_sec: float) -> list:
+        """
+        Retrieve IMU measurements in time interval [start_sec, end_sec].
+
+        Args:
+            start_sec: Start of interval (seconds)
+            end_sec: End of interval (seconds)
+
+        Returns:
+            List of (timestamp, accel, gyro) tuples sorted by timestamp.
+            Each accel/gyro is a numpy array of shape (3,).
+        """
+        measurements = [
+            (t, a.copy(), g.copy())
+            for t, a, g in self.imu_buffer
+            if start_sec <= t <= end_sec
+        ]
+        return sorted(measurements, key=lambda x: x[0])
+
+    def clear_imu_buffer(self, before_sec: float) -> int:
+        """
+        Clear IMU measurements before the specified timestamp.
+
+        Called after preintegration to remove consumed measurements.
+        This is the event-driven clearing approach (no automatic sliding window).
+
+        Args:
+            before_sec: Clear all measurements with timestamp < before_sec
+
+        Returns:
+            Number of measurements cleared
+        """
+        original_len = len(self.imu_buffer)
+        self.imu_buffer = [
+            (t, a, g) for t, a, g in self.imu_buffer if t >= before_sec
+        ]
+        cleared = original_len - len(self.imu_buffer)
+        return cleared
+
+    def get_imu_buffer_size(self) -> int:
+        """Get current number of buffered IMU measurements."""
+        return len(self.imu_buffer)

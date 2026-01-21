@@ -4,6 +4,216 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-21: IMU Integration Phase 2 - Backend 15D State Extension & Hellinger-Dirichlet Fusion ✅
+
+### Summary
+
+Implemented **Milestone 2** from the roadmap: Backend 15D State Extension & IMU Factor Fusion (Phase 2). This is the second step toward the near-term priority of IMU Integration. The backend now maintains a 15D state (pose + velocity + biases) and fuses IMU factors using batched moment matching with Hellinger-tilted likelihood and Dirichlet-categorical routing.
+
+### Architecture Overview
+
+This implementation follows the "maximal by-construction" plan with:
+- **Associative, order-robust fusion** in natural coordinates
+- **Manifold-correct** SE(3) handling via ⊕/⊖ operators
+- **Robustness by construction** using Hellinger-tilted likelihood
+- **Self-adaptive** Dirichlet-categorical routing with Frobenius retention
+- **Single declared e-projection** via batched unscented transform (no per-anchor Schur)
+
+### New Files Created
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/routing/__init__.py` - Routing module exports
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/routing/dirichlet_routing.py` - DirichletRoutingModule with Frobenius retention, Hellinger shift monitoring, and `compute_imu_logits` for Hellinger-tilted weights
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/lie_jax.py` - JAX/NumPy Lie operators: `so3_exp`, `so3_log`, `se3_plus`, `se3_minus`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/imu_jax_kernel.py` - Batched IMU projection kernel with `unscented_sigma_points`, `imu_prediction_residual`, `hellinger_squared_gaussian`, and `imu_batched_projection_kernel`
+
+### Files Modified
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/constants.py` - Added 15D state constants: `STATE_DIM_FULL=15`, priors for velocity/bias, process noise for bias random walk
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/__init__.py` - Added `DirichletRoutingModule` export
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/__init__.py` - Added lazy exports for new functions: `mixture_moment_match`, `embed_info_form`, `hellinger_squared_from_moments`, Lie operators, IMU kernel
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/gaussian_info.py` - Added `mixture_moment_match` (correct mixture collapse via e-projection), `embed_info_form` (dimension embedding), `hellinger_squared_from_moments`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py` - Major updates:
+  - State extended from 6D to 15D (pose + velocity + biases)
+  - Process noise extended to 15D with bias random walk
+  - Added IMU factor subscription and `on_imu_factor` handler
+  - Updated `on_odom` for 15D compatibility (embeds 6D delta into 15D)
+  - Updated `on_loop` for 15D compatibility (extracts 6D pose, updates, re-embeds)
+
+## 2026-01-21: Compliance Fixes - Remove Schur Complement + Enforce Batched IMU Fusion
+
+### Summary
+
+Follow-up audit fixes to satisfy strict invariants:
+- **NO Schur complement** in loop closure updates.
+- **NO per-anchor loop** in IMU fusion (batched JAX kernel).
+- **NO natural-parameter weighted sum** for IMU mixture collapse (global moment match in expectation space).
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
+  - Replaced loop-closure joint update + Schur complement marginalization with a **one-shot recomposition** update (anchor↔current message passing), Jacobian-free.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/imu_jax_kernel.py`
+  - Rewrote `imu_batched_projection_kernel` to use **manifold retraction** for pose sigma support and to moment-match in the **tangent at `current_mu`** (avoids rotation-vector-as-Euclidean mistakes).
+  - Added `R_imu` to predictive residual covariance before Hellinger tilt: `S = Cov(r) + R_imu`.
+  - Replaced host-sync degeneracy branch with a **JIT-safe** `jax.lax.cond` fallback selection and removed Python bool/int/float concretization in diagnostics.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
+  - Replaced Euclidean pose subtraction in predict residuals and loop innovation with SE(3) relative transforms (`se3_relative`) to keep rotation updates chart-consistent.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/transforms/se3.py`
+  - Added `se3_relative(a, b)` helper for group-consistent pose differences (`b^{-1} ∘ a`).
+
+### Follow-up Issue (Not Yet Implemented)
+- **State orientation representation is still stored as a global rotation vector (`ω`)** in backend mean state. While we now avoid Euclidean subtraction and do tangent-space moment matching + retraction in the IMU kernel, the fully by-construction solution is to store orientation as:
+  - an **error-state** around a reference rotation `R̄` (preferred), or
+  - a **unit quaternion** with normalization.
+  This refactor should remove any remaining “global axis-angle Gaussian” pathologies and further reduce ~π-flip rotation failure modes.
+  - Updated `_publish_state` to extract 6D pose for Odometry messages
+  - Added IMU tracking: `imu_factor_count`, `last_imu_time`
+  - Added `_imu_routing_module` for Dirichlet routing
+  - Added `keyframe_to_anchor` mapping (for future use)
+
+### Key Design Decisions
+
+1. **Global Moment Matching (NOT Natural-Param Weighted Sum)**
+   - Plan specified: Mixture collapse via single e-projection in expectation space
+   - Implementation: `mixture_moment_match()` computes μ = Σᵢwᵢμᵢ and Σ = Σᵢwᵢ(Σᵢ + (μᵢ-μ)(μᵢ-μ)ᵀ)
+   - This is the correct Legendre e-projection, NOT weighted sum of (Λ,h)
+
+2. **Batched JAX Kernel Architecture**
+   - Plan specified: One JAX kernel call per IMU packet, not per-anchor
+   - Implementation: `imu_batched_projection_kernel` processes all anchors together
+   - Eliminates per-anchor Schur complements; direct global moment matching onto ξⱼ
+
+3. **Hellinger-Tilted Likelihood**
+   - Plan specified: ωᵢ ∝ exp(-½r^TΣ⁻¹r)·exp(-2Dₕ(p̂ᵢ,pₙₒₘ))
+   - Implementation: `hellinger_squared_gaussian()` computes closed-form H² via Bhattacharyya coefficient
+   - pₙₒₘ = N(0, Rₙₒₘ), p̂ᵢ = N(r̄ᵢ, Sᵢ) per plan
+
+4. **Dirichlet Routing with Frobenius Retention**
+   - Plan specified: α' = t·α (cubic contraction), c = B·softmax(s)
+   - Implementation: `DirichletRoutingModule` with configurable retention, evidence budget
+   - Monitors Hellinger shift H²(πₜ, πₜ₋₁) as stability diagnostic
+
+5. **Anchor Embedding for IMU Factor**
+   - Anchors stored in 6D (pose only); embedded to 15D for batched kernel
+   - Velocity set to 0 (unknown), bias set to reference bias from IMU factor
+
+### Mathematical Correctness Guarantees
+
+| Property | Method | Status |
+|----------|--------|--------|
+| Order-Invariant Fusion | Additive natural params | Exact |
+| Manifold Correctness | ⊕/⊖ via Lie operators | Exact |
+| Robustness Tilt | Hellinger exp(-2Dₕ) | Exact (declared model operator) |
+| Routing Retention | Frobenius cubic | Exact (closed form) |
+| Mixture Collapse | e-projection | Declared approx (single) |
+| Bias Evolution | Random walk | Exact (additive noise) |
+
+### Next Steps
+
+- Integration testing with M3DGR rosbag
+- Optional JAX GPU acceleration for batched kernel
+- Bias feedback loop: backend bias estimates → frontend preintegrator
+
+## 2026-01-21: IMU Integration Phase 1 - Infrastructure & Preintegration ✅
+
+### Summary
+
+Implemented **Milestone 1** from the roadmap: IMU Sensor + Preintegration (Phase 1). This is the first step toward the near-term priority of IMU Integration & 15D State Extension. The frontend now subscribes to IMU data, preintegrates measurements between keyframes, and publishes `IMUFactor` messages for backend fusion.
+
+### New Files Created
+
+- `fl_ws/src/fl_slam_poc/msg/IMUFactor.msg` - Preintegrated IMU constraint message between keyframes
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/operators/imu_preintegration.py` - IMUPreintegrator class implementing Forster et al. (2017) equations
+- `fl_ws/src/fl_slam_poc/test/test_imu_preintegration.py` - 23 unit tests for IMU preintegration
+
+### Files Modified
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/constants.py` - Added IMU noise parameters and keyframe threshold defaults
+- `fl_ws/src/fl_slam_poc/CMakeLists.txt` - Added IMUFactor.msg to message generation
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/operators/__init__.py` - Lazy exports for `IMUPreintegrator`, `IMUPreintegrationResult`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/processing/sensor_io.py` - IMU subscription, buffer, event-driven clearing
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py` - IMU integration, motion-based keyframes, IMU factor publishing
+- `fl_ws/src/fl_slam_poc/launch/poc_m3dgr_rosbag.launch.py` - IMU parameters (enabled by default)
+
+### Key Design Decisions (Deviations from Original Plan)
+
+1. **Keyframe Policy: Motion-Based (not time-based)**
+   - **Original plan:** Time-based keyframes every 1.0 second
+   - **Implementation:** Motion-based - create keyframe when translation > 0.5m OR rotation > 15 deg
+   - **Rationale:** Adapts to robot speed (slow robot = fewer keyframes, fast robot = more), avoids arbitrary time intervals
+
+2. **IMU Buffer: Event-Driven Clearing (not sliding window)**
+   - **Original plan:** 1-second sliding window for IMU buffer
+   - **Implementation:** Keep all measurements since last keyframe, clear after preintegration
+   - **Rationale:** Sliding windows are arbitrary; event-driven ensures no data loss and consistency with motion-based keyframes
+
+3. **IMU Enabled by Default**
+   - Launch file sets `enable_imu:=true` so `scripts/run_and_evaluate.sh` uses IMU automatically for progress tracking
+
+### Implementation Details
+
+**IMUPreintegrator:**
+
+- Implements Forster et al. (2017) "On-Manifold Preintegration" equations
+- Outputs: `delta_R` (3x3), `delta_v` (3D), `delta_p` (3D), `Sigma_preint` (9x9 covariance)
+- Uses rotation vector (axis-angle) representation via SO(3) exponential map
+- Applies Frobenius correction to covariance (identity for Gaussian family)
+- OpReport: `approximation_triggers: ["Linearization"]`, `family_in: "IMU"`, `family_out: "Gaussian"`
+
+**Motion-Based Keyframes:**
+
+- `_check_keyframe(current_pose, stamp_sec)` computes translation and rotation from last keyframe
+- Triggers new keyframe when either threshold exceeded
+- Logs: `"Keyframe N created at t=X.XXXs (trans=X.XXm, rot=X.X deg)"`
+
+**IMU Factor Publishing:**
+
+- On keyframe creation, preintegrates all IMU measurements in interval `[t_i, t_j]`
+- Publishes `IMUFactor` message to `/sim/imu_factor`
+- Clears IMU buffer up to `t_j` after publishing
+
+### Testing
+
+- **23 unit tests** covering:
+  - Identity preintegration (zero input)
+  - Constant velocity / acceleration cases
+  - Pure rotation cases
+  - Covariance properties (9x9, symmetric, positive definite, grows with time)
+  - OpReport compliance (name, family, triggers, Frobenius)
+  - Bias handling
+  - Edge cases (empty, single measurement, high/low frequency)
+- **All 65 existing audit invariant tests** still pass
+
+### Verification
+
+```bash
+# Build
+cd fl_ws && colcon build --packages-select fl_slam_poc
+
+# Run IMU tests
+cd fl_ws/src/fl_slam_poc && pytest test/test_imu_preintegration.py -v
+
+# Run full evaluation (IMU enabled by default)
+./scripts/run_and_evaluate.sh
+
+# Check IMU factors being published
+ros2 topic echo /sim/imu_factor
+```
+
+### Next Steps
+
+**Phase 2: Backend 15D State Extension** - Extend backend state from 6DOF SE(3) to 15DOF (pose + velocity + biases) and implement IMU factor fusion. This will allow the backend to consume the `/sim/imu_factor` messages now being published by the frontend.
+
+### Design Invariants Preserved
+
+- ✅ **Frobenius correction:** IMU preintegration emits `approximation_triggers: {"Linearization"}` and applies correction
+- ✅ **Closed-form-first:** Preintegration uses closed-form integration (no iterative solvers)
+- ✅ **Soft association:** No changes to association (still responsibility-based)
+- ✅ **OpReport taxonomy:** New operator emits OpReport with all required fields
+- ✅ **No ground-truth ingestion:** Backend unchanged, still doesn't subscribe to GT topics
+
+---
+
 ## 2026-01-21: 3D Mode Sensor Wiring (LiDAR + RGB-D)
 
 ### Summary
@@ -1272,6 +1482,15 @@ Status monitoring: Will report DEAD_RECKONING if no loop factors
 ✅ Clear diagnostic logging for troubleshooting initialization
 ✅ Faster startup due to zero-motion kickstart
 ✅ More robust to QoS and timing variations in rosbags
+
+## 2026-01-21 - Roadmap Phase Ordering Clarification
+
+### Summary
+- Reordered near-term phases so **evaluation/provenance hardening comes before enabling dense RGB-D in 3D**, preventing “enabled but ineffective” sensor contributions from being mistaken for real progress.
+- Clarified keyframe scheduling wording to match the current **motion-based default** policy, with time-based keyframes explicitly marked as optional/debug-only.
+
+### Files Updated
+- `ROADMAP.md`
 
 ## 2026-01-21 - MVP Import Closure Cleanup + Roadmap + Artifact Hygiene
 

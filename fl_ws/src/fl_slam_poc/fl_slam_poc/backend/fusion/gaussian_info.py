@@ -284,3 +284,147 @@ def product_of_experts(experts: list[Tuple[np.ndarray, np.ndarray]],
         h_sum += w * h
     
     return L_sum, h_sum
+
+
+def mixture_moment_match(
+    components: list[Tuple[np.ndarray, np.ndarray]],
+    weights: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Collapse a Gaussian mixture via moment matching (e-projection).
+    
+    This is the CORRECT way to summarize a mixture posterior as a single
+    Gaussian. It minimizes KL divergence from the mixture to the Gaussian
+    family (Legendre e-projection).
+    
+    Algorithm:
+        μ = Σᵢ wᵢ μᵢ
+        Σ = Σᵢ wᵢ (Σᵢ + (μᵢ - μ)(μᵢ - μ)ᵀ)
+    
+    Then convert to information form:
+        Λ = Σ⁻¹, h = Λμ
+    
+    Args:
+        components: List of (mu, cov) tuples for each mixture component
+        weights: Array of mixture weights (must sum to 1)
+    
+    Returns:
+        (L, h): Information form of the moment-matched Gaussian
+    
+    Note:
+        This is NOT the same as weighted sum of natural parameters!
+        That would give incorrect uncertainty (often overconfident).
+    """
+    if len(components) == 0:
+        raise ValueError("Need at least one component")
+    
+    weights = np.asarray(weights, dtype=float)
+    weights = weights / np.sum(weights)  # Ensure normalized
+    
+    n = len(components[0][0])
+    
+    # Step 1: Compute mixture mean
+    mu_mixture = np.zeros(n, dtype=float)
+    for (mu_i, _), w_i in zip(components, weights):
+        mu_mixture += w_i * np.asarray(mu_i, dtype=float)
+    
+    # Step 2: Compute mixture covariance (includes spread of means)
+    cov_mixture = np.zeros((n, n), dtype=float)
+    for (mu_i, cov_i), w_i in zip(components, weights):
+        mu_i = np.asarray(mu_i, dtype=float)
+        cov_i = np.asarray(cov_i, dtype=float)
+        diff = mu_i - mu_mixture
+        cov_mixture += w_i * (cov_i + np.outer(diff, diff))
+    
+    # Ensure symmetric
+    cov_mixture = 0.5 * (cov_mixture + cov_mixture.T)
+    
+    # Convert to information form
+    return make_evidence(mu_mixture, cov_mixture)
+
+
+def embed_info_form(
+    L_small: np.ndarray,
+    h_small: np.ndarray,
+    indices: np.ndarray,
+    full_dim: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Embed lower-dimensional information form into full-dimensional space.
+    
+    Used to fuse evidence that only affects a subset of dimensions.
+    For example, embedding 6D odometry into 15D state.
+    
+    Args:
+        L_small: Information matrix (m×m)
+        h_small: Information vector (m,)
+        indices: Which dimensions in full space (m,), e.g., [0,1,2,3,4,5]
+        full_dim: Full state dimension (n), e.g., 15
+    
+    Returns:
+        (L_full, h_full): Embedded information form (n×n, n)
+    
+    Note:
+        The embedded information matrix has zeros in rows/columns not
+        in indices, meaning those dimensions have zero information gain
+        (infinite variance) from this factor.
+    """
+    L_small = np.asarray(L_small, dtype=float)
+    h_small = _as_vector(h_small)
+    indices = np.asarray(indices, dtype=int)
+    
+    L_full = np.zeros((full_dim, full_dim), dtype=float)
+    h_full = np.zeros(full_dim, dtype=float)
+    
+    L_full[np.ix_(indices, indices)] = L_small
+    h_full[indices] = h_small
+    
+    return L_full, h_full
+
+
+def hellinger_squared_from_moments(
+    mu1: np.ndarray, cov1: np.ndarray,
+    mu2: np.ndarray, cov2: np.ndarray,
+) -> float:
+    """
+    Squared Hellinger distance H²(N₁, N₂) from moment parameters.
+    
+    This is the same as hellinger_distance() but takes moment form
+    directly, avoiding redundant conversions.
+    
+    H²(p, q) = 1 - BC where BC = ∫√(pq)dx
+    
+    For Gaussians:
+        BC = |Σ₁|^{1/4} |Σ₂|^{1/4} |Σ_avg|^{-1/2} exp(-⅛ Δμᵀ Σ_avg⁻¹ Δμ)
+    
+    Used for Hellinger-tilted likelihood in robust IMU fusion.
+    """
+    mu1 = np.asarray(mu1, dtype=float).reshape(-1)
+    mu2 = np.asarray(mu2, dtype=float).reshape(-1)
+    cov1 = np.asarray(cov1, dtype=float)
+    cov2 = np.asarray(cov2, dtype=float)
+    
+    cov_avg = 0.5 * (cov1 + cov2)
+    
+    _, logdet_avg = np.linalg.slogdet(cov_avg)
+    _, logdet1 = np.linalg.slogdet(cov1)
+    _, logdet2 = np.linalg.slogdet(cov2)
+    
+    # log(BC) = 0.25*(logdet1 + logdet2) - 0.5*logdet_avg - 0.125*mahal²
+    log_bc = 0.25 * logdet1 + 0.25 * logdet2 - 0.5 * logdet_avg
+    
+    diff = mu1 - mu2
+    try:
+        cov_avg_inv = np.linalg.inv(cov_avg)
+        mahal_sq = float(diff @ cov_avg_inv @ diff)
+    except np.linalg.LinAlgError:
+        # Fallback: use pseudoinverse
+        cov_avg_inv = np.linalg.pinv(cov_avg)
+        mahal_sq = float(diff @ cov_avg_inv @ diff)
+    
+    log_bc -= 0.125 * mahal_sq
+    
+    bc = np.exp(log_bc)
+    h_sq = max(0.0, 1.0 - bc)
+    
+    return float(h_sq)
