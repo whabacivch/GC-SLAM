@@ -11,6 +11,8 @@ All geometric transforms use geometry.se3 (exact operations).
 """
 
 from typing import Optional, Tuple
+import ast
+import json
 import time
 import numpy as np
 import tf2_ros
@@ -26,6 +28,7 @@ except ImportError:
 
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.se3 import quat_to_rotmat, se3_compose, rotmat_to_rotvec, rotvec_to_rotmat
+from fl_slam_poc.common.op_report import OpReport
 
 
 def pointcloud2_to_array(msg: PointCloud2) -> np.ndarray:
@@ -336,12 +339,94 @@ class SensorIO:
                     points = self._transform_points(points, transform)
                     frame_id = base_frame
                 else:
+                    # Bag playback often has no TF. If we have an explicit static extrinsic, use it.
+                    # Convention: lidar_base_extrinsic is T_base_lidar (6DOF) mapping lidar-frame points into base_frame.
+                    extr = self.config.get("lidar_base_extrinsic", None)
+                    if extr is not None:
+                        try:
+                            # Launch files sometimes pass arrays as strings (e.g. "[0,0,0,0,0,0]").
+                            if isinstance(extr, str):
+                                s = extr.strip()
+                                if s == "":
+                                    raise ValueError("empty string")
+                                try:
+                                    extr = json.loads(s)
+                                except Exception:
+                                    extr = ast.literal_eval(s)
+                            extr = np.asarray(extr, dtype=float).reshape(-1)
+                            if extr.shape == (6,):
+                                points = self._transform_points(points, extr)
+                                frame_id = base_frame
+                                if not hasattr(self, "_logged_pc_static_extrinsic"):
+                                    self._logged_pc_static_extrinsic = True
+                                    self.node.get_logger().info(
+                                        f"SensorIO: TF missing for pointcloud ({base_frame} ← {msg.header.frame_id}); "
+                                        "using lidar_base_extrinsic parameter to transform points."
+                                    )
+                                    if hasattr(self.node, "_publish_report"):
+                                        report = OpReport(
+                                            name="PointCloudTransformFallback",
+                                            exact=True,
+                                            family_in="PointCloud2",
+                                            family_out="PointCloud2",
+                                            closed_form=True,
+                                            metrics={
+                                                "source": "lidar_base_extrinsic",
+                                                "target_frame": base_frame,
+                                                "source_frame": str(msg.header.frame_id),
+                                            },
+                                            notes="TF lookup failed; used explicit static extrinsic (no-TF mode).",
+                                        )
+                                        report.validate()
+                                        self.node._publish_report(report)  # type: ignore[attr-defined]
+                            else:
+                                raise ValueError(f"expected shape (6,), got {extr.shape}")
+                        except Exception as e_extr:
+                            if not hasattr(self, "_logged_pc_extrinsic_bad"):
+                                self._logged_pc_extrinsic_bad = True
+                                self.node.get_logger().error(
+                                    f"SensorIO: lidar_base_extrinsic provided but invalid ({e_extr}). "
+                                    "Will NOT transform pointcloud; results may be in wrong frame."
+                                )
+                                if hasattr(self.node, "_publish_report"):
+                                    report = OpReport(
+                                        name="PointCloudExtrinsicInvalid",
+                                        exact=True,
+                                        family_in="PointCloud2",
+                                        family_out="PointCloud2",
+                                        closed_form=True,
+                                        metrics={
+                                            "target_frame": base_frame,
+                                            "source_frame": str(msg.header.frame_id),
+                                            "error": f"{type(e_extr).__name__}: {e_extr}",
+                                        },
+                                        notes="lidar_base_extrinsic was provided but could not be parsed/applied.",
+                                    )
+                                    report.validate()
+                                    self.node._publish_report(report)  # type: ignore[attr-defined]
+                    # If no TF and no extrinsic, keep existing CRITICAL warning behavior.
                     if not hasattr(self, '_logged_pc_tf_fail'):
                         self._logged_pc_tf_fail = True
                         self.node.get_logger().error(
                             f"CRITICAL: Cannot transform pointcloud from '{frame_id}' to '{base_frame}'. "
                             f"TF lookup failed! Points will be in wrong frame, anchors/loops may fail."
                         )
+                        if hasattr(self.node, "_publish_report"):
+                            report = OpReport(
+                                name="PointCloudTransformMissing",
+                                exact=True,
+                                family_in="PointCloud2",
+                                family_out="PointCloud2",
+                                closed_form=True,
+                                metrics={
+                                    "target_frame": base_frame,
+                                    "source_frame": str(msg.header.frame_id),
+                                    "has_lidar_base_extrinsic": bool(self.config.get("lidar_base_extrinsic", "")),
+                                },
+                                notes="TF lookup failed and no usable lidar_base_extrinsic was available.",
+                            )
+                            report.validate()
+                            self.node._publish_report(report)  # type: ignore[attr-defined]
             else:
                 if not hasattr(self, '_logged_pc_no_tf'):
                     self._logged_pc_no_tf = True

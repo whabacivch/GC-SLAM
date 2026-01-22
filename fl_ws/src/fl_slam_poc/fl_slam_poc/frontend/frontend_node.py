@@ -161,6 +161,8 @@ class Frontend(Node):
         self.declare_parameter("camera_frame", "camera_link")
         self.declare_parameter("scan_frame", "base_link")
         self.declare_parameter("tf_timeout_sec", 0.05)
+        # No-TF LiDAR extrinsic (T_base_lidar): [x,y,z,rx,ry,rz]. If empty, TF is required.
+        self.declare_parameter("lidar_base_extrinsic", "")
         
         # Fisher-Rao
         self.declare_parameter("fr_distance_scale_prior", 1.0)
@@ -210,6 +212,8 @@ class Frontend(Node):
             "feature_buffer_len": int(self.get_parameter("feature_buffer_len").value),
             "depth_stride": int(self.get_parameter("depth_stride").value),
             "sensor_qos_reliability": str(self.get_parameter("sensor_qos_reliability").value),
+            # LiDAR extrinsic fallback (used when TF is missing)
+            "lidar_base_extrinsic": self.get_parameter("lidar_base_extrinsic").value,
             # IMU
             "enable_imu": bool(self.get_parameter("enable_imu").value),
             "imu_topic": str(self.get_parameter("imu_topic").value),

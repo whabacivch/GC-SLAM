@@ -56,14 +56,14 @@ graph TB
         ODOM["/odom<br/>(nav_msgs/Odometry)<br/>absolute pose"]
         LIVOX["/livox/mid360/lidar<br/>(Livox CustomMsg)"]
         IMU["/camera/imu<br/>(sensor_msgs/Imu)"]
-        RGB_DISABLED["/camera/color/.../compressed<br/>(DISABLED)"]
-        DEPTH_DISABLED["/camera/.../compressedDepth<br/>(DISABLED)"]
+        RGB_COMPRESSED["/camera/color/image_raw/compressed"]
+        DEPTH_COMPRESSED["/camera/aligned_depth_to_color/image_raw/compressedDepth"]
     end
 
     subgraph "Preprocessors - frontend/"
         ODOM_BRIDGE["tb3_odom_bridge.py<br/>absolute → delta pose"]
         LIVOX_CONV["livox_converter.py<br/>Livox → PointCloud2"]
-        IMG_DECOMP["image_decompress.py<br/>(DISABLED)"]
+        IMG_DECOMP_CPP["image_decompress_cpp<br/>(C++)"]
     end
 
     subgraph "Shared - common/"
@@ -97,8 +97,8 @@ graph TB
 
     ODOM --> ODOM_BRIDGE
     LIVOX --> LIVOX_CONV
-    RGB_DISABLED -.-> IMG_DECOMP
-    DEPTH_DISABLED -.-> IMG_DECOMP
+    RGB_COMPRESSED --> IMG_DECOMP_CPP
+    DEPTH_COMPRESSED --> IMG_DECOMP_CPP
 
     ODOM_BRIDGE -->|"/sim/odom<br/>(delta pose)"| FRONTEND
     ODOM_BRIDGE -->|"/sim/odom<br/>(delta pose)"| BACKEND
@@ -138,12 +138,12 @@ graph TB
 - `/odom` - Absolute pose odometry (`nav_msgs/Odometry`)
 - `/livox/mid360/lidar` - Livox LiDAR data (`Livox CustomMsg`)
 - `/camera/imu` - IMU data (`sensor_msgs/Imu`)
-- Camera topics (RGB/Depth) - Currently disabled in MVP
+- Camera topics (RGB/Depth) - Present in bag as compressed; decompressed by `image_decompress_cpp` (usage still controlled by frontend flags)
 
 **Preprocessors (`frontend/`):**
 - `tb3_odom_bridge.py` - Converts absolute odometry to delta poses (`/odom` → `/sim/odom`)
 - `livox_converter.py` - Converts Livox messages to PointCloud2 (`/livox/mid360/lidar` → `/lidar/points`)
-- `image_decompress.py` - Decompresses rosbag images (currently disabled)
+- `image_decompress_cpp` - Decompresses rosbag images (compressed RGB + compressedDepth → raw Image topics)
 
 **Frontend Node (`frontend/`):**
 - `frontend_node.py` - Main orchestration node
@@ -190,7 +190,7 @@ fl_ws/src/fl_slam_poc/
 │   │   ├── status_monitor.py  # Sensor status monitoring
 │   │   ├── tb3_odom_bridge.py # Odom bridge (absolute → delta)
 │   │   ├── livox_converter.py # Livox → PointCloud2
-│   │   └── image_decompress.py # Image decompression
+│   │   └── (C++) image_decompress_cpp # Image decompression (installed binary)
 │   │
 │   ├── backend/               # State estimation + fusion
 │   │   ├── backend_node.py   # Main backend orchestration

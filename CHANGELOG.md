@@ -59,6 +59,32 @@ Removed the legacy Python `image_decompress` node and switched the rosbag pipeli
 - `docs/MAP_VISUALIZATION.md`, `AGENTS.md`
   - Updated flags and component naming to `enable_decompress_cpp`.
 
+## 2026-01-22: Bag-Truth Frames + Livox Converter Hardening ✅
+
+### Summary
+
+Hardened the LiDAR ingestion path to maximally preserve bag information while avoiding misleading evaluation due to silent frame/TF assumptions. Added deep rosbag inspection + validation tooling, aligned launch defaults to bag-truth frames, and introduced explicit no-TF LiDAR extrinsics (`lidar_base_extrinsic`) for robust rosbag playback and future robot wiring.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/livox_converter.py`
+  - Preserve Livox sensor frame by default (no frame override required).
+  - Publish richer `PointCloud2` fields: `x,y,z,intensity,ring,tag,timebase` (and `time_offset` if the message type provides it).
+  - Support `livox_ros_driver2` and (optionally) `livox_ros_driver` via `input_msg_type`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensor_io.py`
+  - Added `lidar_base_extrinsic` fallback to transform pointclouds without TF.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
+  - Added `lidar_base_extrinsic` parameter plumbed into `SensorIO` config.
+- `fl_ws/src/fl_slam_poc/launch/poc_m3dgr_rosbag.launch.py`
+  - Defaults now match M3DGR Dynamic01 bag truth: `odom_frame=odom_combined`, `base_frame=base_footprint`, `pointcloud_frame_id=livox_frame`.
+  - Added `livox_input_msg_type` and `lidar_base_extrinsic` launch arguments.
+- `tools/inspect_rosbag_deep.py`
+  - Expanded deep scan types (includes `PoseStamped` and optional Livox driver message types).
+- `tools/validate_livox_converter.py`
+  - Added offline sanity checks for Livox topics (frame IDs, XYZ ranges, reflectivity/line/tag distributions, accounting).
+- `docs/BAG_TOPICS_AND_USAGE.md`
+  - Canonical “what’s in the bag vs what we use” map (M3DGR now; placeholders for TB3/r2b).
+
 ## 2026-01-22: Repository Flattening + Tooling Cleanup ✅
 
 ### Summary

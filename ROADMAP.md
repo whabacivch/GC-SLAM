@@ -60,7 +60,7 @@ These are **observed facts from the bag** and should be treated as the default c
 **Nodes in the MVP pipeline**
 - Frontend: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
 - Backend: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
-- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/image_decompress.py` (moved from `utility_nodes/` during flattening)
+- Utility: `image_decompress_cpp` (C++ node; compressed RGB + compressedDepth → raw `sensor_msgs/Image`)
 - Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/livox_converter.py` (moved from `utility_nodes/` during flattening)
 - Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/tb3_odom_bridge.py` (moved from `utility_nodes/` during flattening; generic abs→delta odom bridge, legacy name)
 

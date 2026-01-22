@@ -17,8 +17,10 @@ def generate_launch_description():
 
     enable_livox_convert = LaunchConfiguration("enable_livox_convert")
     livox_input_topic = LaunchConfiguration("livox_input_topic")
+    livox_input_msg_type = LaunchConfiguration("livox_input_msg_type")
     pointcloud_topic = LaunchConfiguration("pointcloud_topic")
     pointcloud_frame_id = LaunchConfiguration("pointcloud_frame_id")
+    lidar_base_extrinsic = LaunchConfiguration("lidar_base_extrinsic")
 
     odom_topic = LaunchConfiguration("odom_topic")
     odom_frame = LaunchConfiguration("odom_frame")
@@ -71,13 +73,18 @@ def generate_launch_description():
             DeclareLaunchArgument("enable_livox_convert", default_value="true"),
             DeclareLaunchArgument("livox_input_topic", default_value="/livox/mid360/lidar"),
             DeclareLaunchArgument("pointcloud_topic", default_value="/lidar/points"),
-            # CRITICAL FIX: Publish in base_link frame since M3DGR rosbag has no TF
-            DeclareLaunchArgument("pointcloud_frame_id", default_value="base_link"),
+            # Preserve bag-truth sensor frame (recommended). M3DGR uses 'livox_frame'.
+            DeclareLaunchArgument("pointcloud_frame_id", default_value="livox_frame"),
+            # Optional: support different Livox CustomMsg packages
+            DeclareLaunchArgument("livox_input_msg_type", default_value="auto"),
+            # Explicit LiDAR extrinsic (no-TF mode): T_base_lidar as [x,y,z,rx,ry,rz]
+            DeclareLaunchArgument("lidar_base_extrinsic", default_value=""),
 
             # Core topics / frames
             DeclareLaunchArgument("odom_topic", default_value="/odom"),
-            DeclareLaunchArgument("odom_frame", default_value="odom"),
-            DeclareLaunchArgument("base_frame", default_value="base_link"),
+            # Bag-truth (M3DGR Dynamic01): odom_combined -> base_footprint
+            DeclareLaunchArgument("odom_frame", default_value="odom_combined"),
+            DeclareLaunchArgument("base_frame", default_value="base_footprint"),
 
             # RGB-D decompression (M3DGR: compressed RGB + compressedDepth)
             # C++ decompressor is enabled by default to avoid NumPy/cv_bridge ABI issues.
@@ -133,6 +140,7 @@ def generate_launch_description():
                     {
                         "use_sim_time": use_sim_time,
                         "input_topic": livox_input_topic,
+                        "input_msg_type": livox_input_msg_type,
                         "output_topic": pointcloud_topic,
                         "frame_id": pointcloud_frame_id,
                     }
@@ -194,6 +202,8 @@ def generate_launch_description():
                         "camera_cy": camera_cy,
 
                         "sensor_qos_reliability": sensor_qos_reliability,
+                        # Optional no-TF LiDAR extrinsic
+                        "lidar_base_extrinsic": lidar_base_extrinsic,
 
                         # IMU Integration
                         "enable_imu": enable_imu,
