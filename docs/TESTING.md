@@ -23,7 +23,7 @@ The FL-SLAM testing framework is organized into two tiers:
 
 **Execution:**
 ```bash
-bash scripts/run_and_evaluate.sh
+bash tools/run_and_evaluate.sh
 ```
 
 ### Integration Testing (Alternative)
@@ -32,7 +32,7 @@ bash scripts/run_and_evaluate.sh
 
 **Native execution:**
 ```bash
-./scripts/test-integration.sh
+./tools/test-integration.sh
 ```
 
 **What it tests:**
@@ -75,7 +75,7 @@ export REQUIRE_SLAM_ACTIVE=0  # Set to 0 to allow other modes
 # Enable Foxglove visualization (default: 1)
 export ENABLE_FOXGLOVE=0  # Set to 0 to disable
 
-./scripts/test-integration.sh
+./tools/test-integration.sh
 ```
 
 ## Test Data
@@ -84,7 +84,7 @@ The integration tests require the TurtleBot3 SLAM rosbag dataset.
 
 **Download test data:**
 ```bash
-./scripts/download_tb3_rosbag.sh
+./tools/download_tb3_rosbag.sh
 ```
 
 This script:
@@ -94,7 +94,7 @@ This script:
 
 **Inspect bag contents:**
 ```bash
-./scripts/inspect_rosbag_topics.sh [path/to/bag]
+./tools/inspect_rosbag_topics.sh [path/to/bag]
 ```
 
 ## Native Testing Workflow
@@ -110,10 +110,10 @@ pytest -q
 
 # Full validation (alternative integration)
 cd -
-./scripts/test-integration.sh
+./tools/test-integration.sh
 
 # MVP evaluation (M3DGR)
-bash scripts/run_and_evaluate.sh
+bash tools/run_and_evaluate.sh
 ```
 
 ## Understanding Test Results
@@ -170,12 +170,12 @@ Check 3: Backend status
 
 3. Run with extended timeout:
    ```bash
-   TIMEOUT_SEC=180 STARTUP_SEC=30 ./scripts/test-integration.sh
+   TIMEOUT_SEC=180 STARTUP_SEC=30 ./tools/test-integration.sh
    ```
 
 4. Disable Foxglove if it's causing issues:
    ```bash
-   ENABLE_FOXGLOVE=0 ./scripts/test-integration.sh
+   ENABLE_FOXGLOVE=0 ./tools/test-integration.sh
    ```
 
 ## CI/CD Integration (Conceptual)
@@ -183,7 +183,7 @@ Check 3: Backend status
 This repo is primarily validated in a ROS 2 environment. A practical CI pipeline (when set up) should:
 - Build the ROS 2 workspace (`colcon build`)
 - Run unit tests (`pytest` under `fl_ws/src/fl_slam_poc/`)
-- Optionally run `scripts/test-integration.sh` if rosbag assets are available in CI
+- Optionally run `tools/test-integration.sh` if rosbag assets are available in CI
 
 ## Test Coverage
 
@@ -213,7 +213,7 @@ When adding new features:
 
 1. Add unit tests to `test/test_audit_invariants.py` or `test/test_rgbd_multimodal.py`
 2. Ensure `pytest -q` passes under `fl_ws/src/fl_slam_poc/`
-3. Verify `scripts/test-integration.sh` and/or `scripts/run_and_evaluate.sh` still pass when applicable
+3. Verify `tools/test-integration.sh` and/or `tools/run_and_evaluate.sh` still pass when applicable
 4. Update this document if adding new test workflows
 
 ## Summary
@@ -221,5 +221,5 @@ When adding new features:
 | Workflow | Typical Duration | Use Case | Requires Bag |
 |----------|------------------|----------|--------------|
 | `pytest -q` (under `fl_ws/src/fl_slam_poc/`) | ~seconds | Unit/invariant checks | No |
-| `scripts/test-integration.sh` | ~minutes | Alternative end-to-end check | Yes |
-| `scripts/run_and_evaluate.sh` | ~minutes | MVP M3DGR evaluation | Yes |
+| `tools/test-integration.sh` | ~minutes | Alternative end-to-end check | Yes |
+| `tools/run_and_evaluate.sh` | ~minutes | MVP M3DGR evaluation | Yes |

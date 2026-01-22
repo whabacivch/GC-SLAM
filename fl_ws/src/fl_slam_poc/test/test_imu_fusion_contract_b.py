@@ -2,10 +2,10 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from fl_slam_poc.backend.fusion.imu_jax_kernel import imu_batched_projection_kernel, imu_residual_from_raw
-from fl_slam_poc.backend.fusion.gaussian_info import make_evidence, mean_cov
-from fl_slam_poc.backend.routing.dirichlet_routing import DirichletRoutingModule
-from fl_slam_poc.common.transforms.se3 import se3_compose, se3_exp
+from fl_slam_poc.backend.imu_jax_kernel import imu_batched_projection_kernel, imu_residual_from_raw
+from fl_slam_poc.backend.gaussian_info import make_evidence, mean_cov
+from fl_slam_poc.backend.dirichlet_routing import DirichletRoutingModule
+from fl_slam_poc.common.se3 import se3_compose, se3_exp
 
 
 jax.config.update("jax_enable_x64", True)

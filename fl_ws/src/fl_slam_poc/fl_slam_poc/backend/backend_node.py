@@ -54,7 +54,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
-from fl_slam_poc.common.transforms.se3 import (
+from fl_slam_poc.common.se3 import (
     quat_to_rotvec,
     rotmat_to_quat,
     rotmat_to_rotvec,
@@ -66,11 +66,11 @@ from fl_slam_poc.common.transforms.se3 import (
     se3_cov_compose,
     se3_relative,
 )
-from fl_slam_poc.backend.parameters import TimeAlignmentModel, AdaptiveProcessNoise
-from fl_slam_poc.backend.fusion.gaussian_info import make_evidence, fuse_info, mean_cov
-from fl_slam_poc.backend.fusion.gaussian_geom import gaussian_frobenius_correction
-from fl_slam_poc.backend.fusion.information_distances import hellinger_gaussian
-from fl_slam_poc.frontend.loops.vmf_geometry import vmf_barycenter, vmf_mean_param
+from fl_slam_poc.backend import TimeAlignmentModel, AdaptiveProcessNoise
+from fl_slam_poc.backend.gaussian_info import make_evidence, fuse_info, mean_cov
+from fl_slam_poc.backend.gaussian_geom import gaussian_frobenius_correction
+from fl_slam_poc.backend.information_distances import hellinger_gaussian
+from fl_slam_poc.frontend.vmf_geometry import vmf_barycenter, vmf_mean_param
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common import constants
 from fl_slam_poc.msg import AnchorCreate, IMUSegment, LoopFactor
@@ -427,6 +427,8 @@ class FLBackend(Node):
         self.get_logger().info("=" * 60)
 
         if self.enable_imu_fusion:
+            # Early GPU availability check - fail fast at startup
+            self._check_gpu_availability()
             self._warmup_imu_kernel()
 
     def on_odom(self, msg: Odometry):
@@ -953,8 +955,8 @@ class FLBackend(Node):
         - Dirichlet routing with Frobenius retention
         """
         import jax.numpy as jnp
-        from fl_slam_poc.backend.fusion.imu_jax_kernel import imu_batched_projection_kernel
-        from fl_slam_poc.backend.routing.dirichlet_routing import DirichletRoutingModule
+        from fl_slam_poc.backend.imu_jax_kernel import imu_batched_projection_kernel
+        from fl_slam_poc.backend.dirichlet_routing import DirichletRoutingModule
         
         if not self.enable_imu_fusion:
             return
@@ -1364,39 +1366,6 @@ class FLBackend(Node):
         out.pose.covariance = cov_pose.reshape(-1).tolist()  # Always 6x6 = 36 elements
         self.pub_state.publish(out)
 
-    def _warmup_imu_kernel(self):
-        """Warm up JAX IMU kernel compilation to avoid first-call latency."""
-        try:
-            import jax.numpy as jnp
-            from fl_slam_poc.backend.fusion.imu_jax_kernel import imu_batched_projection_kernel
-
-            anchor_mus = jnp.zeros((1, 15), dtype=jnp.float64)
-            anchor_covs = jnp.eye(15, dtype=jnp.float64)[None, :, :] * 1e-3
-            current_mu = jnp.zeros((15,), dtype=jnp.float64)
-            current_cov = jnp.eye(15, dtype=jnp.float64) * 1e-3
-            routing_weights = jnp.array([1.0], dtype=jnp.float64)
-            z_imu = jnp.zeros((9,), dtype=jnp.float64)
-            R_imu = jnp.eye(9, dtype=jnp.float64) * 1e-3
-            R_nom = R_imu.copy()
-            bias_ref = jnp.zeros((6,), dtype=jnp.float64)
-
-            imu_batched_projection_kernel(
-                anchor_mus=anchor_mus,
-                anchor_covs=anchor_covs,
-                current_mu=current_mu,
-                current_cov=current_cov,
-                routing_weights=routing_weights,
-                z_imu=z_imu,
-                R_imu=R_imu,
-                R_nom=R_nom,
-                dt=1e-3,
-                gravity=jnp.array(self.gravity, dtype=jnp.float64),
-                bias_ref=bias_ref,
-            )
-            self.get_logger().info("IMU kernel warmup complete.")
-        except Exception as exc:
-            self.get_logger().warn(f"IMU kernel warmup failed: {exc}")
-
         # Publish TF: odom -> base_link using the same pose we publish in /cdwm/state
         tf_msg = TransformStamped()
         tf_msg.header = out.header
@@ -1410,27 +1379,6 @@ class FLBackend(Node):
         tf_msg.transform.rotation.w = float(out.pose.pose.orientation.w)
         self.tf_broadcaster.sendTransform(tf_msg)
 
-        # Covariance ellipse marker
-        ma = MarkerArray()
-        m = Marker()
-        m.header = out.header
-        m.ns = "pose"
-        m.id = 0
-        m.type = Marker.SPHERE
-        m.action = Marker.ADD
-        m.pose.position.x = float(mu_pose[0])
-        m.pose.position.y = float(mu_pose[1])
-        m.pose.position.z = float(mu_pose[2])
-        m.scale.x = float(2.0 * math.sqrt(max(cov_pose[0, 0], 1e-9)))
-        m.scale.y = float(2.0 * math.sqrt(max(cov_pose[1, 1], 1e-9)))
-        m.scale.z = float(2.0 * math.sqrt(max(cov_pose[2, 2], 1e-9)))
-        m.color.a = 0.8
-        m.color.r = 0.2
-        m.color.g = 0.8
-        m.color.b = 0.2
-        ma.markers.append(m)
-        self.pub_markers.publish(ma)
-        
         # Trajectory path for Foxglove visualization
         pose_stamped = PoseStamped()
         pose_stamped.header = out.header
@@ -1458,6 +1406,88 @@ class FLBackend(Node):
                 f"{qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
             )
             self.trajectory_file.flush()
+
+    def _check_gpu_availability(self):
+        """
+        Check GPU availability early at startup.
+        
+        Raises RuntimeError if GPU is required but not available.
+        This ensures failures happen during node initialization, not when
+        the first IMU message arrives.
+        """
+        try:
+            import jax
+            devices = jax.devices()
+            has_gpu = any(d.platform == "gpu" for d in devices)
+            
+            if not has_gpu:
+                available_devices = [f"{d.platform}:{d.device_kind}" for d in devices]
+                raise RuntimeError(
+                    f"JAX GPU backend is required for IMU fusion but not available.\n"
+                    f"Available JAX devices: {available_devices}\n"
+                    f"To fix: Ensure CUDA is installed and JAX can detect GPU devices.\n"
+                    f"Alternatively, disable IMU fusion by setting enable_imu_fusion:=false"
+                )
+            
+            self.get_logger().info(
+                f"GPU availability confirmed: {[f'{d.platform}:{d.device_kind}' for d in devices if d.platform == 'gpu']}"
+            )
+        except ImportError:
+            raise RuntimeError(
+                "JAX is required for IMU fusion but not installed.\n"
+                "Install JAX with GPU support: pip install 'jax[cuda12]' or 'jax[cuda11]'"
+            )
+        except RuntimeError:
+            # Re-raise RuntimeError (GPU not available)
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to check GPU availability: {exc}\n"
+                f"This may indicate a JAX configuration issue."
+            ) from exc
+
+    def _warmup_imu_kernel(self):
+        """Warm up JAX IMU kernel compilation to avoid first-call latency."""
+        try:
+            import jax.numpy as jnp
+            from fl_slam_poc.backend.imu_jax_kernel import imu_batched_projection_kernel
+
+            # Minimal dummy data for warmup
+            anchor_mus = jnp.zeros((1, 15), dtype=jnp.float64)
+            anchor_covs = jnp.eye(15, dtype=jnp.float64)[None, :, :] * 1e-3
+            current_mu = jnp.zeros((15,), dtype=jnp.float64)
+            current_cov = jnp.eye(15, dtype=jnp.float64) * 1e-3
+            routing_weights = jnp.array([1.0], dtype=jnp.float64)
+            imu_stamps = jnp.array([0.0, 0.001], dtype=jnp.float64)
+            imu_accel = jnp.zeros((2, 3), dtype=jnp.float64)
+            imu_gyro = jnp.zeros((2, 3), dtype=jnp.float64)
+            imu_valid = jnp.array([True, True], dtype=bool)
+            R_imu = jnp.eye(9, dtype=jnp.float64) * 1e-3
+            R_nom = R_imu.copy()
+
+            imu_batched_projection_kernel(
+                anchor_mus=anchor_mus,
+                anchor_covs=anchor_covs,
+                current_mu=current_mu,
+                current_cov=current_cov,
+                routing_weights=routing_weights,
+                imu_stamps=imu_stamps,
+                imu_accel=imu_accel,
+                imu_gyro=imu_gyro,
+                imu_valid=imu_valid,
+                R_imu=R_imu,
+                R_nom=R_nom,
+                dt_total=0.001,
+                gravity=jnp.array(self.gravity, dtype=jnp.float64),
+            )
+            self.get_logger().info("IMU kernel warmup complete.")
+        except RuntimeError as exc:
+            # Re-raise RuntimeError (GPU not available) - fail fast
+            self.get_logger().error(f"IMU kernel warmup failed: {exc}")
+            raise
+        except Exception as exc:
+            # Other exceptions (e.g., compilation errors) are warnings
+            self.get_logger().warn(f"IMU kernel warmup failed (non-fatal): {exc}")
 
     def _publish_report(self, report: OpReport):
         try:

@@ -4,6 +4,37 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-22: Repository Flattening + Tooling Cleanup ✅
+
+### Summary
+
+Flattened the `fl_slam_poc` package structure (common/frontend/backend), moved legacy docs to `legacy_docs/`, relocated root scripts to `tools/`, removed obsolete ROS scripts + `IMUFactor.msg`, and updated imports/entry points/CMake for the new layout.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/`
+  - Moved `se3.py`, `dirichlet_geom.py`, `imu_preintegration.py` into common.
+  - Removed `common/transforms/` and `operators/` legacy package stubs.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/`
+  - Flattened anchors/loops/processing into top-level modules.
+  - Moved utility nodes into frontend (`image_decompress`, `livox_converter`, `tb3_odom_bridge`).
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/`
+  - Flattened `fusion/`, `parameters/`, `routing/` into top-level modules.
+- `fl_ws/src/fl_slam_poc/setup.py`
+  - Updated `entry_points` to new module paths.
+- `fl_ws/src/fl_slam_poc/CMakeLists.txt`
+  - Removed `IMUFactor.msg` and legacy script installation.
+- `fl_ws/src/fl_slam_poc/msg/IMUFactor.msg`
+  - Deleted (unused; superseded by `IMUSegment.msg`).
+- `scripts/` → `tools/`
+  - Moved evaluation/download/test scripts and updated documentation references.
+- `legacy_docs/`
+  - Moved Gazebo and audit docs into legacy documentation set.
+
+### Notes
+
+- `.cursorignore` creation is still blocked by workspace permissions; needs manual creation to ignore `legacy_docs/`, `archive/`, and `phase2/`.
+
 ## 2026-01-21: Contract B IMU Fusion (Raw Segments + Two-State Schur) ✅
 
 ### Summary

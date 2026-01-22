@@ -44,13 +44,13 @@ pytest -q
 ### Full Integration Test (requires test data)
 ```bash
 # Download test data first
-./scripts/download_tb3_rosbag.sh
+./tools/download_tb3_rosbag.sh
 
 # Run with Foxglove visualization
-./scripts/test-integration.sh
+./tools/test-integration.sh
 
 # Run without Foxglove
-ENABLE_FOXGLOVE=0 ./scripts/test-integration.sh
+ENABLE_FOXGLOVE=0 ./tools/test-integration.sh
 ```
 
 ## Visualization Setup

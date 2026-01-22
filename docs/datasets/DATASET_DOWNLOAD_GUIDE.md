@@ -130,7 +130,7 @@ ros2 bag info 01_short_experiment.bag
 
 # Use our inspection script
 cd ../..
-bash scripts/inspect_rosbag_topics.sh rosbags/newer_college/01_short_experiment.bag
+bash tools/inspect_rosbag_topics.sh rosbags/newer_college/01_short_experiment.bag
 ```
 
 ---
@@ -219,7 +219,7 @@ gdown --folder https://drive.google.com/drive/folders/[FOLDER_ID]
    - Rosbag: https://1drv.ms/u/c/2b4bfc0edf421186/EYYRQt8O_EsggCstEAAAAAABZ7QHYpH3MyAxb6aOaAbdcQ?e=qNkjBh
    - GT: https://1drv.ms/t/c/2b4bfc0edf421186/EYYRQt8O_EsggCtLEAAAAAABkYZk3nHvsmV_KQ1o5-6fdw?e=BfWfty
    - Save both to: `rosbags/m3dgr/`
-2. Run `bash scripts/inspect_rosbag_topics.sh rosbags/m3dgr/Outdoor01.bag`
+2. Run `bash tools/inspect_rosbag_topics.sh rosbags/m3dgr/Outdoor01.bag`
 3. Configure `poc_3d_rosbag.launch.py` with correct topic names:
    - `pointcloud_topic=/lidar/points` (PointCloud2)
    - `odom_topic=/odom`

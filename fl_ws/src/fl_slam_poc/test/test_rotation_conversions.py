@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import math
 
-from fl_slam_poc.common.transforms.se3 import (
+from fl_slam_poc.common.se3 import (
     rotvec_to_rotmat,
     rotmat_to_rotvec,
     quat_to_rotmat,

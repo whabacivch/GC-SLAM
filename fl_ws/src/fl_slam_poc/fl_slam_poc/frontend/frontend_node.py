@@ -41,19 +41,15 @@ from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String
 
 # Import modular helpers (orchestration only, call operators/models)
-from fl_slam_poc.frontend.processing import SensorIO, StatusMonitor, SensorStatus
-from fl_slam_poc.frontend.anchors import DescriptorBuilder, AnchorManager
-from fl_slam_poc.frontend.loops import LoopProcessor
-from fl_slam_poc.backend.parameters import (
-    AdaptiveParameter,
-    TimeAlignmentModel,
-    StochasticBirthModel,
-)
-from fl_slam_poc.backend.fusion.gaussian_info import make_evidence
-from fl_slam_poc.frontend.loops.vmf_geometry import vmf_make_evidence
+from fl_slam_poc.frontend import SensorIO, StatusMonitor, SensorStatus
+from fl_slam_poc.frontend import DescriptorBuilder, AnchorManager
+from fl_slam_poc.frontend import LoopProcessor
+from fl_slam_poc.backend import AdaptiveParameter, TimeAlignmentModel, StochasticBirthModel
+from fl_slam_poc.backend.gaussian_info import make_evidence
+from fl_slam_poc.frontend.vmf_geometry import vmf_make_evidence
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.op_report import OpReport
-from fl_slam_poc.common.transforms.se3 import rotmat_to_quat, rotvec_to_rotmat, se3_compose, se3_relative
+from fl_slam_poc.common.se3 import rotmat_to_quat, rotvec_to_rotmat, se3_compose, se3_relative
 from fl_slam_poc.msg import AnchorCreate, LoopFactor, IMUSegment
 
 
@@ -992,7 +988,7 @@ class Frontend(Node):
             camera_frame: Camera frame ID for TF lookup
         """
         try:
-            from fl_slam_poc.frontend.processing.rgbd_processor import (
+            from fl_slam_poc.frontend.rgbd_processor import (
                 depth_to_pointcloud,
                 rgbd_to_evidence,
                 transform_evidence_to_global,

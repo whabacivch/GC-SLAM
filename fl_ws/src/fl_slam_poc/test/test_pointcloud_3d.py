@@ -13,12 +13,12 @@ import numpy as np
 import pytest
 
 # Frontend loops operators
-from fl_slam_poc.frontend.loops.icp import (
+from fl_slam_poc.frontend.icp import (
     ICPResult,
     icp_3d,
     best_fit_se3,
 )
-from fl_slam_poc.frontend.loops.pointcloud_gpu import (
+from fl_slam_poc.frontend.pointcloud_gpu import (
     GPUPointCloudProcessor,
     is_gpu_available,
     voxel_filter_gpu,
@@ -26,7 +26,7 @@ from fl_slam_poc.frontend.loops.pointcloud_gpu import (
 )
 
 # Geometry (now in common/transforms/)
-from fl_slam_poc.common.transforms.se3 import (
+from fl_slam_poc.common.se3 import (
     rotvec_to_rotmat,
     rotmat_to_rotvec,
     se3_compose,
@@ -44,12 +44,12 @@ class TestPointCloud2Conversion:
 
     def test_import_conversion_function(self):
         """Verify pointcloud2_to_array is importable."""
-        from fl_slam_poc.frontend.processing.sensor_io import pointcloud2_to_array
+        from fl_slam_poc.frontend.sensor_io import pointcloud2_to_array
         assert callable(pointcloud2_to_array)
 
     def test_empty_cloud_handling(self):
         """Empty point clouds should be handled gracefully."""
-        from fl_slam_poc.frontend.processing.sensor_io import pointcloud2_to_array
+        from fl_slam_poc.frontend.sensor_io import pointcloud2_to_array
         from sensor_msgs.msg import PointCloud2, PointField
         
         msg = PointCloud2()
@@ -69,7 +69,7 @@ class TestPointCloud2Conversion:
 
     def test_xyz_extraction(self):
         """Test XYZ point extraction from PointCloud2."""
-        from fl_slam_poc.frontend.processing.sensor_io import pointcloud2_to_array
+        from fl_slam_poc.frontend.sensor_io import pointcloud2_to_array
         from sensor_msgs.msg import PointCloud2, PointField
         
         # Create a simple point cloud with 3 points
@@ -336,8 +336,8 @@ class TestLoopProcessorGPUIntegration:
 
     def test_loop_processor_initialization(self):
         """LoopProcessor should initialize with GPU config."""
-        from fl_slam_poc.frontend.loops.loop_processor import LoopProcessor
-        from fl_slam_poc.backend.parameters import AdaptiveParameter
+        from fl_slam_poc.frontend.loop_processor import LoopProcessor
+        from fl_slam_poc.backend import AdaptiveParameter
         
         proc = LoopProcessor(
             fr_distance_scale=AdaptiveParameter(prior_mean=1.0, prior_strength=5.0),
@@ -356,8 +356,8 @@ class TestLoopProcessorGPUIntegration:
 
     def test_loop_processor_preprocess(self):
         """LoopProcessor should preprocess 3D point clouds."""
-        from fl_slam_poc.frontend.loops.loop_processor import LoopProcessor
-        from fl_slam_poc.backend.parameters import AdaptiveParameter
+        from fl_slam_poc.frontend.loop_processor import LoopProcessor
+        from fl_slam_poc.backend import AdaptiveParameter
         
         proc = LoopProcessor(
             fr_distance_scale=AdaptiveParameter(prior_mean=1.0, prior_strength=5.0),
@@ -380,8 +380,8 @@ class TestLoopProcessorGPUIntegration:
 
     def test_loop_processor_run_icp_3d(self):
         """LoopProcessor should run ICP on 3D point clouds."""
-        from fl_slam_poc.frontend.loops.loop_processor import LoopProcessor
-        from fl_slam_poc.backend.parameters import AdaptiveParameter
+        from fl_slam_poc.frontend.loop_processor import LoopProcessor
+        from fl_slam_poc.backend import AdaptiveParameter
         
         proc = LoopProcessor(
             fr_distance_scale=AdaptiveParameter(prior_mean=1.0, prior_strength=5.0),

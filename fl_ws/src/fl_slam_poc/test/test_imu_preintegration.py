@@ -7,7 +7,7 @@ Validates basic functionality of IMUPreintegrator class.
 import numpy as np
 import pytest
 
-from fl_slam_poc.operators.imu_preintegration import IMUPreintegrator
+from fl_slam_poc.common.imu_preintegration import IMUPreintegrator
 
 
 def test_imu_preintegrator_initialization():

@@ -14,7 +14,7 @@ For complete testing documentation, see **[TESTING.md](TESTING.md)**.
 
 2. Run MVP pipeline (SLAM + metrics + plots):
 
-`bash scripts/run_and_evaluate.sh`
+`bash tools/run_and_evaluate.sh`
 
 Results are saved to `results/m3dgr_YYYYMMDD_HHMMSS/`.
 
@@ -22,15 +22,15 @@ Results are saved to `results/m3dgr_YYYYMMDD_HHMMSS/`.
 
 If you don't have the bag yet:
 
-`./scripts/download_tb3_rosbag.sh`
+`./tools/download_tb3_rosbag.sh`
 
 Run the integration test (writes logs to `diagnostic_logs/`):
 
-`./scripts/test-integration.sh`
+`./tools/test-integration.sh`
 
 Override bag path if needed:
 
-`BAG_PATH=/absolute/path/to/bag_dir ./scripts/test-integration.sh`
+`BAG_PATH=/absolute/path/to/bag_dir ./tools/test-integration.sh`
 
 ## Pass/Fail Meaning
 
@@ -39,11 +39,11 @@ The integration test is considered a true "SLAM is working" check when all of th
 - `/sim/loop_factor` published at least once
 - `/cdwm/backend_status` reports `mode: "SLAM_ACTIVE"`
 
-**Note:** Use `scripts/record_test_bag.sh` to record a proper test bag with loop closures from Gazebo.
+**Note:** Use `archive/obsolete_scripts/record_test_bag.sh` to record a proper test bag with loop closures from Gazebo (legacy helper).
 
 If you want a weaker check (anchors-only), run:
 
-`REQUIRE_LOOP=0 REQUIRE_SLAM_ACTIVE=0 ./scripts/test-integration.sh`
+`REQUIRE_LOOP=0 REQUIRE_SLAM_ACTIVE=0 ./tools/test-integration.sh`
 
 ## Notes
 
@@ -59,5 +59,5 @@ Rosbag launch file:
 ## Troubleshooting
 
 - If you see TF errors or missing transforms, first verify bag frames with:
-  - `bash scripts/inspect_rosbag_topics.sh /path/to/bag_dir`
+  - `bash tools/inspect_rosbag_topics.sh /path/to/bag_dir`
 - If backend stays `DEAD_RECKONING`, it is not receiving loop factors from the frontend.

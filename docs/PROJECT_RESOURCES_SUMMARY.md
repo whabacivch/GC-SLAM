@@ -346,7 +346,7 @@ python run_opencda_validation.py --validate 50
 
 ```bash
 cd "Phantom Fellowship MIT/AIF2/frobenius_nav_v2"
-./scripts/run.sh
+./tools/run_and_evaluate.sh
 ```
 
 ### Key Imports

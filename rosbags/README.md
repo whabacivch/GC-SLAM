@@ -6,5 +6,5 @@ Recommended:
 - ROS 2 bag directory: `rosbags/tb3_slam3d_small_ros2/` (contains `metadata.yaml` and `*.db3`)
 
 Download helper:
-- `./scripts/download_tb3_rosbag.sh`
+- `./tools/download_tb3_rosbag.sh`
 

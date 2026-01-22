@@ -96,7 +96,7 @@ Once we have PointCloud2 data available:
 cd ~/Documents/Coding/Phantom\ Fellowship\ MIT/Impact\ Project_v1
 
 # Run the current MVP pipeline (SLAM + plots/metrics)
-bash scripts/run_and_evaluate.sh
+bash tools/run_and_evaluate.sh
 ```
 
 ## Current Bag Location

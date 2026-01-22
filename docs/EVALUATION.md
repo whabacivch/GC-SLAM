@@ -12,7 +12,7 @@ FL-SLAM includes quantitative validation against ground truth using standard SLA
 
 ```bash
 cd "Phantom Fellowship MIT/Impact Project_v1"
-bash scripts/run_and_evaluate.sh
+bash tools/run_and_evaluate.sh
 ```
 
 This will:
@@ -40,13 +40,13 @@ If you already have trajectory files:
 
 ```bash
 # Align timestamps
-python3 scripts/align_ground_truth.py \
+python3 tools/align_ground_truth.py \
   rosbags/m3dgr/Dynamic01.txt \
   /tmp/fl_slam_trajectory.tum \
   /tmp/ground_truth_aligned.tum
 
 # Compute metrics and plots
-python3 scripts/evaluate_slam.py \
+python3 tools/evaluate_slam.py \
   /tmp/ground_truth_aligned.tum \
   /tmp/fl_slam_trajectory.tum \
   results/my_evaluation

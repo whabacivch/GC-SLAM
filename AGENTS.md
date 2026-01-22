@@ -10,19 +10,19 @@ These rules apply only to this project. Other projects have their own rules.
 - Design invariants and formal notation: `docs/Project_Implimentation_Guide.sty`
 - Mathematical reference compendium: `docs/Comprehensive Information Geometry.md`
 - System architecture diagram: `.codeviz/Impact Project 1/Impact-Project-1.md`
-- Gazebo integration guide: `docs/GAZEBO_INTEGRATION.md`
+- Gazebo integration guide: `legacy_docs/GAZEBO_INTEGRATION.md`
 - Development log (required updates): `CHANGELOG.md`
 - POC testing status and notes: `docs/POC_Testing_Status.md`
 - ROS 2 workspace (code + packages): `fl_ws/`
 - Primary package repository: `fl_ws/src/fl_slam_poc/`
-- Scripts and evaluation entrypoints: `scripts/`
+- Scripts and evaluation entrypoints: `tools/`
 
 ## Quickstart and Validation
 - Prereqs: ROS 2 + Python (see `requirements.txt`); keep any system deps documented in `CHANGELOG.md`.
 - Build: `cd fl_ws && source /opt/ros/jazzy/setup.bash && colcon build --packages-select fl_slam_poc && source install/setup.bash`.
-- MVP run + evaluation (M3DGR): `bash scripts/run_and_evaluate.sh` (produces metrics/plots under `results/`).
+- MVP run + evaluation (M3DGR): `bash tools/run_and_evaluate.sh` (produces metrics/plots under `results/`).
 - Key nodes (launched by `poc_m3dgr_rosbag.launch.py`): `frontend_node`, `backend_node`, plus utility nodes for decompression/conversion/odom bridging.
-- Run integration test (alternative datasets): `scripts/test-integration.sh`. See `docs/TESTING.md` for complete documentation.
+- Run integration test (alternative datasets): `tools/test-integration.sh`. See `docs/TESTING.md` for complete documentation.
 - Operator/model change map: operators in `fl_ws/src/fl_slam_poc/fl_slam_poc/operators/`, models in `fl_ws/src/fl_slam_poc/fl_slam_poc/models/`.
 - Logs/artifacts (ignore in reviews): `fl_ws/log/`, `fl_ws/build*/`, `fl_ws/install*/`.
 
@@ -33,7 +33,7 @@ These rules apply only to this project. Other projects have their own rules.
 - Launch (TB3 world + SLAM stack): see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
 - Launch (external Gazebo already running): see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
 - Validate wiring: watch `/cdwm/frontend_status` and `/cdwm/backend_status`; verify `/sim/odom`, `/sim/loop_factor`, `/cdwm/state` are active.
-- Topics are configurable in the launch file; detailed crosswalk + debug checklist lives in `docs/GAZEBO_INTEGRATION.md`.
+- Topics are configurable in the launch file; detailed crosswalk + debug checklist lives in `legacy_docs/GAZEBO_INTEGRATION.md`.
 
 ## System Snapshot (Operational)
 **Component Summary**

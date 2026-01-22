@@ -35,9 +35,9 @@ setup(
             "frontend_node = fl_slam_poc.frontend.frontend_node:main",
             "backend_node = fl_slam_poc.backend.backend_node:main",
             # Utility nodes
-            "tb3_odom_bridge = fl_slam_poc.utility_nodes.tb3_odom_bridge:main",
-            "image_decompress = fl_slam_poc.utility_nodes.image_decompress:main",
-            "livox_converter = fl_slam_poc.utility_nodes.livox_converter:main",
+            "tb3_odom_bridge = fl_slam_poc.frontend.tb3_odom_bridge:main",
+            "image_decompress = fl_slam_poc.frontend.image_decompress:main",
+            "livox_converter = fl_slam_poc.frontend.livox_converter:main",
         ],
     },
 )

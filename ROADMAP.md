@@ -1,7 +1,7 @@
 # FL-SLAM Roadmap (Impact Project v1)
 
 This roadmap is organized around the current **M3DGR rosbag MVP** pipeline and a clean separation between:
-- **MVP operational code**: required to run `scripts/run_and_evaluate.sh`
+- **MVP operational code**: required to run `tools/run_and_evaluate.sh`
 - **Near-term priorities**: IMU integration + 15D state extension
 - **Future/experimental code**: kept for later work, but not required for the MVP
 
@@ -30,7 +30,7 @@ These are **observed facts from the bag** and should be treated as the default c
 ## 1) MVP Status (Current Baseline)
 
 **Primary entrypoint**
-- `scripts/run_and_evaluate.sh`: runs the M3DGR Dynamic01 pipeline end-to-end (SLAM + plots/metrics).
+- `tools/run_and_evaluate.sh`: runs the M3DGR Dynamic01 pipeline end-to-end (SLAM + plots/metrics).
 
 **Launch**
 - `fl_ws/src/fl_slam_poc/launch/poc_m3dgr_rosbag.launch.py`
@@ -43,8 +43,8 @@ These are **observed facts from the bag** and should be treated as the default c
 - Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/tb3_odom_bridge.py` (generic abs→delta odom bridge; legacy name)
 
 **Evaluation**
-- `scripts/align_ground_truth.py`
-- `scripts/evaluate_slam.py`
+- `tools/align_ground_truth.py`
+- `tools/evaluate_slam.py`
 
 **Current State (6DOF per module)**
 ```python
@@ -268,10 +268,10 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 #### 5.2 Baseline Evaluation After IMU Integration
 
-**Files:** `scripts/run_and_evaluate.sh`, `scripts/evaluate_slam.py`
+**Files:** `tools/run_and_evaluate.sh`, `tools/evaluate_slam.py`
 
 **Changes:**
-- Add rotation metrics (RPE rotation, ATE rotation) to `scripts/evaluate_slam.py` (already present, verify)
+- Add rotation metrics (RPE rotation, ATE rotation) to `tools/evaluate_slam.py` (already present, verify)
 - Run baseline before/after IMU integration on M3DGR Outdoor01:
   - Baseline (current, no IMU): record ATE/RPE translation + rotation
   - With IMU: record ATE/RPE translation + rotation
@@ -390,19 +390,19 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 **Primary files:**
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/processing/sensor_io.py`
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/parameters/timestamp.py`
-- `scripts/align_ground_truth.py`
+- `tools/align_ground_truth.py`
 
 ### C) TurtleBot3 (2D) validation
 
 **Files:**
 - `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
-- `scripts/download_tb3_rosbag.sh`
+- `tools/download_tb3_rosbag.sh`
 
 ### D) NVIDIA r2b (3D) validation / GPU
 
 **Files:**
 - `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
-- `scripts/download_r2b_dataset.sh`
+- `tools/download_r2b_dataset.sh`
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/loops/pointcloud_gpu.py`
 
 ---

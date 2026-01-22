@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 # Geometry (now in common/transforms/)
-from fl_slam_poc.common.transforms.se3 import (
+from fl_slam_poc.common.se3 import (
     rotvec_to_rotmat,
     rotmat_to_rotvec,
     se3_compose,
@@ -30,16 +30,16 @@ from fl_slam_poc.common.transforms.se3 import (
 )
 
 # Operators - Dirichlet (experimental, stays in operators/)
-from fl_slam_poc.operators.dirichlet_geom import third_order_correct
+from fl_slam_poc.common.dirichlet_geom import third_order_correct
 
 # Backend fusion operators
-from fl_slam_poc.backend.fusion.gaussian_info import (
+from fl_slam_poc.backend.gaussian_info import (
     make_evidence,
     fuse_info,
     mean_cov,
     kl_divergence,
 )
-from fl_slam_poc.backend.fusion.information_distances import (
+from fl_slam_poc.backend.information_distances import (
     hellinger_gaussian,
     fisher_rao_gaussian_1d,
     fisher_rao_student_t,
@@ -47,10 +47,10 @@ from fl_slam_poc.backend.fusion.information_distances import (
     fisher_rao_spd,
     product_distance,
 )
-from fl_slam_poc.backend.fusion.gaussian_geom import gaussian_frobenius_correction
+from fl_slam_poc.backend.gaussian_geom import gaussian_frobenius_correction
 
 # Frontend loops operators
-from fl_slam_poc.frontend.loops.icp import (
+from fl_slam_poc.frontend.icp import (
     icp_3d,
     icp_information_weight,
     icp_covariance_tangent,
@@ -63,7 +63,7 @@ from fl_slam_poc.frontend.loops.icp import (
 from fl_slam_poc.common.op_report import OpReport
 
 # Models (now in backend/parameters/)
-from fl_slam_poc.backend.parameters import (
+from fl_slam_poc.backend import (
     AdaptiveParameter,
     TimeAlignmentModel,
     StochasticBirthModel,

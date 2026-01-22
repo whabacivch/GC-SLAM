@@ -33,7 +33,7 @@ source install/setup.bash
 ### Run MVP Pipeline
 ```bash
 # Full pipeline: SLAM + metrics + plots
-bash scripts/run_and_evaluate.sh
+bash tools/run_and_evaluate.sh
 ```
 
 This runs the M3DGR Dynamic01 rosbag through the complete SLAM pipeline and generates evaluation metrics/plots in `results/m3dgr_YYYYMMDD_HHMMSS/`.
@@ -42,7 +42,7 @@ This runs the M3DGR Dynamic01 rosbag through the complete SLAM pipeline and gene
 
 For TB3 rosbags, Gazebo simulation, or 3D point cloud datasets, see:
 - [`phase2/README.md`](phase2/README.md) - How to re-enable Phase 2 features
-- [`docs/GAZEBO_INTEGRATION.md`](docs/GAZEBO_INTEGRATION.md) - Gazebo setup
+- [`legacy_docs/GAZEBO_INTEGRATION.md`](legacy_docs/GAZEBO_INTEGRATION.md) - Gazebo setup
 - [`docs/3D_POINTCLOUD.md`](docs/3D_POINTCLOUD.md) - 3D point cloud mode
 
 ---
@@ -55,7 +55,7 @@ FL-SLAM includes publication-quality validation against ground truth using stand
 
 ```bash
 # Full pipeline: SLAM + metrics + plots
-bash scripts/run_and_evaluate.sh
+bash tools/run_and_evaluate.sh
 ```
 
 This computes:
@@ -116,7 +116,7 @@ See [`docs/EVALUATION.md`](docs/EVALUATION.md) for detailed evaluation guide.
 - **[docs/INSTALLATION.md](docs/INSTALLATION.md)** - Installation and setup guide
 
 ### Phase 2 / Advanced
-- **[docs/GAZEBO_INTEGRATION.md](docs/GAZEBO_INTEGRATION.md)** - Gazebo setup (Phase 2)
+- **[legacy_docs/GAZEBO_INTEGRATION.md](legacy_docs/GAZEBO_INTEGRATION.md)** - Gazebo setup (Phase 2)
 - **[docs/3D_POINTCLOUD.md](docs/3D_POINTCLOUD.md)** - 3D point cloud mode with GPU acceleration
 
 ### Reference
@@ -224,7 +224,7 @@ See **[docs/TESTING.md](docs/TESTING.md)** for complete testing documentation.
 
 ### MVP Validation (M3DGR)
 ```bash
-bash scripts/run_and_evaluate.sh
+bash tools/run_and_evaluate.sh
 ```
 
 Runs the full M3DGR rosbag pipeline and produces metrics/plots under `results/`.
@@ -232,7 +232,7 @@ Runs the full M3DGR rosbag pipeline and produces metrics/plots under `results/`.
 ### Integration Tests
 ```bash
 # MVP integration test
-./scripts/test-integration.sh
+./tools/test-integration.sh
 
 # Alternative datasets (Phase 2)
 # See phase2/README.md for re-enabling Phase 2 features

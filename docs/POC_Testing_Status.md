@@ -44,8 +44,8 @@ This document is a **truthful status** of the current SLAM â€œproof of conceptâ€
   - **`LoopFactor.msg`**: loop closure factor with explicit convention + covariance + solver metadata.
   - **`AnchorCreate.msg`**: anchor creation events.
 
-- **MVP evaluation harness (`scripts/`)**
-  - `scripts/run_and_evaluate.sh` runs the current M3DGR rosbag MVP end-to-end (SLAM + plots/metrics).
+- **MVP evaluation harness (`tools/`)**
+  - `tools/run_and_evaluate.sh` runs the current M3DGR rosbag MVP end-to-end (SLAM + plots/metrics).
 
 ---
 

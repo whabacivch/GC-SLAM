@@ -108,7 +108,7 @@ The ROS2 Benchmark dataset contains RealSense D455 data with point clouds:
 
 ```bash
 # Download dataset
-./scripts/download_r2b_dataset.sh
+./tools/download_r2b_dataset.sh
 
 # Test with FL-SLAM
 # Phase 2 note: see `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
@@ -253,7 +253,7 @@ pytest src/fl_slam_poc/test/test_pointcloud_3d.py -v
 
 ```bash
 # Download test data
-./scripts/download_r2b_dataset.sh
+./tools/download_r2b_dataset.sh
 
 # Phase 2 note: the 3D alternative launch file lives under `phase2/` and is not installed by the MVP package.
 # See: `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
@@ -264,7 +264,7 @@ pytest src/fl_slam_poc/test/test_pointcloud_3d.py -v
 ### GPU Not Detected
 
 ```python
-from fl_slam_poc.frontend.loops.pointcloud_gpu import is_gpu_available
+from fl_slam_poc.frontend.pointcloud_gpu import is_gpu_available
 print(f"GPU available: {is_gpu_available()}")
 ```
 

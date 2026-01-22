@@ -7,10 +7,10 @@ NO math duplication, NO heuristic thresholds, NO approximations here.
 
 This is pure I/O and data wrangling.
 
-Subpackages:
-- processing/: Sensor I/O, RGB-D processing, status monitoring
-- loops/: Loop detection, ICP, point cloud processing
-- anchors/: Anchor management, descriptor building
+Subpackages (flattened):
+- sensor_io/rgbd_processor/status_monitor
+- loop_processor/icp/pointcloud_gpu/vmf_geometry
+- anchor_manager/descriptor_builder
 """
 
 from __future__ import annotations
@@ -38,20 +38,20 @@ __all__ = [
 
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     # Processing
-    "SensorIO": ("fl_slam_poc.frontend.processing.sensor_io", "SensorIO"),
-    "StatusMonitor": ("fl_slam_poc.frontend.processing.status_monitor", "StatusMonitor"),
-    "SensorStatus": ("fl_slam_poc.frontend.processing.status_monitor", "SensorStatus"),
+    "SensorIO": ("fl_slam_poc.frontend.sensor_io", "SensorIO"),
+    "StatusMonitor": ("fl_slam_poc.frontend.status_monitor", "StatusMonitor"),
+    "SensorStatus": ("fl_slam_poc.frontend.status_monitor", "SensorStatus"),
     # RGB-D processing
-    "depth_to_pointcloud": ("fl_slam_poc.frontend.processing.rgbd_processor", "depth_to_pointcloud"),
-    "compute_normals_from_depth": ("fl_slam_poc.frontend.processing.rgbd_processor", "compute_normals_from_depth"),
-    "rgbd_to_evidence": ("fl_slam_poc.frontend.processing.rgbd_processor", "rgbd_to_evidence"),
-    "transform_evidence_to_global": ("fl_slam_poc.frontend.processing.rgbd_processor", "transform_evidence_to_global"),
-    "subsample_evidence_spatially": ("fl_slam_poc.frontend.processing.rgbd_processor", "subsample_evidence_spatially"),
+    "depth_to_pointcloud": ("fl_slam_poc.frontend.rgbd_processor", "depth_to_pointcloud"),
+    "compute_normals_from_depth": ("fl_slam_poc.frontend.rgbd_processor", "compute_normals_from_depth"),
+    "rgbd_to_evidence": ("fl_slam_poc.frontend.rgbd_processor", "rgbd_to_evidence"),
+    "transform_evidence_to_global": ("fl_slam_poc.frontend.rgbd_processor", "transform_evidence_to_global"),
+    "subsample_evidence_spatially": ("fl_slam_poc.frontend.rgbd_processor", "subsample_evidence_spatially"),
     # Anchors
-    "DescriptorBuilder": ("fl_slam_poc.frontend.anchors.descriptor_builder", "DescriptorBuilder"),
-    "AnchorManager": ("fl_slam_poc.frontend.anchors.anchor_manager", "AnchorManager"),
+    "DescriptorBuilder": ("fl_slam_poc.frontend.descriptor_builder", "DescriptorBuilder"),
+    "AnchorManager": ("fl_slam_poc.frontend.anchor_manager", "AnchorManager"),
     # Loops
-    "LoopProcessor": ("fl_slam_poc.frontend.loops.loop_processor", "LoopProcessor"),
+    "LoopProcessor": ("fl_slam_poc.frontend.loop_processor", "LoopProcessor"),
 }
 
 
