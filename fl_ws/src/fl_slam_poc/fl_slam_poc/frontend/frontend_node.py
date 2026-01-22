@@ -54,8 +54,7 @@ from fl_slam_poc.frontend.loops.vmf_geometry import vmf_make_evidence
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common.transforms.se3 import rotmat_to_quat, rotvec_to_rotmat, se3_compose, se3_relative
-from fl_slam_poc.msg import AnchorCreate, LoopFactor, IMUFactor
-from fl_slam_poc.operators.imu_preintegration import IMUPreintegrator
+from fl_slam_poc.msg import AnchorCreate, LoopFactor, IMUSegment
 
 
 def stamp_to_sec(stamp) -> float:
@@ -327,21 +326,11 @@ class Frontend(Node):
             use_3d_pointcloud=use_3d_pointcloud
         )
 
-        # IMU preintegration setup
+        # IMU raw segment publishing (Contract B)
         self.enable_imu = bool(self.get_parameter("enable_imu").value)
         self.keyframe_translation_threshold = float(self.get_parameter("keyframe_translation_threshold").value)
         self.keyframe_rotation_threshold = float(self.get_parameter("keyframe_rotation_threshold").value)
         self.gravity = np.array(self.get_parameter("gravity").value, dtype=float)
-        if self.enable_imu:
-            self.imu_preintegrator = IMUPreintegrator(
-                gyro_noise_density=float(self.get_parameter("imu_gyro_noise_density").value),
-                accel_noise_density=float(self.get_parameter("imu_accel_noise_density").value),
-                gyro_random_walk=float(self.get_parameter("imu_gyro_random_walk").value),
-                accel_random_walk=float(self.get_parameter("imu_accel_random_walk").value),
-                gravity=self.gravity,
-            )
-        else:
-            self.imu_preintegrator = None
         self._last_keyframe_id: Optional[int] = None
         self._last_keyframe_stamp: Optional[float] = None
         self._last_keyframe_pose: Optional[np.ndarray] = None
@@ -379,7 +368,7 @@ class Frontend(Node):
         self.pub_loop = self.create_publisher(LoopFactor, "/sim/loop_factor", qos)
         self.pub_anchor = self.create_publisher(AnchorCreate, "/sim/anchor_create", qos)
         if bool(self.get_parameter("enable_imu").value):
-            self.pub_imu_factor = self.create_publisher(IMUFactor, "/sim/imu_factor", qos)
+            self.pub_imu_segment = self.create_publisher(IMUSegment, "/sim/imu_segment", qos)
         self.pub_report = self.create_publisher(String, "/cdwm/op_report", qos)
         self.pub_status = self.create_publisher(String, "/cdwm/frontend_status", qos)
 
@@ -569,7 +558,7 @@ class Frontend(Node):
             self._publish_anchor_create(anchor_id, msg.header.stamp, points)
             self.get_logger().info(f"✓ Created anchor {anchor_id} with {len(points)} points")
 
-            # Publish IMU factor between keyframes (anchors)
+            # Publish IMU segment between keyframes (anchors)
             self._publish_imu_factor(anchor_id, msg.header.stamp, scan_stamp, pose)
 
             self._publish_report(OpReport(
@@ -900,9 +889,9 @@ class Frontend(Node):
 
     def _publish_imu_factor(self, keyframe_j: int, stamp, stamp_sec: float, pose: np.ndarray):
         """
-        Publish IMU preintegration factor between successive keyframes (anchors).
+        Publish raw IMU segment between successive keyframes (Contract B).
         """
-        if not self.enable_imu or self.imu_preintegrator is None:
+        if not self.enable_imu:
             return
 
         # Initialize first keyframe without publishing a factor
@@ -920,28 +909,30 @@ class Frontend(Node):
         imu_measurements = self.sensor_io.get_imu_measurements(start_sec, end_sec)
         bias_gyro = np.zeros(3, dtype=float)
         bias_accel = np.zeros(3, dtype=float)
-        delta_rotvec, delta_v, delta_p, cov_preint, op_report = self.imu_preintegrator.integrate(
-            start_stamp=start_sec,
-            end_stamp=end_sec,
-            imu_measurements=imu_measurements,
-            bias_gyro=bias_gyro,
-            bias_accel=bias_accel,
-        )
 
-        imu_msg = IMUFactor()
+        imu_msg = IMUSegment()
         imu_msg.header.stamp = stamp
         imu_msg.keyframe_i = int(self._last_keyframe_id)
         imu_msg.keyframe_j = int(keyframe_j)
-        imu_msg.dt = float(end_sec - start_sec)
-        imu_msg.delta_p = [float(x) for x in delta_p]
-        imu_msg.delta_v = [float(x) for x in delta_v]
-        imu_msg.delta_rotvec = [float(x) for x in delta_rotvec]
-        imu_msg.bias_gyro = [float(x) for x in bias_gyro]
-        imu_msg.bias_accel = [float(x) for x in bias_accel]
-        imu_msg.cov_preint = cov_preint.reshape(-1).astype(float).tolist()
-        imu_msg.n_measurements = int(len(imu_measurements))
+        imu_msg.t_i = float(start_sec)
+        imu_msg.t_j = float(end_sec)
+        imu_msg.bias_ref_bg = [float(x) for x in bias_gyro]
+        imu_msg.bias_ref_ba = [float(x) for x in bias_accel]
+        imu_msg.gravity_world = [float(x) for x in self.gravity]
 
-        self.pub_imu_factor.publish(imu_msg)
+        stamps = []
+        accel = []
+        gyro = []
+        for t, a, g in imu_measurements:
+            stamps.append(float(t))
+            accel.extend([float(a[0]), float(a[1]), float(a[2])])
+            gyro.extend([float(g[0]), float(g[1]), float(g[2])])
+
+        imu_msg.stamp = stamps
+        imu_msg.accel = accel
+        imu_msg.gyro = gyro
+
+        self.pub_imu_segment.publish(imu_msg)
 
         # Clear IMU buffer up to current keyframe
         cleared = self.sensor_io.clear_imu_buffer(end_sec)
@@ -951,7 +942,6 @@ class Frontend(Node):
         trans_norm = float(np.linalg.norm(rel[:3]))
         rot_norm = float(np.linalg.norm(rel[3:]))
 
-        self._publish_report(op_report)
         self._publish_report(OpReport(
             name="IMUKeyframe",
             exact=True,
@@ -965,15 +955,15 @@ class Frontend(Node):
                 "rotation_norm": rot_norm,
                 "translation_threshold": self.keyframe_translation_threshold,
                 "rotation_threshold": self.keyframe_rotation_threshold,
-                "imu_measurements": imu_msg.n_measurements,
+                "imu_measurements": len(imu_measurements),
                 "imu_cleared": cleared,
             },
-            notes="IMU factor published between anchor keyframes.",
+            notes="IMU raw segment published between anchor keyframes (Contract B).",
         ))
-        if imu_msg.n_measurements <= 2:
+        if len(imu_measurements) <= 2:
             self.get_logger().warn(
-                f"IMU factor {imu_msg.keyframe_i}->{imu_msg.keyframe_j}: "
-                f"insufficient measurements (n={imu_msg.n_measurements}, cleared={cleared})"
+                f"IMU segment {imu_msg.keyframe_i}->{imu_msg.keyframe_j}: "
+                f"insufficient measurements (n={len(imu_measurements)}, cleared={cleared})"
             )
 
         # Update last keyframe trackers

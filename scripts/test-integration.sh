@@ -118,15 +118,15 @@ else
   echo "  ✗ No anchor creation detected"
 fi
 
-echo "Check 2: IMU factor processing"
-if ros2 topic echo --once --timeout 5 /sim/imu_factor >/dev/null 2>&1; then
+echo "Check 2: IMU segment processing"
+if ros2 topic echo --once --timeout 5 /sim/imu_segment >/dev/null 2>&1; then
   imu_ok=1
-  echo "  ✓ Detected /sim/imu_factor topic"
-elif rg -qE "IMU factor.*applied|Published IMU factor" "${RUN_LOG}"; then
+  echo "  ✓ Detected /sim/imu_segment topic"
+elif rg -qE "IMU segment.*applied|Published IMU segment" "${RUN_LOG}"; then
   imu_ok=1
-  echo "  ✓ Detected IMU factor processing in logs"
+  echo "  ✓ Detected IMU segment processing in logs"
 else
-  echo "  ⊘ No IMU factor processing detected (IMU fusion may be disabled)"
+  echo "  ⊘ No IMU segment processing detected (IMU fusion may be disabled)"
 fi
 
 echo "Check 3: Loop closure detection"
@@ -198,9 +198,9 @@ else
 fi
 
 if [[ "${imu_ok}" -eq 1 ]]; then
-  echo "✓ PASS: IMU factor processing detected"
+  echo "✓ PASS: IMU segment processing detected"
 else
-  echo "⊘ SKIP: IMU factor processing not detected (IMU fusion may be disabled)"
+  echo "⊘ SKIP: IMU segment processing not detected (IMU fusion may be disabled)"
 fi
 
 if [[ "${REQUIRE_LOOP}" -eq 1 && "${loop_ok}" -ne 1 ]]; then

@@ -33,6 +33,9 @@ source "$PROJECT_ROOT/fl_ws/install/setup.bash" 2>/dev/null || source "$PROJECT_
 # Set ROS environment variables to writable locations (fixes permission issues)
 export ROS_HOME="${ROS_HOME:-/tmp/ros_home}"
 export ROS_LOG_DIR="${ROS_LOG_DIR:-/tmp/ros_log}"
+export RMW_FASTRTPS_USE_SHM="${RMW_FASTRTPS_USE_SHM:-0}"
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+export CYCLONEDDS_URI="${CYCLONEDDS_URI:-file://${PROJECT_ROOT}/config/cyclonedds.xml}"
 mkdir -p "$ROS_HOME" "$ROS_LOG_DIR"
 
 # Run SLAM with rosbag

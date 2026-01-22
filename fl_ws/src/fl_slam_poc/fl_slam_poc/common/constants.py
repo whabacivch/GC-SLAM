@@ -273,6 +273,6 @@ STATE_DIM_VELOCITY = 3  # [vx, vy, vz]
 STATE_DIM_BIAS = 6      # [bg_x, bg_y, bg_z, ba_x, ba_y, ba_z]
 STATE_DIM_FULL = 15     # Pose + Velocity + Bias
 
-# IMU factor message ordering (from IMUFactor.msg)
+# IMU preintegration ordering (legacy IMUFactor.msg)
 # Covariance is 9x9 in basis [delta_p(3), delta_v(3), delta_theta(3)]
 IMU_FACTOR_COV_DIM = 9

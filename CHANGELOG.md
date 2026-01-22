@@ -4,6 +4,31 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-21: Contract B IMU Fusion (Raw Segments + Two-State Schur) ✅
+
+### Summary
+
+Implemented Contract B for IMU fusion: the frontend now publishes raw IMU segments, the backend re-integrates them inside the sigma-point propagation with bias coupling, and the two-state factor update is performed via one e-projection on the joint state followed by exact Schur marginalization. OpReports now include the required audit fields and routing diagnostics, and Contract B validation tests are in place.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/msg/IMUSegment.msg`
+  - Added Contract B raw IMU segment message schema with explicit units/frames/timebase semantics.
+- `fl_ws/src/fl_slam_poc/CMakeLists.txt`
+  - Added `IMUSegment.msg` to ROS interface generation.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
+  - Publish `/sim/imu_segment` raw IMU slices at keyframe creation.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
+  - Subscribe to `/sim/imu_segment`, integrate raw IMU in-kernel with bias coupling, perform joint e-projection + Schur marginalization, and emit Contract B OpReports.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/imu_jax_kernel.py`
+  - Integrated raw IMU samples per sigma point; removed preintegrated residual path.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/routing/dirichlet_routing.py`
+  - Added routing diagnostics accessors for OpReport logging.
+- `fl_ws/src/fl_slam_poc/test/test_imu_fusion_contract_b.py`
+  - Added Contract B unit tests (zero-residual, bias observability, order invariance, frame convention, Hellinger bounds, routing consistency).
+- `scripts/test-integration.sh`
+  - Updated integration check to validate `/sim/imu_segment` processing.
+
 ## 2026-01-21: IMU Integration Phase 2 - Backend 15D State Extension & Hellinger-Dirichlet Fusion ✅
 
 ### Summary

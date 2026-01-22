@@ -39,6 +39,11 @@ import time
 from collections import deque
 from typing import Optional, Dict, List
 
+# Configure JAX for GPU before any JAX imports
+import os
+os.environ["JAX_PLATFORMS"] = "gpu"
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # Reduce memory preallocation
+
 import numpy as np
 import rclpy
 from rclpy.clock import Clock, ClockType
@@ -52,8 +57,10 @@ from visualization_msgs.msg import Marker, MarkerArray
 from fl_slam_poc.common.transforms.se3 import (
     quat_to_rotvec,
     rotmat_to_quat,
+    rotmat_to_rotvec,
     rotvec_to_rotmat,
     se3_compose,
+    se3_exp,
     se3_inverse,
     se3_adjoint,
     se3_cov_compose,
@@ -66,7 +73,7 @@ from fl_slam_poc.backend.fusion.information_distances import hellinger_gaussian
 from fl_slam_poc.frontend.loops.vmf_geometry import vmf_barycenter, vmf_mean_param
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common import constants
-from fl_slam_poc.msg import AnchorCreate, IMUFactor, LoopFactor
+from fl_slam_poc.msg import AnchorCreate, IMUSegment, LoopFactor
 
 
 def stamp_to_sec(stamp) -> float:
@@ -213,6 +220,8 @@ class FLBackend(Node):
         
         # IMU Integration (15D state extension)
         self.declare_parameter("enable_imu_fusion", True)
+        self.declare_parameter("imu_gyro_noise_density", constants.IMU_GYRO_NOISE_DENSITY_DEFAULT)
+        self.declare_parameter("imu_accel_noise_density", constants.IMU_ACCEL_NOISE_DENSITY_DEFAULT)
         self.declare_parameter("imu_gyro_random_walk", constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
         self.declare_parameter("imu_accel_random_walk", constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
         self.declare_parameter("gravity", list(constants.GRAVITY_DEFAULT))
@@ -223,12 +232,24 @@ class FLBackend(Node):
 
         # IMU fusion configuration (must be read before subscriptions)
         enable_imu_param = self.get_parameter("enable_imu_fusion")
+        gyro_noise_param = self.get_parameter("imu_gyro_noise_density")
+        accel_noise_param = self.get_parameter("imu_accel_noise_density")
         gyro_walk_param = self.get_parameter("imu_gyro_random_walk")
         accel_walk_param = self.get_parameter("imu_accel_random_walk")
 
         self.enable_imu_fusion = bool(enable_imu_param.value if enable_imu_param.value is not None else True)
-        self.imu_gyro_random_walk = float(gyro_walk_param.value if gyro_walk_param.value is not None else constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
-        self.imu_accel_random_walk = float(accel_walk_param.value if accel_walk_param.value is not None else constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
+        self.imu_gyro_noise_density = float(
+            gyro_noise_param.value if gyro_noise_param.value is not None else constants.IMU_GYRO_NOISE_DENSITY_DEFAULT
+        )
+        self.imu_accel_noise_density = float(
+            accel_noise_param.value if accel_noise_param.value is not None else constants.IMU_ACCEL_NOISE_DENSITY_DEFAULT
+        )
+        self.imu_gyro_random_walk = float(
+            gyro_walk_param.value if gyro_walk_param.value is not None else constants.IMU_GYRO_RANDOM_WALK_DEFAULT
+        )
+        self.imu_accel_random_walk = float(
+            accel_walk_param.value if accel_walk_param.value is not None else constants.IMU_ACCEL_RANDOM_WALK_DEFAULT
+        )
         gravity_param = self.get_parameter("gravity").value
         self.gravity = np.array(gravity_param, dtype=float)
 
@@ -247,10 +268,10 @@ class FLBackend(Node):
         self.sub_anchor = self.create_subscription(AnchorCreate, "/sim/anchor_create", self.on_anchor_create, qos)
         self.sub_rgbd = self.create_subscription(String, self.rgbd_evidence_topic, self.on_rgbd_evidence, qos)
         
-        # IMU Factor subscription (Phase 2: 15D state extension)
+        # IMU segment subscription (Phase 2: 15D state extension)
         if self.enable_imu_fusion:
-            self.sub_imu_factor = self.create_subscription(
-                IMUFactor, "/sim/imu_factor", self.on_imu_factor, qos
+            self.sub_imu_segment = self.create_subscription(
+                IMUSegment, "/sim/imu_segment", self.on_imu_segment, qos
             )
 
         # Publishers
@@ -329,7 +350,7 @@ class FLBackend(Node):
         self.timestamp_model = TimeAlignmentModel(align_sigma, align_strength, align_floor)
 
         # Anchor storage: anchor_id -> (mu, cov, L, h, points)
-        # Primary anchor storage for pose estimation (used by odom, loop, IMU factors)
+        # Primary anchor storage for pose estimation (used by odom, loop, IMU segments)
         self.anchors: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         
         # Dual-layer module atlas (NEW)
@@ -362,24 +383,24 @@ class FLBackend(Node):
         self.odom_count = 0
         self.loop_factor_count = 0
         self.anchor_count = 0
-        self.imu_factor_count = 0  # IMU factor tracking
+        self.imu_factor_count = 0  # IMU segment tracking
         self.last_odom_time: Optional[float] = None
         self.last_loop_time: Optional[float] = None
-        self.last_imu_time: Optional[float] = None  # IMU factor tracking
+        self.last_imu_time: Optional[float] = None  # IMU segment tracking
         self.last_odom_stamp: Optional[float] = None  # Odometry message timestamp for trajectory export
         self._last_odom_key: Optional[tuple] = None  # For duplicate detection
         self.node_start_time = time.time()
         self.status_period = 5.0
         self.warned_no_loops = False
         
-        # Keyframe to anchor mapping (for IMU factor fusion)
+        # Keyframe to anchor mapping (for IMU segment fusion)
         # Maps frontend keyframe IDs to backend anchor IDs
         self.keyframe_to_anchor: Dict[int, int] = {}
         
         # Post-rosbag queue: buffer last messages for processing on shutdown
         # This ensures complete trajectory coverage when rosbag playback ends
         self.post_rosbag_odom_queue = deque(maxlen=10)  # Last 10 odom messages
-        self.post_rosbag_imu_queue = deque(maxlen=10)   # Last 10 IMU factors
+        self.post_rosbag_imu_queue = deque(maxlen=10)   # Last 10 IMU segments
         
         # Status timer uses wall time so it continues even when /clock pauses.
         self._status_clock = Clock(clock_type=ClockType.SYSTEM_TIME)
@@ -398,7 +419,7 @@ class FLBackend(Node):
         self.get_logger().info("  Loop factors:  /sim/loop_factor (from frontend)")
         self.get_logger().info("  Anchors:       /sim/anchor_create (from frontend)")
         if self.enable_imu_fusion:
-            self.get_logger().info("  IMU factors:   /sim/imu_factor (from frontend)")
+            self.get_logger().info("  IMU segments:  /sim/imu_segment (from frontend)")
         self.get_logger().info("  RGB-D evidence: " + self.rgbd_evidence_topic)
         self.get_logger().info("")
         self.get_logger().info("Status monitoring: Will report DEAD_RECKONING if no loop factors")
@@ -606,14 +627,14 @@ class FLBackend(Node):
             for pending_msg in pending:
                 self.on_loop(pending_msg)
 
-        # Process any pending IMU factors waiting on this anchor
+        # Process any pending IMU segments waiting on this anchor
         if anchor_id in self.pending_imu_factors:
             pending_imu = self.pending_imu_factors.pop(anchor_id)
             self.get_logger().info(
-                f"Processing {len(pending_imu)} pending IMU factors for anchor {anchor_id}"
+                f"Processing {len(pending_imu)} pending IMU segments for anchor {anchor_id}"
             )
             for imu_msg in pending_imu:
-                self.on_imu_factor(imu_msg)
+                self.on_imu_segment(imu_msg)
 
     def on_rgbd_evidence(self, msg: String):
         """
@@ -862,19 +883,68 @@ class FLBackend(Node):
                 f"cov_trace_after={float(np.trace(cov_updated)):.3f}"
             )
 
-    def on_imu_factor(self, msg: IMUFactor):
+    def _integrate_raw_imu_segment(
+        self,
+        stamps: np.ndarray,
+        accel: np.ndarray,
+        gyro: np.ndarray,
+        bias_gyro: np.ndarray,
+        bias_accel: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Process IMU factor with batched moment matching across anchors.
+        Integrate raw IMU measurements into (delta_p, delta_v, delta_rotvec).
+        """
+        if stamps.size < 2:
+            return np.zeros(3), np.zeros(3), np.zeros(3)
+
+        delta_R = np.eye(3)
+        delta_v = np.zeros(3)
+        delta_p = np.zeros(3)
+
+        for idx in range(len(stamps) - 1):
+            dt = float(stamps[idx + 1] - stamps[idx])
+            if dt <= 0:
+                continue
+            omega = (gyro[idx] - bias_gyro) * dt
+            delta_R = delta_R @ rotvec_to_rotmat(omega)
+            accel_corr = accel[idx] - bias_accel
+            accel_rot = delta_R @ accel_corr
+            delta_v = delta_v + accel_rot * dt
+            delta_p = delta_p + delta_v * dt + 0.5 * accel_rot * dt * dt
+
+        delta_rotvec = np.array(rotmat_to_rotvec(delta_R), dtype=float)
+        return delta_p, delta_v, delta_rotvec
+
+    def _estimate_preint_covariance(self, dt_total: float, n_meas: int) -> np.ndarray:
+        """
+        Approximate preintegration covariance from noise densities.
+        """
+        if n_meas < 2:
+            return np.eye(9, dtype=float) * 1e6
+        dt_avg = dt_total / max(n_meas - 1, 1)
+        sigma_g = self.imu_gyro_noise_density / np.sqrt(max(dt_avg, 1e-12))
+        sigma_a = self.imu_accel_noise_density / np.sqrt(max(dt_avg, 1e-12))
+
+        cov_preint = np.zeros((9, 9), dtype=float)
+        cov_preint[:3, :3] = np.eye(3) * (sigma_a**2) * dt_total**2
+        cov_preint[3:6, 3:6] = np.eye(3) * (sigma_a**2) * dt_total
+        cov_preint[6:9, 6:9] = np.eye(3) * (sigma_g**2) * dt_total
+        cov_preint += np.eye(9, dtype=float) * 1e-8
+        return cov_preint
+
+    def on_imu_segment(self, msg: IMUSegment):
+        """
+        Process IMU segment with batched moment matching across anchors.
         
         This is the core of the Hellinger-Dirichlet IMU integration (Phase 2).
         
         Algorithm:
-        1. Extract IMU measurement and covariance
+        1. Extract raw IMU segment and build measurement covariance
         2. Build batched anchor data (embed 6D anchors into 15D)
         3. Initialize/update Dirichlet routing module
         4. Call JAX batched projection kernel (one call per IMU packet)
-        5. Apply bias random walk noise
-        6. Update state to 15D posterior
+        5. Exact Schur marginalization for current state
+        6. Apply bias random walk noise and update 15D posterior
         
         Key invariants:
         - NO per-anchor loops (batched in kernel)
@@ -893,34 +963,51 @@ class FLBackend(Node):
         self.last_imu_time = time.time()
         
         # =====================================================================
-        # Extract IMU factor data
+        # Extract IMU segment data (Contract B)
         # =====================================================================
         keyframe_i = int(msg.keyframe_i)  # Reference keyframe (anchor)
         keyframe_j = int(msg.keyframe_j)  # Current keyframe
-        dt = float(msg.dt)
-        
-        # Preintegrated measurements (9D: [delta_p, delta_v, delta_rotvec])
-        delta_p = np.array(msg.delta_p, dtype=np.float64)
-        delta_v = np.array(msg.delta_v, dtype=np.float64)
-        delta_rotvec = np.array(msg.delta_rotvec, dtype=np.float64)
-        z_imu = np.concatenate([delta_p, delta_v, delta_rotvec])
-        
-        # Covariance (9x9 in basis [p, v, theta])
-        R_imu = np.array(msg.cov_preint, dtype=np.float64).reshape(9, 9)
-        # Nominal residual covariance for Hellinger tilt (same as measurement cov)
-        R_nom = R_imu.copy()
-        
-        # Bias reference (used for anchor embedding)
-        bias_gyro = np.array(msg.bias_gyro, dtype=np.float64)
-        bias_accel = np.array(msg.bias_accel, dtype=np.float64)
+        t_i = float(msg.t_i)
+        t_j = float(msg.t_j)
+        dt = max(t_j - t_i, 0.0)
+
+        stamps = np.asarray(msg.stamp, dtype=np.float64).reshape(-1)
+        accel_raw = np.asarray(msg.accel, dtype=np.float64).reshape(-1)
+        gyro_raw = np.asarray(msg.gyro, dtype=np.float64).reshape(-1)
+
+        if stamps.size == 0 or accel_raw.size % 3 != 0 or gyro_raw.size % 3 != 0:
+            self.get_logger().warn("IMU segment malformed: empty stamps or invalid accel/gyro length")
+            return
+
+        accel = accel_raw.reshape((-1, 3))
+        gyro = gyro_raw.reshape((-1, 3))
+        if accel.shape[0] != stamps.shape[0] or gyro.shape[0] != stamps.shape[0]:
+            self.get_logger().warn("IMU segment malformed: stamps/accel/gyro length mismatch")
+            return
+
+        bias_gyro = np.asarray(msg.bias_ref_bg, dtype=np.float64).reshape(3)
+        bias_accel = np.asarray(msg.bias_ref_ba, dtype=np.float64).reshape(3)
         bias_ref = np.concatenate([bias_gyro, bias_accel])
-        
-        n_measurements = int(msg.n_measurements)
+
+        gravity_msg = np.asarray(msg.gravity_world, dtype=np.float64).reshape(-1)
+        if gravity_msg.size == 3 and np.linalg.norm(gravity_msg) > 0.0:
+            gravity_world = gravity_msg
+        else:
+            gravity_world = self.gravity
+
+        n_measurements = int(stamps.shape[0])
+        R_imu = self._estimate_preint_covariance(dt, n_measurements)
+        R_nom = R_imu.copy()
+
+        delta_p, delta_v, delta_rotvec = self._integrate_raw_imu_segment(
+            stamps, accel, gyro, bias_gyro, bias_accel
+        )
+        z_imu = np.concatenate([delta_p, delta_v, delta_rotvec])
         
         # Debug logging
         if self.imu_factor_count <= 5:
             self.get_logger().info(
-                f"IMU factor #{self.imu_factor_count}: kf_{keyframe_i}->kf_{keyframe_j}, "
+                f"IMU segment #{self.imu_factor_count}: kf_{keyframe_i}->kf_{keyframe_j}, "
                 f"dt={dt:.3f}s, n_meas={n_measurements}, "
                 f"delta_p_norm={np.linalg.norm(delta_p):.4f}m"
             )
@@ -935,22 +1022,22 @@ class FLBackend(Node):
                 self.pending_imu_factors[keyframe_i].append(msg)
             if self.imu_factor_count <= 3:
                 self.get_logger().info(
-                    f"IMU factor buffered: kf_{keyframe_i} (anchors={len(self.anchors)})"
+                    f"IMU segment buffered: kf_{keyframe_i} (anchors={len(self.anchors)})"
                 )
             self._publish_report(OpReport(
-                name="IMUFactorBuffered",
+                name="IMUSegmentBuffered",
                 exact=True,
                 family_in="IMU",
                 family_out="Gaussian",
                 closed_form=True,
                 domain_projection=False,
                 metrics={"keyframe_i": keyframe_i, "buffered": True},
-                notes="IMU factor arrived before anchor creation - buffered for processing.",
+                notes="IMU segment arrived before anchor creation - buffered for processing.",
             ))
             return
         
         if self.state_dim != constants.STATE_DIM_FULL:
-            # 6D state cannot use IMU factors (no velocity/bias)
+            # 6D state cannot use IMU segments (no velocity/bias)
             return
         
         # =====================================================================
@@ -985,9 +1072,9 @@ class FLBackend(Node):
         # =====================================================================
         # Enhanced Anchor Matching: keyframe_to_anchor mapping + Hellinger fallback
         # =====================================================================
-        # Predict anchor pose from IMU factor: T_anchor_pred = T_current ∘ rel_inv
+        # Predict anchor pose from IMU segment: T_anchor_pred = T_current ∘ rel_inv
         # where rel is the IMU measurement (T_anchor^{-1} ∘ T_current)
-        # IMU factor provides: rel = [delta_p, delta_v, delta_rotvec] (9D)
+        # IMU segment provides: rel = [delta_p, delta_v, delta_rotvec] (9D)
         # Extract 6D pose part: [delta_p, delta_rotvec]
         rel_pose = np.concatenate([delta_p, delta_rotvec])
         rel_pose_inv = se3_inverse(rel_pose)
@@ -1030,7 +1117,7 @@ class FLBackend(Node):
                 initial_logits[mapped_idx] = 5.0  # Strong prior for mapped anchor
                 if self.imu_factor_count <= 3:
                     self.get_logger().info(
-                        f"IMU factor: using keyframe mapping kf_{keyframe_i} -> anchor_{mapped_anchor_id}"
+                        f"IMU segment: using keyframe mapping kf_{keyframe_i} -> anchor_{mapped_anchor_id}"
                     )
         else:
             # Priority 2: Nearest-neighbor with Hellinger distance
@@ -1045,43 +1132,80 @@ class FLBackend(Node):
             
             if self.imu_factor_count <= 3:
                 self.get_logger().info(
-                    f"IMU factor: using Hellinger nearest-neighbor (kf_{keyframe_i} -> anchor_{anchor_ids[min_h_idx]}, "
+                    f"IMU segment: using Hellinger nearest-neighbor (kf_{keyframe_i} -> anchor_{anchor_ids[min_h_idx]}, "
                     f"H²={min_h_dist:.4f})"
                 )
         
         routing_weights = self._imu_routing_module.update(initial_logits)
         
         # =====================================================================
-        # JAX Batched Projection Kernel
-        # Convert to JAX arrays for kernel call
+        # JAX Batched Projection Kernel (Contract B)
         # =====================================================================
-        mu_new_jax, cov_new_jax, diagnostics = imu_batched_projection_kernel(
+        imu_valid = np.ones((n_measurements,), dtype=bool)
+        joint_mean_jax, cov_joint_jax, diagnostics = imu_batched_projection_kernel(
             anchor_mus=jnp.array(anchor_mus),
             anchor_covs=jnp.array(anchor_covs),
             current_mu=jnp.array(mu_current),
             current_cov=jnp.array(cov_current),
             routing_weights=jnp.array(routing_weights),
-            z_imu=jnp.array(z_imu),
+            imu_stamps=jnp.array(stamps),
+            imu_accel=jnp.array(accel),
+            imu_gyro=jnp.array(gyro),
+            imu_valid=jnp.array(imu_valid),
             R_imu=jnp.array(R_imu),
             R_nom=jnp.array(R_nom),
-            dt=dt,
-            gravity=jnp.array(self.gravity),
-            bias_ref=jnp.array(bias_ref),
+            dt_total=dt,
+            gravity=jnp.array(gravity_world),
         )
-        
-        # Convert back to NumPy
-        mu_new = np.array(mu_new_jax)
-        cov_new = np.array(cov_new_jax)
-        
+
+        joint_mean = np.array(joint_mean_jax)
+        cov_joint = np.array(cov_joint_jax)
+
+        # =====================================================================
+        # Exact marginalization (Schur) on joint Gaussian
+        # =====================================================================
+        L_joint, h_joint = make_evidence(joint_mean, cov_joint)
+        L_ii = L_joint[:15, :15]
+        L_ij = L_joint[:15, 15:]
+        L_ji = L_joint[15:, :15]
+        L_jj = L_joint[15:, 15:]
+        h_i = h_joint[:15]
+        h_j = h_joint[15:]
+
+        # Robust Schur complement using Cholesky solve
+        # Regularize L_ii to prevent singular matrices
+        L_ii_reg = L_ii + np.eye(15, dtype=L_ii.dtype) * 1e-8
+        try:
+            L_ii_chol = np.linalg.cholesky(L_ii_reg)
+            L_ii_inv_L_ij = np.linalg.solve(L_ii_chol, L_ij)
+            L_ii_inv_h_i = np.linalg.solve(L_ii_chol, h_i)
+            L_j = L_jj - L_ji @ L_ii_inv_L_ij
+            h_j = h_j - L_ji @ L_ii_inv_h_i
+        except np.linalg.LinAlgError:
+            # Fallback to regularized pseudo-inverse
+            L_ii_reg = L_ii + np.eye(15, dtype=L_ii.dtype) * 1e-6
+            L_ii_inv = np.linalg.pinv(L_ii_reg)
+            L_j = L_jj - L_ji @ L_ii_inv @ L_ij
+            h_j = h_j - L_ji @ L_ii_inv @ h_i
+
+        delta_mu, delta_cov = mean_cov(L_j, h_j)
+
+        # Retract delta onto current state
+        pose_delta = delta_mu[:6]
+        rest_delta = delta_mu[6:]
+        pose_new = se3_compose(mu_current[:6], se3_exp(pose_delta))
+        rest_new = mu_current[6:] + rest_delta
+        mu_new = np.concatenate([pose_new, rest_new])
+        cov_new = delta_cov
+
         # =====================================================================
         # Apply bias random walk noise (Gaussian random walk prior)
-        # Q_bias ~ N(0, σ² * dt * I)
         # =====================================================================
         Q_bias = np.zeros((6, 6), dtype=np.float64)
         Q_bias[:3, :3] = np.eye(3) * (self.imu_gyro_random_walk**2) * dt
         Q_bias[3:6, 3:6] = np.eye(3) * (self.imu_accel_random_walk**2) * dt
         cov_new[9:15, 9:15] += Q_bias
-        
+
         # =====================================================================
         # Update state
         # =====================================================================
@@ -1091,12 +1215,13 @@ class FLBackend(Node):
         # =====================================================================
         # Diagnostics
         # =====================================================================
-        routing_diag = self._imu_routing_module.get_diagnostics()
+        routing_diag = self._imu_routing_module.get_update_diagnostics()
+        max_resp = float(np.max(routing_weights)) if routing_weights.size > 0 else 0.0
         
         if self.imu_factor_count <= 5:
             v_new = mu_new[6:9]
             self.get_logger().info(
-                f"IMU factor #{self.imu_factor_count} applied: "
+                f"IMU segment #{self.imu_factor_count} applied: "
                 f"v_norm={np.linalg.norm(v_new):.3f}m/s, "
                 f"valid_anchors={diagnostics.get('valid_anchors', 0)}/{M}, "
                 f"hellinger_shift={routing_diag['hellinger_shift']:.4f}"
@@ -1106,10 +1231,10 @@ class FLBackend(Node):
         self._publish_report(OpReport(
             name="IMUFactorUpdate",
             exact=False,
-            approximation_triggers=["LegendreEProjection", "BiasFrozen"],
+            approximation_triggers=["LegendreEProjection"],
             family_in="IMU",
             family_out="Gaussian",
-            closed_form=False,  # Uses moment matching
+            closed_form=False,
             frobenius_applied=True,
             frobenius_operator="gaussian_identity_third_order",
             metrics={
@@ -1120,16 +1245,28 @@ class FLBackend(Node):
                 "delta_p_norm_m": float(np.linalg.norm(delta_p)),
                 "delta_v_norm_ms": float(np.linalg.norm(delta_v)),
                 "delta_rot_norm_rad": float(np.linalg.norm(delta_rotvec)),
-                "bias_in_residual": False,
+                "bias_in_model": True,
+                "factor_scope": "two_state",
+                "projection": "e_projection(moment_match)",
+                "sigma_scheme": "spherical_radial_cubature",
+                "marginalization": "Schur",
+                "convention_delta_R": "R_i^T R_j",
+                "convention_delta_frame": "i_frame",
+                "gravity_world": gravity_world.tolist(),
                 "state_dim": self.state_dim,
                 "n_anchors": M,
                 "valid_anchors": diagnostics.get("valid_anchors", 0),
                 "degenerate_weights": diagnostics.get("degenerate_weights", False),
                 "ess": diagnostics.get("ess", None),
+                "hellinger_mean": diagnostics.get("hellinger_mean", None),
+                "weight_entropy": diagnostics.get("weight_entropy", None),
+                "routing_alpha": routing_diag["alpha"].tolist(),
+                "routing_w": routing_diag["responsibilities"].tolist(),
+                "routing_retention": routing_diag["retention"],
                 "routing_hellinger_shift": routing_diag["hellinger_shift"],
-                "routing_max_resp": routing_diag["max_responsibility"],
+                "routing_max_resp": max_resp,
             },
-            notes="IMU factor fusion with batched moment matching and Dirichlet routing; bias sensitivity omitted (IMUFactor.msg lacks preintegration Jacobians).",
+            notes="IMU two-state factor: joint update + single e-projection + Schur marginalization.",
         ))
 
     def _check_status(self):
@@ -1570,13 +1707,13 @@ class FLBackend(Node):
         
         if hasattr(self, 'post_rosbag_imu_queue') and len(self.post_rosbag_imu_queue) > 0:
             self.get_logger().info(
-                f"Processing {len(self.post_rosbag_imu_queue)} queued IMU factors on shutdown"
+                f"Processing {len(self.post_rosbag_imu_queue)} queued IMU segments on shutdown"
             )
             for imu_msg in self.post_rosbag_imu_queue:
                 try:
-                    self.on_imu_factor(imu_msg)
+                    self.on_imu_segment(imu_msg)
                 except Exception as e:
-                    self.get_logger().warn(f"Error processing queued IMU factor: {e}")
+                    self.get_logger().warn(f"Error processing queued IMU segment: {e}")
         
         # Flush and close trajectory file
         if self.trajectory_file:

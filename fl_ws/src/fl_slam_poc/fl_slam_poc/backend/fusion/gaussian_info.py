@@ -40,11 +40,29 @@ def make_evidence(mean: np.ndarray, cov: np.ndarray) -> Tuple[np.ndarray, np.nda
         η = Σ⁻¹μ (information vector)
     
     The log-density is: log p(x) ∝ -½x'Λx + η'x - ψ(Λ,η)
+    
+    Uses Cholesky-based solve for numerical stability and adds regularization
+    to prevent singular matrix errors.
     """
     cov = np.asarray(cov, dtype=float)
     mean = _as_vector(mean)
-    L = np.linalg.inv(cov)
-    h = (L @ mean.reshape(-1, 1)).reshape(-1)
+    
+    # Regularize to prevent singular matrices
+    reg = np.eye(cov.shape[0], dtype=cov.dtype) * 1e-8
+    cov_reg = cov + reg
+    
+    # Use Cholesky solve for stability
+    try:
+        L_chol = np.linalg.cholesky(cov_reg)
+        L = np.linalg.solve(L_chol, np.eye(cov.shape[0], dtype=cov.dtype))
+        L = L @ L.T  # Reconstruct precision matrix
+        h = np.linalg.solve(L_chol, mean.reshape(-1, 1)).reshape(-1)
+    except np.linalg.LinAlgError:
+        # Fallback to regularized pseudo-inverse
+        cov_reg = cov + np.eye(cov.shape[0], dtype=cov.dtype) * 1e-6
+        L = np.linalg.pinv(cov_reg)
+        h = (L @ mean.reshape(-1, 1)).reshape(-1)
+    
     return L, h
 
 
@@ -82,10 +100,31 @@ def mean_cov(L: np.ndarray, h: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     Recovery from natural parameters:
         Σ = Λ⁻¹
         μ = Ση = Λ⁻¹η
+    
+    Uses Cholesky-based solve for numerical stability and adds regularization
+    to prevent singular matrix errors.
     """
-    cov = np.linalg.inv(L)
+    L = np.asarray(L, dtype=float)
     h = _as_vector(h)
-    mean = (cov @ h.reshape(-1, 1)).reshape(-1)
+    
+    # Regularize to prevent singular matrices
+    # Add small diagonal term to ensure positive definiteness
+    reg = np.eye(L.shape[0], dtype=L.dtype) * 1e-8
+    L_reg = L + reg
+    
+    # Use Cholesky solve for stability (more robust than direct inversion)
+    try:
+        # Try Cholesky decomposition
+        L_chol = np.linalg.cholesky(L_reg)
+        cov = np.linalg.solve(L_chol, np.eye(L.shape[0], dtype=L.dtype))
+        cov = cov @ cov.T  # Reconstruct from Cholesky factor
+        mean = np.linalg.solve(L_chol, h.reshape(-1, 1)).reshape(-1)
+    except np.linalg.LinAlgError:
+        # Fallback to regularized pseudo-inverse if Cholesky fails
+        L_reg = L + np.eye(L.shape[0], dtype=L.dtype) * 1e-6
+        cov = np.linalg.pinv(L_reg)
+        mean = (cov @ h.reshape(-1, 1)).reshape(-1)
+    
     return mean, cov
 
 

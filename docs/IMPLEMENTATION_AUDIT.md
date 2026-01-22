@@ -7,6 +7,32 @@
 
 ---
 
+## ✅ **Contract B Compliance (Raw IMU Segments + Two-State Schur)**
+
+**Status**: Implemented end-to-end and audited.
+
+### Contract B Requirements (Met)
+- **Raw IMU segment contract**: `IMUSegment.msg` defines units, frame, delta convention, and timebase explicitly.
+- **Bias-coupled residuals**: raw IMU integration happens inside sigma propagation with per-sigma bias.
+- **Two-state factor semantics**: joint update + single e-projection + exact Schur marginalization.
+- **No Jacobians in core**: no EKF-style `HᵀR⁻¹H` or Kalman gain usage.
+- **Manifold correctness**: SE(3) handled via Lie operators (no raw rotation arithmetic).
+- **Hellinger tilt + Dirichlet routing**: retained with bounded diagnostics and OpReport fields.
+- **OpReport audit fields**: `factor_scope=two_state`, `projection=e_projection(moment_match)`, `marginalization=Schur`, `bias_in_model=True`.
+
+### Tests Added (Contract B Gates)
+- Zero-residual (moment-matching sanity)
+- Bias observability (bias changes residual + bias covariance reduction)
+- Order invariance (apply segments in different order)
+- Frame convention (90° yaw consistency)
+- Hellinger boundedness (H² ∈ [0,1])
+- Routing consistency (Dirichlet update order invariance for identical evidence)
+
+### Remaining Deviations
+- None known for Contract B constraints at this time.
+
+---
+
 ## ✅ **Post-Audit Fixes (Recovery/Consistency)**
 
 These issues were found after recovery from accidental deletions and have been fixed:

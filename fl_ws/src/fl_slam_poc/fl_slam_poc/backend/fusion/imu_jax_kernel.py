@@ -21,6 +21,21 @@ from jax import lax
 from jax.scipy.linalg import cholesky, solve_triangular
 from typing import Tuple
 
+# Configure JAX for GPU and enable x64 precision
+# Must be set before any JAX operations
+import os
+
+# Force GPU-only execution
+os.environ["JAX_PLATFORMS"] = "gpu"
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+# Enable x64 for numerical stability (required for precision)
+jax.config.update("jax_enable_x64", True)
+
+# Hard require GPU; raise if unavailable
+if not any(d.device_kind == "gpu" for d in jax.devices()):
+    raise RuntimeError("JAX GPU backend is required but not available.")
+
 from fl_slam_poc.backend.fusion.lie_jax import so3_exp, so3_log, se3_plus, se3_minus
 
 
@@ -42,7 +57,7 @@ def _apply_delta_state(xbar: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
     Apply a tangent-space delta to a 15D state.
 
     Layout:
-      [p(3), ω(3), v(3), b_g(3), b_a(3)]
+      [p(3), rotvec(3), v(3), b_g(3), b_a(3)]
 
     Pose uses SE(3) right-composition retraction; remaining terms are Euclidean.
     """
@@ -52,65 +67,85 @@ def _apply_delta_state(xbar: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
 
 
 # =============================================================================
-# IMU Residual Model (Forster et al. 2017)
+# IMU Residual Model (Contract B: raw IMU integration)
 # =============================================================================
 
-def imu_prediction_residual(
+def _integrate_raw_imu(
+    imu_stamps: jnp.ndarray,
+    imu_accel: jnp.ndarray,
+    imu_gyro: jnp.ndarray,
+    imu_valid: jnp.ndarray,
+    bias_g: jnp.ndarray,
+    bias_a: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Integrate raw IMU measurements into (delta_p, delta_v, delta_rotvec).
+    """
+    def step(carry, inputs):
+        delta_R, delta_v, delta_p, t_prev, prev_valid = carry
+        t, a, g, valid = inputs
+
+        dt = jnp.where(prev_valid & valid, t - t_prev, 0.0)
+        dt = jnp.maximum(dt, 0.0)
+
+        omega = (g - bias_g) * dt
+        delta_R = delta_R @ so3_exp(omega)
+        accel_corr = a - bias_a
+        accel_rot = delta_R @ accel_corr
+        delta_v = delta_v + accel_rot * dt
+        delta_p = delta_p + delta_v * dt + 0.5 * accel_rot * dt * dt
+
+        t_prev = jnp.where(valid, t, t_prev)
+        prev_valid = valid
+        return (delta_R, delta_v, delta_p, t_prev, prev_valid), None
+
+    t0 = imu_stamps[0]
+    carry0 = (jnp.eye(3, dtype=imu_stamps.dtype), jnp.zeros(3), jnp.zeros(3), t0, imu_valid[0])
+    inputs = (imu_stamps[1:], imu_accel[1:], imu_gyro[1:], imu_valid[1:])
+    carry_out, _ = lax.scan(step, carry0, inputs)
+    delta_R, delta_v, delta_p, _, _ = carry_out
+    delta_rotvec = so3_log(delta_R)
+    return delta_p, delta_v, delta_rotvec
+
+
+def imu_residual_from_raw(
     xi_anchor: jnp.ndarray,
     xi_current: jnp.ndarray,
-    z_imu: jnp.ndarray,
+    imu_stamps: jnp.ndarray,
+    imu_accel: jnp.ndarray,
+    imu_gyro: jnp.ndarray,
+    imu_valid: jnp.ndarray,
     gravity: jnp.ndarray,
-    dt: float,
+    dt_total: float,
 ) -> jnp.ndarray:
     """
-    Compute IMU prediction residual following Forster et al. (2017) Eq. 24-26.
-
-    Note:
-        Biases are part of the 15D state, but this residual currently does not
-        include bias sensitivity because `IMUFactor.msg` does not carry
-        preintegration Jacobians (e.g., ∂Δp/∂b, ∂Δv/∂b, ∂ΔR/∂b). The node treats
-        this as an explicit approximation and applies Frobenius correction.
-
-    Args:
-        xi_anchor: Anchor state (15,): [p_i, ω_i, v_i, b_g_i, b_a_i]
-        xi_current: Current state (15,): [p_j, ω_j, v_j, b_g_j, b_a_j]
-        z_imu: Preintegrated measurement (9,): [Δp, Δv, Δθ]
-        gravity: Gravity vector (3,) in world frame
-        dt: Integration time interval
-
-    Returns:
-        residual: 9D residual [r_p, r_v, r_θ]
+    Compute IMU residual from raw IMU segment (Contract B).
     """
     p_i = xi_anchor[:3]
-    omega_i = xi_anchor[3:6]
+    rotvec_i = xi_anchor[3:6]
     v_i = xi_anchor[6:9]
+    b_g_i = xi_anchor[9:12]
+    b_a_i = xi_anchor[12:15]
 
     p_j = xi_current[:3]
-    omega_j = xi_current[3:6]
+    rotvec_j = xi_current[3:6]
     v_j = xi_current[6:9]
 
-    # Rotation matrices (using JAX Lie ops)
-    R_i = so3_exp(omega_i)
-    R_j = so3_exp(omega_j)
+    delta_p_meas, delta_v_meas, delta_rotvec_meas = _integrate_raw_imu(
+        imu_stamps, imu_accel, imu_gyro, imu_valid, b_g_i, b_a_i
+    )
 
-    # Predicted measurements (Forster Eq. 24-26)
-    # Position increment in anchor frame
-    delta_p_pred = R_i.T @ (p_j - p_i - v_i * dt - 0.5 * gravity * dt**2)
+    R_i = so3_exp(rotvec_i)
+    R_j = so3_exp(rotvec_j)
 
-    # Velocity increment in anchor frame
-    delta_v_pred = R_i.T @ (v_j - v_i - gravity * dt)
-
-    # Rotation increment
+    delta_p_pred = R_i.T @ (p_j - p_i - v_i * dt_total - 0.5 * gravity * dt_total**2)
+    delta_v_pred = R_i.T @ (v_j - v_i - gravity * dt_total)
     delta_R_pred = R_i.T @ R_j
-    delta_omega_pred = so3_log(delta_R_pred)
+    delta_rotvec_pred = so3_log(delta_R_pred)
 
-    z_p = z_imu[:3]
-    z_v = z_imu[3:6]
-    z_omega = z_imu[6:9]
-
-    r_p = z_p - delta_p_pred
-    r_v = z_v - delta_v_pred
-    r_omega = z_omega - delta_omega_pred
+    r_p = delta_p_meas - delta_p_pred
+    r_v = delta_v_meas - delta_v_pred
+    r_omega = delta_rotvec_meas - delta_rotvec_pred
 
     return jnp.concatenate([r_p, r_v, r_omega], axis=0)
 
@@ -180,12 +215,14 @@ def imu_batched_projection_kernel(
     current_mu: jnp.ndarray,
     current_cov: jnp.ndarray,
     routing_weights: jnp.ndarray,
-    z_imu: jnp.ndarray,
+    imu_stamps: jnp.ndarray,
+    imu_accel: jnp.ndarray,
+    imu_gyro: jnp.ndarray,
+    imu_valid: jnp.ndarray,
     R_imu: jnp.ndarray,
     R_nom: jnp.ndarray,
-    dt: float,
+    dt_total: float,
     gravity: jnp.ndarray,
-    bias_ref: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, dict]:
     """
     Batched IMU projection kernel with Hellinger-tilted likelihood.
@@ -193,7 +230,8 @@ def imu_batched_projection_kernel(
     This implementation follows the plan exactly:
     - Batched sigma-support (cubature) residual computation
     - Hellinger-tilted weighting for robustness
-    - Global moment matching across all anchor posteriors
+    - Global moment matching over joint deltas (anchor, current)
+    - Exact Schur marginalization in backend
 
     Algorithm:
     1. For each anchor i with routing weight w_i:
@@ -214,12 +252,14 @@ def imu_batched_projection_kernel(
         current_mu: Current state mean (15,)
         current_cov: Current state covariance (15, 15)
         routing_weights: Dirichlet responsibilities (M,)
-        z_imu: IMU measurement (9,)
+        imu_stamps: IMU stamps (N,)
+        imu_accel: IMU accel samples (N,3)
+        imu_gyro: IMU gyro samples (N,3)
+        imu_valid: IMU valid mask (N,)
         R_imu: IMU covariance (9, 9)
         R_nom: Nominal residual covariance for Hellinger (9, 9)
-        dt: Integration time
+        dt_total: Total integration time
         gravity: Gravity vector (3,)
-        bias_ref: Bias reference used for anchoring (6,)
 
     Returns:
         mu_new: Updated state mean (15,)
@@ -229,7 +269,6 @@ def imu_batched_projection_kernel(
     M = anchor_mus.shape[0]
     state_dim = 15
     joint_dim = 2 * state_dim  # 30D joint: [anchor, current]
-    _ = bias_ref  # Reserved for future bias-sensitive residuals
 
     # -------------------------------------------------------------------------
     # Sigma-support for block-diagonal joint prior (batched across anchors)
@@ -280,7 +319,10 @@ def imu_batched_projection_kernel(
     # Residuals and per-(anchor,sigma) likelihood weights (no per-anchor loops)
     # -------------------------------------------------------------------------
     residuals = jax.vmap(
-        lambda xa, xc: jax.vmap(imu_prediction_residual, in_axes=(0, 0, None, None, None))(xa, xc, z_imu, gravity, dt),
+        lambda xa, xc: jax.vmap(
+            imu_residual_from_raw,
+            in_axes=(0, 0, None, None, None, None, None, None),
+        )(xa, xc, imu_stamps, imu_accel, imu_gyro, imu_valid, gravity, dt_total),
         in_axes=(0, 0),
     )(x_anchor, x_current)  # (M,61,9)
 
@@ -298,8 +340,11 @@ def imu_batched_projection_kernel(
     S = jnp.einsum("s,msi,msj->mij", W, r_centered, r_centered)
     S = 0.5 * (S + jnp.swapaxes(S, 1, 2)) + jnp.eye(9, dtype=S.dtype)[None, :, :] * COV_REGULARIZATION
 
-    h_sq = jax.vmap(lambda rb, Si: hellinger_squared_gaussian(rb, Si, jnp.zeros(9, dtype=rb.dtype), R_nom))(r_bar, S)  # (M,)
+    h_sq = jax.vmap(
+        lambda rb, Si: hellinger_squared_gaussian(rb, Si, jnp.zeros(9, dtype=rb.dtype), R_nom)
+    )(r_bar, S)  # (M,)
     hellinger_tilt = jnp.exp(-HELLINGER_TILT_WEIGHT * h_sq)  # (M,)
+    hellinger_mean = jnp.sum(routing_weights * h_sq) / jnp.maximum(jnp.sum(routing_weights), MIN_MIXTURE_WEIGHT)
 
     w_base = routing_weights * hellinger_tilt
     w_tilde = (w_base[:, None] * W[None, :] * jnp.exp(log_lik))
@@ -309,35 +354,42 @@ def imu_batched_projection_kernel(
     w = jnp.where(valid, w_tilde / w_sum_safe, jnp.zeros_like(w_tilde))  # (M,61)
 
     # -------------------------------------------------------------------------
-    # Global moment matching (Legendre e-projection) onto ξ_j (tangent at current_mu)
+    # Global moment matching (Legendre e-projection) onto joint deltas (anchor, current)
     # -------------------------------------------------------------------------
-    pose_base = current_mu[:6]
-    rest_base = current_mu[6:]
+    anchor_pose_base = anchor_mus[:, :6]
+    anchor_rest_base = anchor_mus[:, 6:]
+    current_pose_base = current_mu[:6]
+    current_rest_base = current_mu[6:]
 
-    pose_sigma_flat = x_current[:, :, :6].reshape((-1, 6))
-    pose_delta_flat = jax.vmap(lambda p: se3_minus(p, pose_base))(pose_sigma_flat)
-    pose_delta = pose_delta_flat.reshape((M, -1, 6))  # (M,61,6)
-    rest_delta = x_current[:, :, 6:] - rest_base[None, None, :]  # (M,61,9)
-    delta = jnp.concatenate([pose_delta, rest_delta], axis=2)  # (M,61,15)
+    anchor_pose_delta = jax.vmap(
+        lambda xa, base: jax.vmap(lambda p: se3_minus(p, base))(xa[:, :6]),
+        in_axes=(0, 0),
+    )(x_anchor, anchor_pose_base)  # (M,61,6)
+    anchor_rest_delta = x_anchor[:, :, 6:] - anchor_rest_base[:, None, :]  # (M,61,9)
+    anchor_delta = jnp.concatenate([anchor_pose_delta, anchor_rest_delta], axis=2)  # (M,61,15)
 
-    delta_mean_raw = jnp.einsum("ms,msd->d", w, delta)
-    delta_centered = delta - delta_mean_raw[None, None, :]
-    cov_new_raw = jnp.einsum("ms,msi,msj->ij", w, delta_centered, delta_centered)
-    cov_new_raw = 0.5 * (cov_new_raw + cov_new_raw.T) + jnp.eye(state_dim, dtype=cov_new_raw.dtype) * COV_REGULARIZATION
+    current_pose_sigma_flat = x_current[:, :, :6].reshape((-1, 6))
+    current_pose_delta_flat = jax.vmap(lambda p: se3_minus(p, current_pose_base))(current_pose_sigma_flat)
+    current_pose_delta = current_pose_delta_flat.reshape((M, -1, 6))  # (M,61,6)
+    current_rest_delta = x_current[:, :, 6:] - current_rest_base[None, None, :]  # (M,61,9)
+    current_delta = jnp.concatenate([current_pose_delta, current_rest_delta], axis=2)  # (M,61,15)
 
-    delta_mean = jnp.where(valid, delta_mean_raw, jnp.zeros_like(delta_mean_raw))
-    pose_new = se3_plus(pose_base, delta_mean[:6])
-    rest_new = rest_base + delta_mean[6:]
-    mu_new_raw = jnp.concatenate([pose_new, rest_new], axis=0)
+    joint_delta = jnp.concatenate([anchor_delta, current_delta], axis=2)  # (M,61,30)
 
-    mu_new = jnp.where(valid, mu_new_raw, current_mu)
-    cov_new = jnp.where(valid, cov_new_raw, current_cov)
+    joint_mean_raw = jnp.einsum("ms,msd->d", w, joint_delta)
+    joint_centered = joint_delta - joint_mean_raw[None, None, :]
+    cov_joint_raw = jnp.einsum("ms,msi,msj->ij", w, joint_centered, joint_centered)
+    cov_joint_raw = 0.5 * (cov_joint_raw + cov_joint_raw.T) + jnp.eye(joint_dim, dtype=cov_joint_raw.dtype) * COV_REGULARIZATION
+
+    joint_mean = jnp.where(valid, joint_mean_raw, jnp.zeros_like(joint_mean_raw))
+    cov_joint = jnp.where(valid, cov_joint_raw, jnp.eye(joint_dim, dtype=cov_joint_raw.dtype) * COV_REGULARIZATION)
 
     anchor_mass = jnp.sum(w_tilde, axis=1)
     valid_anchors = jnp.sum(anchor_mass > MIN_MIXTURE_WEIGHT).astype(jnp.int32)
 
     ess = jnp.where(valid, 1.0 / jnp.sum(jnp.square(w)), 0.0)
     degenerate_weights = jnp.logical_not(valid)
+    weight_entropy = -jnp.sum(w * jnp.log(w + MIN_MIXTURE_WEIGHT))
 
     def _build_diag_ok():
         return {
@@ -345,6 +397,8 @@ def imu_batched_projection_kernel(
             "valid_anchors": valid_anchors,
             "ess": ess,
             "degenerate_weights": degenerate_weights,
+            "hellinger_mean": hellinger_mean,
+            "weight_entropy": weight_entropy,
         }
 
     def _build_diag_bad():
@@ -353,16 +407,18 @@ def imu_batched_projection_kernel(
             "valid_anchors": jnp.asarray(0, dtype=jnp.int32),
             "ess": jnp.asarray(0.0, dtype=current_mu.dtype),
             "degenerate_weights": jnp.asarray(True),
+            "hellinger_mean": jnp.asarray(0.0, dtype=current_mu.dtype),
+            "weight_entropy": jnp.asarray(0.0, dtype=current_mu.dtype),
         }
 
     diag_ok = _build_diag_ok()
     diag_bad = _build_diag_bad()
 
-    mu_out, cov_out, diag_out = lax.cond(
+    joint_out, cov_out, diag_out = lax.cond(
         valid,
-        lambda _: (mu_new, cov_new, diag_ok),
-        lambda _: (current_mu, current_cov, diag_bad),
+        lambda _: (joint_mean, cov_joint, diag_ok),
+        lambda _: (jnp.zeros_like(joint_mean), cov_joint, diag_bad),
         operand=None,
     )
 
-    return mu_out, cov_out, diag_out
+    return joint_out, cov_out, diag_out

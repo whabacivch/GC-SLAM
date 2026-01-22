@@ -17,11 +17,11 @@ Key principle (from CL framework):
 Reference: Compositional Legendre framework, Hellinger hierarchical construction
 """
 
+from typing import Dict
+import jax
 import jax.numpy as jnp
 from jax import jit
 from jax.scipy.linalg import cholesky, solve_triangular
-from typing import Dict
-import numpy as np  # For interface compatibility with ROS callbacks
 
 
 # =============================================================================
@@ -102,14 +102,14 @@ class DirichletRoutingModule:
         self.lambda_prior = lambda_prior
         
         # Initialize Dirichlet parameters (symmetric prior)
-        self.alpha = np.full(n_anchors, alpha_prior, dtype=np.float64)
+        self.alpha = jnp.full(n_anchors, alpha_prior, dtype=jnp.float64)
         
         # State for Hellinger shift monitoring
-        self._prev_resp: np.ndarray | None = None
+        self._prev_resp: jnp.ndarray | None = None
         self._last_hellinger_shift: float = 0.0
         self._update_count: int = 0
     
-    def update(self, logits: np.ndarray) -> np.ndarray:
+    def update(self, logits: jnp.ndarray) -> jnp.ndarray:
         """
         Update routing belief with new evidence.
         
@@ -131,7 +131,7 @@ class DirichletRoutingModule:
         Raises:
             ValueError: If logits dimension doesn't match n_anchors
         """
-        logits = np.asarray(logits, dtype=np.float64).reshape(-1)
+        logits = jnp.asarray(logits, dtype=jnp.float64).reshape(-1)
         
         if len(logits) != self.n_anchors:
             raise ValueError(
@@ -144,15 +144,15 @@ class DirichletRoutingModule:
         
         # Step 2: Combined logits with Dirichlet prior term
         # E[log θ_i] ≈ log(α_i) - log(Σα) for practical α values
-        alpha_sum = np.sum(alpha_retained)
-        expected_log_theta = np.log(alpha_retained + MIN_PROB) - np.log(alpha_sum + MIN_PROB)
+        alpha_sum = jnp.sum(alpha_retained)
+        expected_log_theta = jnp.log(alpha_retained + MIN_PROB) - jnp.log(alpha_sum + MIN_PROB)
         
         combined_logits = logits + self.lambda_prior * expected_log_theta
         
         # Step 3: Numerically stable softmax → pseudo-counts
-        logits_shifted = combined_logits - np.max(combined_logits)
-        exp_logits = np.exp(logits_shifted)
-        softmax_probs = exp_logits / np.sum(exp_logits)
+        logits_shifted = combined_logits - jnp.max(combined_logits)
+        exp_logits = jnp.exp(logits_shifted)
+        softmax_probs = exp_logits / jnp.sum(exp_logits)
         
         pseudo_counts = self.evidence_budget * softmax_probs
         
@@ -160,7 +160,7 @@ class DirichletRoutingModule:
         self.alpha = alpha_retained + pseudo_counts
         
         # Step 5: Responsibilities (Dirichlet mean)
-        responsibilities = self.alpha / np.sum(self.alpha)
+        responsibilities = self.alpha / jnp.sum(self.alpha)
         
         # Step 6: Hellinger shift diagnostic
         if self._prev_resp is not None:
@@ -173,7 +173,7 @@ class DirichletRoutingModule:
         
         return responsibilities
     
-    def _hellinger_squared(self, p: np.ndarray, q: np.ndarray) -> float:
+    def _hellinger_squared(self, p: jnp.ndarray, q: jnp.ndarray) -> float:
         """
         Squared Hellinger distance between discrete distributions.
         
@@ -185,22 +185,35 @@ class DirichletRoutingModule:
         - H² = 1 iff p and q have disjoint support
         """
         # Bhattacharyya coefficient
-        bc = np.sum(np.sqrt(np.maximum(p * q, 0.0)))
-        return float(max(0.0, 1.0 - bc))
+        bc = jnp.sum(jnp.sqrt(jnp.maximum(p * q, 0.0)))
+        return float(jnp.maximum(0.0, 1.0 - bc))
     
-    def get_responsibilities(self) -> np.ndarray:
+    def get_responsibilities(self) -> jnp.ndarray:
         """Get current responsibilities (Dirichlet mean)."""
-        return self.alpha / np.sum(self.alpha)
+        return self.alpha / jnp.sum(self.alpha)
     
     def get_retention_scalar(self) -> float:
         """Get Frobenius retention factor (t³)."""
         return self.retention_base ** 3
+
+    def get_alpha(self) -> jnp.ndarray:
+        """Get current Dirichlet alpha parameters."""
+        return self.alpha.copy()
+
+    def get_update_diagnostics(self) -> Dict[str, float | jnp.ndarray]:
+        """Get routing diagnostics for logging."""
+        return {
+            "alpha": self.get_alpha(),
+            "responsibilities": self.get_responsibilities(),
+            "retention": self.get_retention_scalar(),
+            "hellinger_shift": self.get_hellinger_shift(),
+        }
     
     def get_hellinger_shift(self) -> float:
         """Get last computed Hellinger shift."""
         return self._last_hellinger_shift
     
-    def get_alpha(self) -> np.ndarray:
+    def get_alpha(self) -> jnp.ndarray:
         """Get current Dirichlet concentration parameters."""
         return self.alpha.copy()
     
@@ -209,13 +222,13 @@ class DirichletRoutingModule:
         responsibilities = self.get_responsibilities()
         return {
             "alpha": self.alpha.tolist(),
-            "alpha_sum": float(np.sum(self.alpha)),
+            "alpha_sum": float(jnp.sum(self.alpha)),
             "responsibilities": responsibilities.tolist(),
-            "max_responsibility": float(np.max(responsibilities)),
+            "max_responsibility": float(jnp.max(responsibilities)),
             "retention_factor": self.get_retention_scalar(),
             "hellinger_shift": self._last_hellinger_shift,
             "update_count": self._update_count,
-            "entropy": float(-np.sum(responsibilities * np.log(responsibilities + MIN_PROB))),
+            "entropy": float(-jnp.sum(responsibilities * jnp.log(responsibilities + MIN_PROB))),
         }
     
     def resize(self, new_n_anchors: int) -> None:
@@ -236,8 +249,8 @@ class DirichletRoutingModule:
         
         if new_n_anchors > self.n_anchors:
             # Add new anchors with prior concentration
-            extra = np.full(new_n_anchors - self.n_anchors, self.alpha_prior, dtype=np.float64)
-            self.alpha = np.concatenate([self.alpha, extra])
+            extra = jnp.full(new_n_anchors - self.n_anchors, self.alpha_prior, dtype=jnp.float64)
+            self.alpha = jnp.concatenate([self.alpha, extra])
         elif new_n_anchors < self.n_anchors:
             # Truncate (mass of removed anchors is lost)
             self.alpha = self.alpha[:new_n_anchors]
@@ -247,7 +260,7 @@ class DirichletRoutingModule:
     
     def reset(self) -> None:
         """Reset to prior state (symmetric Dirichlet)."""
-        self.alpha = np.full(self.n_anchors, self.alpha_prior, dtype=np.float64)
+        self.alpha = jnp.full(self.n_anchors, self.alpha_prior, dtype=jnp.float64)
         self._prev_resp = None
         self._last_hellinger_shift = 0.0
         self._update_count = 0
@@ -262,11 +275,12 @@ def _hellinger_squared_9d(
     r_bar: jnp.ndarray,
     S: jnp.ndarray,
     R_nom: jnp.ndarray,
-) -> float:
+) -> jnp.ndarray:
     """
     Squared Hellinger distance H²(N(r̄, S), N(0, R_nom)) in 9D.
     
     Uses Cholesky-based computation for numerical stability.
+    JIT-compiled for GPU acceleration.
     """
     # Covariance average
     cov_avg = 0.5 * (S + R_nom)
@@ -299,11 +313,11 @@ def _hellinger_squared_9d(
 
 
 def compute_imu_logits(
-    anchor_residuals: np.ndarray,
-    residual_covs: np.ndarray,
-    nominal_cov: np.ndarray,
+    anchor_residuals: jnp.ndarray,
+    residual_covs: jnp.ndarray,
+    nominal_cov: jnp.ndarray,
     hellinger_weight: float = 2.0,
-) -> np.ndarray:
+) -> jnp.ndarray:
     """
     Compute per-anchor logits for IMU factor routing.
     
@@ -323,7 +337,7 @@ def compute_imu_logits(
         logits: Per-anchor log-weights (M,)
     """
     M = len(anchor_residuals)
-    logits = np.zeros(M, dtype=np.float64)
+    logits = jnp.zeros(M, dtype=jnp.float64)
     
     # Convert to JAX arrays
     anchor_residuals_jax = jnp.array(anchor_residuals)
@@ -340,12 +354,12 @@ def compute_imu_logits(
         
         # Gaussian log-likelihood: -½ r̄ᵀ R⁻¹ r̄
         y = solve_triangular(L_R, r_i, lower=True)
-        log_lik = -0.5 * float(jnp.dot(y, y))
+        log_lik = -0.5 * jnp.dot(y, y)
         
         # Hellinger distance
-        h_sq = float(_hellinger_squared_9d(r_i, S_i, R_nom_jax))
+        h_sq = _hellinger_squared_9d(r_i, S_i, R_nom_jax)
         
         # Combined logit
-        logits[i] = log_lik - hellinger_weight * h_sq
+        logits = logits.at[i].set(log_lik - hellinger_weight * h_sq)
     
     return logits
