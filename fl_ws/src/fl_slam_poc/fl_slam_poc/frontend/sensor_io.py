@@ -15,14 +15,12 @@ import ast
 import json
 import time
 import numpy as np
-import importlib
 import tf2_ros
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan, PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformException
-CvBridge = None
 
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.se3 import quat_to_rotmat, se3_compose, rotmat_to_rotvec, rotvec_to_rotmat
@@ -143,24 +141,9 @@ class SensorIO:
             static_qos=tf_static_qos,
         )
         
-        # CV Bridge (import lazily; tolerate NumPy ABI mismatches)
+        # C++ decompressor is now the only supported image path.
+        # Avoid importing cv_bridge in Python to prevent NumPy ABI crashes.
         self.cv_bridge = None
-        try:
-            cv_bridge_mod = importlib.import_module("cv_bridge")
-            cv_bridge_cls = getattr(cv_bridge_mod, "CvBridge", None)
-            if cv_bridge_cls is not None:
-                try:
-                    self.cv_bridge = cv_bridge_cls()
-                except Exception as e:
-                    self.node.get_logger().warn(
-                        f"cv_bridge initialization failed: {e}. Image processing disabled."
-                    )
-            else:
-                self.node.get_logger().warn("cv_bridge module loaded but CvBridge class not found.")
-        except Exception as e:
-            self.node.get_logger().warn(
-                f"cv_bridge import failed: {e}. Image processing disabled."
-            )
         
         # Subscribe to sensors
         self._setup_subscriptions()
@@ -507,8 +490,13 @@ class SensorIO:
         """Buffer RGB image array for RGB-D evidence extraction."""
         if self._is_duplicate("image", msg.header.stamp, msg.header.frame_id):
             return
-        if self.cv_bridge is None:
-            return
+        if not hasattr(self, "_logged_rgb_disabled"):
+            self._logged_rgb_disabled = True
+            self.node.get_logger().warn(
+                "SensorIO: Python image processing is disabled (cv_bridge removed). "
+                "Use C++ decompression and enable image handling only when a pure-NumPy path exists."
+            )
+        return
         
         try:
             # Convert to numpy array (RGB8 format)
@@ -533,8 +521,13 @@ class SensorIO:
         """Buffer depth array (and optionally 3D points) for RGB-D evidence extraction."""
         if self._is_duplicate("depth", msg.header.stamp, msg.header.frame_id):
             return
-        if self.cv_bridge is None:
-            return
+        if not hasattr(self, "_logged_depth_disabled"):
+            self._logged_depth_disabled = True
+            self.node.get_logger().warn(
+                "SensorIO: Python depth processing is disabled (cv_bridge removed). "
+                "Use C++ decompression and enable depth handling only when a pure-NumPy path exists."
+            )
+        return
         
         try:
             depth = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
