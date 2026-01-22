@@ -13,6 +13,7 @@ EST_FILE="/tmp/fl_slam_trajectory.tum"
 GT_ALIGNED="/tmp/m3dgr_ground_truth_aligned.tum"
 RESULTS_DIR="$PROJECT_ROOT/results/m3dgr_$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$RESULTS_DIR/slam_run.log"
+OP_REPORT_FILE="$RESULTS_DIR/op_report.jsonl"
 
 echo "========================================"
 echo "FL-SLAM M3DGR Pipeline"
@@ -53,6 +54,10 @@ echo ""
 ros2 launch fl_slam_poc poc_m3dgr_rosbag.launch.py bag:="$BAG_PATH" > "$LOG_FILE" 2>&1 &
 LAUNCH_PID=$!
 
+# Capture OpReports for evaluation diagnostics
+ros2 topic echo /cdwm/op_report --field data --full-length > "$OP_REPORT_FILE" 2>/dev/null &
+OP_REPORT_PID=$!
+
 # Monitor progress by tailing log with filtered display
 tail -f "$LOG_FILE" 2>/dev/null | while IFS= read -r line; do
     # Filter out noisy warnings for display (but keep in log file)
@@ -84,6 +89,7 @@ echo "  Timeout reached (${TIMEOUT_SEC}s), stopping SLAM..."
 pkill -P $LAUNCH_PID 2>/dev/null || true
 kill $LAUNCH_PID 2>/dev/null || true
 kill $TAIL_PID 2>/dev/null || true
+kill $OP_REPORT_PID 2>/dev/null || true
 
 # Give processes time to cleanup
 sleep 2
@@ -120,7 +126,8 @@ echo "Computing metrics and generating plots..."
 python3 "$PROJECT_ROOT/tools/evaluate_slam.py" \
   "$GT_ALIGNED" \
   "$EST_FILE" \
-  "$RESULTS_DIR"
+  "$RESULTS_DIR" \
+  "$OP_REPORT_FILE"
 
 # Copy trajectory files to results
 cp "$EST_FILE" "$RESULTS_DIR/estimated_trajectory.tum"

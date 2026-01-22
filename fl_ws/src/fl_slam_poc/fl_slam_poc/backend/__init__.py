@@ -12,7 +12,7 @@ Subpackages (flattened):
 from fl_slam_poc.backend.adaptive import AdaptiveParameter, OnlineStats
 from fl_slam_poc.backend.timestamp import TimeAlignmentModel
 from fl_slam_poc.backend.birth import StochasticBirthModel
-from fl_slam_poc.backend.process_noise import AdaptiveProcessNoise
+from fl_slam_poc.backend.process_noise import AdaptiveProcessNoise, AdaptiveIMUNoiseModel, WishartPrior
 from fl_slam_poc.backend.nig import (
     NIGModel,
     NIG_PRIOR_KAPPA,
@@ -29,6 +29,8 @@ __all__ = [
     "TimeAlignmentModel",
     "StochasticBirthModel",
     "AdaptiveProcessNoise",
+    "AdaptiveIMUNoiseModel",
+    "WishartPrior",
     "NIGModel",
     "NIG_PRIOR_KAPPA",
     "NIG_PRIOR_ALPHA",

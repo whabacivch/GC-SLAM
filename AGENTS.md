@@ -9,6 +9,7 @@ These rules apply only to this project. Other projects have their own rules.
 ## References and Repositories
 - Design invariants and formal notation: `docs/Project_Implimentation_Guide.sty`
 - Mathematical reference compendium: `docs/Comprehensive Information Geometry.md`
+- Self-adaptive systems guide: `docs/Self-Adaptive Systems Guide.md`
 - System architecture diagram: `.codeviz/Impact Project 1/Impact-Project-1.md`
 - Gazebo integration guide (experimental/future): `archive/legacy_docs/GAZEBO_INTEGRATION.md` (see ROADMAP.md - Priority 3/4)
 - Development log (required updates): `CHANGELOG.md`
@@ -27,7 +28,8 @@ These rules apply only to this project. Other projects have their own rules.
 - Logs/artifacts (ignore in reviews): `fl_ws/log/`, `fl_ws/build*/`, `fl_ws/install*/`.
 
 ## Current Priorities (See ROADMAP.md)
-- **Priority 1 (Immediate):** IMU integration + 15D state extension, wheel odom separation, dense RGB-D in 3D mode, evaluation hardening.
+- **Priority 1 (Immediate):** Wheel odom separation, dense RGB-D in 3D mode, evaluation hardening, self-adaptive systems integration.
+- **Note:** IMU integration + 15D state extension completed (2026-01-21, Contract B architecture)
 - **Priority 2 (Near-term):** Camera-frame Gaussian splat map with vMF shading.
 - **Priority 3 (Medium-term):** Alternative datasets (TurtleBot3, NVIDIA r2b), GPU acceleration, Gazebo live testing.
 - **Priority 4 (Long-term):** Visual loop factors, GNSS integration, semantic observations, backend optimizations.
@@ -49,8 +51,11 @@ These rules apply only to this project. Other projects have their own rules.
 - `frontend_node`: sensor association, ICP loop detection, anchor management (`/scan`, `/lidar/points`, `/camera/*`, `/odom` → `/sim/loop_factor`, `/sim/anchor_create`, `/sim/imu_segment`).
 - `backend_node`: information-geometric fusion, trajectory estimation (`/sim/odom`, `/sim/loop_factor`, `/sim/anchor_create`, `/sim/imu_segment` → `/cdwm/state`, `/cdwm/trajectory`, `/cdwm/map`).
 
+**State (15DOF per anchor):** `[x, y, z, rx, ry, rz, vx, vy, vz, bg_x, bg_y, bg_z, ba_x, ba_y, ba_z]`
+**Contract B IMU:** Frontend publishes raw IMU segments (`/sim/imu_segment`), backend re-integrates with sigma-point propagation, performs joint e-projection + Schur marginalization.
+
 **Key Data Flow (MVP)**
-Rosbag Topics → Utility Nodes (decompress/convert/bridge) → Frontend (association + ICP) → LoopFactor/AnchorCreate → Backend (fusion) → State/Trajectory/Map
+Rosbag Topics → Utility Nodes → Frontend (association + ICP + IMU segments) → LoopFactor/AnchorCreate/IMUSegment → Backend (Contract B IMU fusion + information-geometric fusion) → State/Trajectory/Map
 
 ## Non-Negotiable Design Invariants
 - Closed-form-first: prefer analytic operators; only use solvers when no closed-form exists.
@@ -104,7 +109,7 @@ Rosbag Topics → Utility Nodes (decompress/convert/bridge) → Frontend (associ
 - Package structure (flattened):
   - `fl_slam_poc/common/` - Pure Python utilities (no ROS imports): SE(3) operations, Dirichlet geometry, IMU preintegration, constants, op reports.
   - `fl_slam_poc/frontend/` - Sensor processing + utility nodes: frontend orchestration, sensor I/O, anchor management, loop processing, ICP, point cloud GPU, utility nodes (image_decompress, livox_converter, tb3_odom_bridge).
-  - `fl_slam_poc/backend/` - State estimation + fusion: backend orchestration, Gaussian fusion, IMU kernels, information distances, parameter models (NIG, birth, adaptive), routing.
+  - `fl_slam_poc/backend/` - State estimation + fusion: backend orchestration, Gaussian fusion, IMU kernels (`imu_jax_kernel.py`), information distances, parameter models (NIG, birth, adaptive: `process_noise.py`, `adaptive.py`), routing (`dirichlet_routing.py`), Lie operators (`lie_jax.py`).
 - Add new operators/utilities to `fl_slam_poc/common/`.
 - Add new sensor processing or utility nodes to `fl_slam_poc/frontend/`.
 - Add new fusion/estimation code to `fl_slam_poc/backend/`.
@@ -134,6 +139,12 @@ Rosbag Topics → Utility Nodes (decompress/convert/bridge) → Frontend (associ
 - Compute budgeting is allowed only via explicit approximation operators:
   - BudgetTruncation must preserve total mass via renormalization or log mass drop.
   - BudgetTruncation is an approximation trigger and requires Frobenius correction.
+
+## Self-Adaptive Systems Invariants
+- **Certified Approximate Operator:** Approximate operators must return (result, certificate, expected_effect). Downstream may scale influence by certificate quality, but may not branch (no accept/reject).
+- **Startup Is Not a Mode:** Behavior emerges from prior effective sample size and posterior uncertainty, not time-based branching (`if t < N_startup:` forbidden).
+- **Expected vs Realized Benefit:** Expressed in internal objectives only (divergence reduction, ELBO increase), not external metrics (ATE/RPE) or qualitative judgments.
+- **Constants as Priors:** All constants must be surfaced as priors (ESS, hyperparameters), error probabilities (certificate risk δ), or compute budgets (frame budget fraction). No "reasonable defaults" without justification.
 
 ## Review Checklist (Use Before Merging Changes)
 - Does the change preserve the non-negotiable invariants?

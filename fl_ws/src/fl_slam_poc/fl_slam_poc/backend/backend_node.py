@@ -66,7 +66,7 @@ from fl_slam_poc.common.se3 import (
     se3_cov_compose,
     se3_relative,
 )
-from fl_slam_poc.backend import TimeAlignmentModel, AdaptiveProcessNoise
+from fl_slam_poc.backend import TimeAlignmentModel, AdaptiveProcessNoise, AdaptiveIMUNoiseModel, WishartPrior
 from fl_slam_poc.backend.gaussian_info import make_evidence, fuse_info, mean_cov
 from fl_slam_poc.backend.gaussian_geom import gaussian_frobenius_correction
 from fl_slam_poc.backend.information_distances import hellinger_gaussian
@@ -224,6 +224,7 @@ class FLBackend(Node):
         self.declare_parameter("imu_accel_noise_density", constants.IMU_ACCEL_NOISE_DENSITY_DEFAULT)
         self.declare_parameter("imu_gyro_random_walk", constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
         self.declare_parameter("imu_accel_random_walk", constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
+        self.declare_parameter("imu_bias_adapt_forgetting", 0.995)
         self.declare_parameter("gravity", list(constants.GRAVITY_DEFAULT))
 
     def _init_from_params(self):
@@ -236,6 +237,7 @@ class FLBackend(Node):
         accel_noise_param = self.get_parameter("imu_accel_noise_density")
         gyro_walk_param = self.get_parameter("imu_gyro_random_walk")
         accel_walk_param = self.get_parameter("imu_accel_random_walk")
+        bias_forgetting_param = self.get_parameter("imu_bias_adapt_forgetting")
 
         self.enable_imu_fusion = bool(enable_imu_param.value if enable_imu_param.value is not None else True)
         self.imu_gyro_noise_density = float(
@@ -250,8 +252,23 @@ class FLBackend(Node):
         self.imu_accel_random_walk = float(
             accel_walk_param.value if accel_walk_param.value is not None else constants.IMU_ACCEL_RANDOM_WALK_DEFAULT
         )
+        self.imu_bias_adapt_forgetting = float(
+            bias_forgetting_param.value if bias_forgetting_param.value is not None else 0.995
+        )
         gravity_param = self.get_parameter("gravity").value
         self.gravity = np.array(gravity_param, dtype=float)
+
+        self.imu_adaptive_noise = None
+        if self.enable_imu_fusion:
+            gyro_cov = np.eye(3, dtype=float) * (self.imu_gyro_random_walk ** 2)
+            accel_cov = np.eye(3, dtype=float) * (self.imu_accel_random_walk ** 2)
+            gyro_prior = WishartPrior.from_mean_covariance(gyro_cov)
+            accel_prior = WishartPrior.from_mean_covariance(accel_cov)
+            self.imu_adaptive_noise = AdaptiveIMUNoiseModel(
+                accel_bias_prior=accel_prior,
+                gyro_bias_prior=gyro_prior,
+                forgetting_factor=self.imu_bias_adapt_forgetting,
+            )
 
         # QoS profile for subscriptions (MUST match frontend RELIABLE QoS)
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -428,6 +445,7 @@ class FLBackend(Node):
 
         if self.enable_imu_fusion:
             # Early GPU availability check - fail fast at startup
+            self.get_logger().info("IMU fusion enabled: GPU is required (fail-fast contract).")
             self._check_gpu_availability()
             self._warmup_imu_kernel()
 
@@ -591,7 +609,7 @@ class FLBackend(Node):
         
         L_anchor, h_anchor = make_evidence(mu, cov_scaled)
         self.anchors[anchor_id] = (mu.copy(), cov_scaled.copy(), L_anchor.copy(), h_anchor.copy(), points.copy())
-        # Map keyframe id to anchor id (keyframe ids align to anchor ids)
+        # Declared initialization policy: keyframe id maps to anchor id for routing priors.
         self.keyframe_to_anchor[anchor_id] = anchor_id
         self._publish_anchor_marker(anchor_id, mu)
         
@@ -971,7 +989,7 @@ class FLBackend(Node):
         keyframe_j = int(msg.keyframe_j)  # Current keyframe
         t_i = float(msg.t_i)
         t_j = float(msg.t_j)
-        dt = max(t_j - t_i, 0.0)
+        dt_header = t_j - t_i
 
         stamps = np.asarray(msg.stamp, dtype=np.float64).reshape(-1)
         accel_raw = np.asarray(msg.accel, dtype=np.float64).reshape(-1)
@@ -986,6 +1004,16 @@ class FLBackend(Node):
         if accel.shape[0] != stamps.shape[0] or gyro.shape[0] != stamps.shape[0]:
             self.get_logger().warn("IMU segment malformed: stamps/accel/gyro length mismatch")
             return
+
+        dt_stamps = float(stamps[-1] - stamps[0])
+        dt = max(dt_stamps, 0.0)
+        stamp_deltas = np.diff(stamps) if stamps.size > 1 else np.array([], dtype=np.float64)
+        non_monotonic_count = int(np.sum(stamp_deltas <= 0)) if stamp_deltas.size > 0 else 0
+        stamp_delta_min = float(np.min(stamp_deltas)) if stamp_deltas.size > 0 else None
+        stamp_delta_mean = float(np.mean(stamp_deltas)) if stamp_deltas.size > 0 else None
+        stamp_delta_max = float(np.max(stamp_deltas)) if stamp_deltas.size > 0 else None
+        dt_gap_start = float(stamps[0] - t_i)
+        dt_gap_end = float(t_j - stamps[-1])
 
         bias_gyro = np.asarray(msg.bias_ref_bg, dtype=np.float64).reshape(3)
         bias_accel = np.asarray(msg.bias_ref_ba, dtype=np.float64).reshape(3)
@@ -1046,6 +1074,7 @@ class FLBackend(Node):
         # Get current state (15D)
         # =====================================================================
         mu_current, cov_current = mean_cov(self.L, self.h)
+        bias_prev = mu_current[9:15].copy()
         
         # =====================================================================
         # Build anchor data for batched processing
@@ -1108,34 +1137,26 @@ class FLBackend(Node):
         elif self._imu_routing_module.n_anchors != M:
             self._imu_routing_module.resize(M)
         
-        # Enhanced initial logits: use keyframe mapping if available, else Hellinger distance
-        initial_logits = np.zeros(M, dtype=np.float64)
+        # Dense initial logits from Hellinger distances (soft association)
+        hellinger_logit_scale = 10.0  # Tune based on typical Hellinger values
+        initial_logits = -hellinger_logit_scale * (hellinger_distances ** 2)
         
-        # Priority 1: Use keyframe_to_anchor mapping if available
+        # Optional bias: Use keyframe_to_anchor mapping if available
         if keyframe_i in self.keyframe_to_anchor:
             mapped_anchor_id = self.keyframe_to_anchor[keyframe_i]
             if mapped_anchor_id in anchor_ids:
                 mapped_idx = anchor_ids.index(mapped_anchor_id)
-                initial_logits[mapped_idx] = 5.0  # Strong prior for mapped anchor
+                initial_logits[mapped_idx] += 5.0  # Strong prior for mapped anchor
                 if self.imu_factor_count <= 3:
                     self.get_logger().info(
                         f"IMU segment: using keyframe mapping kf_{keyframe_i} -> anchor_{mapped_anchor_id}"
                     )
         else:
-            # Priority 2: Nearest-neighbor with Hellinger distance
-            # Smaller Hellinger distance = better match = higher logit
-            min_h_idx = np.argmin(hellinger_distances)
-            min_h_dist = hellinger_distances[min_h_idx]
-            
-            # Convert Hellinger distance to logit (inverse relationship)
-            # H² ∈ [0, 1], so logit = -λ * H² where λ controls sensitivity
-            hellinger_logit_scale = 10.0  # Tune this based on typical Hellinger values
-            initial_logits[min_h_idx] = -hellinger_logit_scale * (min_h_dist ** 2)
-            
-            if self.imu_factor_count <= 3:
+            if self.imu_factor_count <= 3 and hellinger_distances.size > 0:
+                min_h_idx = int(np.argmin(hellinger_distances))
                 self.get_logger().info(
-                    f"IMU segment: using Hellinger nearest-neighbor (kf_{keyframe_i} -> anchor_{anchor_ids[min_h_idx]}, "
-                    f"H²={min_h_dist:.4f})"
+                    f"IMU segment: dense Hellinger logits (kf_{keyframe_i} -> anchor_{anchor_ids[min_h_idx]}, "
+                    f"H²_min={hellinger_distances[min_h_idx]:.4f})"
                 )
         
         routing_weights = self._imu_routing_module.update(initial_logits)
@@ -1191,21 +1212,45 @@ class FLBackend(Node):
             h_j = h_j - L_ji @ L_ii_inv @ h_i
 
         delta_mu, delta_cov = mean_cov(L_j, h_j)
+        delta_mu_corr, frob_stats = gaussian_frobenius_correction(delta_mu)
 
         # Retract delta onto current state
-        pose_delta = delta_mu[:6]
-        rest_delta = delta_mu[6:]
+        pose_delta = delta_mu_corr[:6]
+        rest_delta = delta_mu_corr[6:]
         pose_new = se3_compose(mu_current[:6], se3_exp(pose_delta))
         rest_new = mu_current[6:] + rest_delta
         mu_new = np.concatenate([pose_new, rest_new])
         cov_new = delta_cov
 
         # =====================================================================
-        # Apply bias random walk noise (Gaussian random walk prior)
+        # Apply bias random walk noise (adaptive Wishart intensity)
         # =====================================================================
+        bias_curr = mu_new[9:15]
+        bias_innovation = bias_curr - bias_prev
+        bias_rw_cov_adaptive = False
+        bias_rw_cov_trace_gyro = None
+        bias_rw_cov_trace_accel = None
+        noise_params = None
+        if self.imu_adaptive_noise is not None and dt > 0.0:
+            self.imu_adaptive_noise.update_from_bias_innovations(
+                accel_bias_innovations=np.atleast_2d(bias_innovation[3:6]),
+                gyro_bias_innovations=np.atleast_2d(bias_innovation[:3]),
+                dt=dt,
+            )
+            noise_params = self.imu_adaptive_noise.get_current_noise_params()
+            bias_rw_cov_adaptive = True
+            bias_rw_cov_trace_gyro = float(np.trace(noise_params["gyro_bias_cov"]))
+            bias_rw_cov_trace_accel = float(np.trace(noise_params["accel_bias_cov"]))
+
+        if noise_params is None:
+            noise_params = {
+                "gyro_bias_cov": np.eye(3) * (self.imu_gyro_random_walk**2),
+                "accel_bias_cov": np.eye(3) * (self.imu_accel_random_walk**2),
+            }
+
         Q_bias = np.zeros((6, 6), dtype=np.float64)
-        Q_bias[:3, :3] = np.eye(3) * (self.imu_gyro_random_walk**2) * dt
-        Q_bias[3:6, 3:6] = np.eye(3) * (self.imu_accel_random_walk**2) * dt
+        Q_bias[:3, :3] = noise_params["gyro_bias_cov"] * dt
+        Q_bias[3:6, 3:6] = noise_params["accel_bias_cov"] * dt
         cov_new[9:15, 9:15] += Q_bias
 
         # =====================================================================
@@ -1219,6 +1264,7 @@ class FLBackend(Node):
         # =====================================================================
         routing_diag = self._imu_routing_module.get_update_diagnostics()
         max_resp = float(np.max(routing_weights)) if routing_weights.size > 0 else 0.0
+        bias_update_source = "measurement" if np.linalg.norm(bias_innovation) > 1e-12 else "random_walk_only"
         
         if self.imu_factor_count <= 5:
             v_new = mu_new[6:9]
@@ -1239,14 +1285,30 @@ class FLBackend(Node):
             closed_form=False,
             frobenius_applied=True,
             frobenius_operator="gaussian_identity_third_order",
+            frobenius_delta_norm=float(frob_stats["delta_norm"]),
+            frobenius_input_stats=dict(frob_stats["input_stats"]),
+            frobenius_output_stats=dict(frob_stats["output_stats"]),
             metrics={
                 "keyframe_i": keyframe_i,
                 "keyframe_j": keyframe_j,
+                "dt_header": float(dt_header),
+                "dt_stamps": float(dt_stamps),
+                "dt_gap_start": float(dt_gap_start),
+                "dt_gap_end": float(dt_gap_end),
+                "stamp_delta_min": stamp_delta_min,
+                "stamp_delta_mean": stamp_delta_mean,
+                "stamp_delta_max": stamp_delta_max,
+                "non_monotonic_count": non_monotonic_count,
                 "dt_sec": dt,
                 "n_measurements": n_measurements,
                 "delta_p_norm_m": float(np.linalg.norm(delta_p)),
                 "delta_v_norm_ms": float(np.linalg.norm(delta_v)),
                 "delta_rot_norm_rad": float(np.linalg.norm(delta_rotvec)),
+                "residual_p_norm": float(np.linalg.norm(delta_p)),
+                "residual_v_norm": float(np.linalg.norm(delta_v)),
+                "residual_rot_norm": float(np.linalg.norm(delta_rotvec)),
+                "integration_order": "v_then_p",
+                "velocity_usage": "updated",
                 "bias_in_model": True,
                 "factor_scope": "two_state",
                 "projection": "e_projection(moment_match)",
@@ -1267,6 +1329,15 @@ class FLBackend(Node):
                 "routing_retention": routing_diag["retention"],
                 "routing_hellinger_shift": routing_diag["hellinger_shift"],
                 "routing_max_resp": max_resp,
+                "bias_update_source": bias_update_source,
+                "bias_anchor_norm": float(np.linalg.norm(bias_ref)),
+                "bias_current_norm": float(np.linalg.norm(bias_curr)),
+                "bias_delta_norm": float(np.linalg.norm(bias_curr - bias_ref)),
+                "bias_innovation_norm": float(np.linalg.norm(bias_innovation)),
+                "bias_random_walk_applied": bool(dt > 0.0),
+                "bias_rw_cov_adaptive": bias_rw_cov_adaptive,
+                "bias_rw_cov_trace_gyro": bias_rw_cov_trace_gyro,
+                "bias_rw_cov_trace_accel": bias_rw_cov_trace_accel,
             },
             notes="IMU two-state factor: joint update + single e-projection + Schur marginalization.",
         ))

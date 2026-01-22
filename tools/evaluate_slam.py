@@ -27,11 +27,54 @@ from evo.core import metrics
 from evo.core import trajectory
 import numpy as np
 import copy
+import json
 
 
 def load_trajectory(file_path):
     """Load trajectory from TUM format."""
     return file_interface.read_tum_trajectory_file(file_path)
+
+
+def load_op_reports(file_path):
+    """Load OpReport JSON lines."""
+    reports = []
+    with open(file_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                reports.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return reports
+
+
+def validate_op_reports(op_report_path, require_imu=True):
+    """Validate IMU and Frobenius diagnostic signals from OpReports."""
+    if not op_report_path or not os.path.exists(op_report_path):
+        if require_imu:
+            raise FileNotFoundError(f"OpReport file not found: {op_report_path}")
+        print("  WARNING: OpReport file missing, skipping IMU/Frobenius checks.")
+        return
+
+    reports = load_op_reports(op_report_path)
+    imu_reports = [r for r in reports if r.get("name") == "IMUFactorUpdate"]
+    if require_imu and not imu_reports:
+        raise ValueError("No IMUFactorUpdate OpReports found (IMU may not be running).")
+
+    def _require_keys(obj, keys, label):
+        missing = [k for k in keys if k not in obj or obj[k] is None]
+        if missing:
+            raise ValueError(f"Missing {label} keys: {missing}")
+
+    for report in imu_reports:
+        _require_keys(report, ["frobenius_applied", "frobenius_operator", "frobenius_delta_norm"], "frobenius")
+        metrics = report.get("metrics", {})
+        _require_keys(metrics, ["dt_header", "dt_stamps", "dt_gap_start", "dt_gap_end"], "timebase")
+        _require_keys(metrics, ["bias_rw_cov_adaptive", "bias_rw_cov_trace_gyro", "bias_rw_cov_trace_accel"], "adaptive_bias")
+
+    print(f"  OpReport checks passed: {len(imu_reports)} IMUFactorUpdate entries.")
 
 
 def validate_trajectory(traj, name):
@@ -433,7 +476,7 @@ def save_metrics_csv(ate_trans, ate_rot, rpe_results, output_path):
     print(f"  Metrics (csv) saved: {output_path}")
 
 
-def main(gt_file, est_file, output_dir):
+def main(gt_file, est_file, output_dir, op_report_path=None):
     """Run full evaluation pipeline."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -457,8 +500,16 @@ def main(gt_file, est_file, output_dir):
     if not est_valid:
         print("\n   WARNING: Estimated trajectory has issues - results may be unreliable!")
     
+    # OpReport validation (IMU + Frobenius diagnostics)
+    if op_report_path:
+        print("\n3. Validating OpReports (IMU + Frobenius)...")
+        validate_op_reports(op_report_path, require_imu=True)
+    else:
+        print("\n3. OpReport validation skipped (no op_report.jsonl provided)")
+
     # Compute ATE (translation + rotation)
-    print("\n3. Computing Absolute Trajectory Error (ATE)...")
+    step_num = 4 if op_report_path else 3
+    print(f"\n{step_num}. Computing Absolute Trajectory Error (ATE)...")
     ate_trans, ate_rot, gt_aligned, est_aligned = compute_ate_full(gt_traj, est_traj)
     
     ate_t_stats = ate_trans.get_all_statistics()
@@ -474,7 +525,8 @@ def main(gt_file, est_file, output_dir):
     print(f"     Max:  {ate_r_stats['max']:.4f} deg")
     
     # Compute multi-scale RPE
-    print("\n4. Computing Relative Pose Error (RPE) at multiple scales...")
+    step_num = 5 if op_report_path else 4
+    print(f"\n{step_num}. Computing Relative Pose Error (RPE) at multiple scales...")
     rpe_results = compute_rpe_multi_scale(gt_traj, est_traj)
     
     for scale, rpe_dict in rpe_results.items():
@@ -485,14 +537,16 @@ def main(gt_file, est_file, output_dir):
         print(f"     Rotation RMSE:    {rpe_r_stats['rmse']:.4f} deg/{scale}")
     
     # Generate plots
-    print("\n5. Generating plots...")
+    step_num = 6 if op_report_path else 5
+    print(f"\n{step_num}. Generating plots...")
     plot_trajectories(gt_aligned, est_aligned, output_dir / "trajectory_comparison.png")
     plot_trajectory_heatmap(gt_aligned, est_aligned, ate_trans, output_dir / "trajectory_heatmap.png")
     plot_error_over_time(ate_trans, output_dir / "error_analysis.png")
     plot_pose_graph(est_aligned, output_dir / "pose_graph.png")
     
     # Save metrics
-    print("\n6. Saving metrics...")
+    step_num = 7 if op_report_path else 6
+    print(f"\n{step_num}. Saving metrics...")
     save_metrics_txt(ate_trans, ate_rot, rpe_results, output_dir / "metrics.txt")
     save_metrics_csv(ate_trans, ate_rot, rpe_results, output_dir / "metrics.csv")
     
@@ -511,8 +565,8 @@ def main(gt_file, est_file, output_dir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: evaluate_slam.py <ground_truth.tum> <estimated.tum> <output_dir>")
+    if len(sys.argv) not in (4, 5):
+        print("Usage: evaluate_slam.py <ground_truth.tum> <estimated.tum> <output_dir> [op_report.jsonl]")
         sys.exit(1)
-    
-    main(sys.argv[1], sys.argv[2], sys.argv[3])
+    op_report_path = sys.argv[4] if len(sys.argv) == 5 else None
+    main(sys.argv[1], sys.argv[2], sys.argv[3], op_report_path)

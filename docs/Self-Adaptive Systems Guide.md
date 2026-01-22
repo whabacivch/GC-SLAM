@@ -1075,6 +1075,41 @@ class AdaptiveLoopProcessor:
         
         return 1.0
     
+    def _compute_relative(
+        self,
+        from_state: GaussianInfo,
+        to_state: GaussianInfo
+    ) -> jnp.ndarray:
+        """Compute relative pose from_state to to_state (6D: [x, y, z, rx, ry, rz])."""
+        # Extract 6D poses (first 6 elements)
+        pose_from = from_state.mean[:6]
+        pose_to = to_state.mean[:6]
+        
+        # Relative: T_relative = T_from^{-1} ∘ T_to
+        # Use se3_relative from common.se3 (group-consistent relative transform)
+        relative_pose = se3_relative(pose_from, pose_to)  # Returns 6D [x, y, z, rx, ry, rz]
+        return relative_pose
+    
+    def _estimate_relative_info(
+        self,
+        from_state: GaussianInfo,
+        to_state: GaussianInfo
+    ) -> jnp.ndarray:
+        """Estimate information matrix (6x6) for relative pose."""
+        # Extract 6D covariances
+        cov_from = from_state.covariance[:6, :6]
+        cov_to = to_state.covariance[:6, :6]
+        
+        # Approximate relative covariance via first-order propagation
+        # For relative pose T_rel = T_from^{-1} ∘ T_to, covariance propagation
+        # uses adjoint representation. Simplified: cov_rel ≈ cov_from + cov_to
+        # (exact for small uncertainties, approximate otherwise)
+        cov_relative = cov_from + cov_to
+        
+        # Return information matrix (inverse covariance)
+        info_relative = jnp.linalg.inv(cov_relative + 1e-6 * jnp.eye(6))
+        return info_relative
+    
     def process_loop(
         self,
         loop: LoopCandidate,
@@ -1610,6 +1645,12 @@ class AdaptiveCoordinator:
                 self.dirichlet.concentration_scale = 1.0  # Prior: reset to base concentration (Dirichlet hyperparameter)
                 self.dirichlet.adapt_concentration_scale()
                 logger.info("Adapting to association degradation (concentration prior reset)")
+        
+        # Check for recovery from degradation mode
+        if self.degradation_mode and health.overall_health > 0.7:
+            # Recovered from degradation
+            self.degradation_mode = False
+            logger.info("Exiting degradation mode - system recovered")
     
     def _update_reliability_prior(self, current_reliability: float, prior_alpha_increase: float) -> float:
         """
@@ -1655,11 +1696,6 @@ class AdaptiveCoordinator:
         lambda_new = lambda_base / (hazard + 1e-6)
         
         return float(jnp.clip(lambda_new, self.loops.min_lambda, self.loops.max_lambda))
-        
-        if self.degradation_mode and health.overall_health > 0.7:
-            # Recovered from degradation
-            self.degradation_mode = False
-            logger.info("Exiting degradation mode - system recovered")
     
     def _select_adaptations(
         self, 

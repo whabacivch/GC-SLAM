@@ -711,6 +711,8 @@ class Frontend(Node):
             )
             self._publish_anchor_create(anchor_id, msg.header.stamp, points)
             self.get_logger().info(f"✓ Created anchor {anchor_id} with {len(points)} points (PointCloud2)")
+            # Publish IMU segment between keyframes (anchors)
+            self._publish_imu_factor(anchor_id, msg.header.stamp, pc_stamp, pose)
 
         # Apply anchor budget if needed (uses operators.third_order_correct)
         anchor_budget = int(self.get_parameter("anchor_budget").value)
@@ -743,12 +745,9 @@ class Frontend(Node):
             if budget_report is not None:
                 self._publish_report(budget_report)
         
-        # Process each anchor with non-zero responsibility
+        # Process each anchor; rely on natural underflow (no truncation gate)
         for anchor in self.anchor_manager.get_all_anchors():
             weight = responsibilities.get(anchor.anchor_id, 0.0)
-            if weight < 1e-12:
-                continue
-            
             # Debug first few loop attempts
             if not hasattr(self, '_loop_debug_count'):
                 self._loop_debug_count = 0
@@ -903,6 +902,7 @@ class Frontend(Node):
             return
 
         imu_measurements = self.sensor_io.get_imu_measurements(start_sec, end_sec)
+        # Contract B: biases are estimated in backend, frontend sends zero reference.
         bias_gyro = np.zeros(3, dtype=float)
         bias_accel = np.zeros(3, dtype=float)
 
@@ -927,6 +927,23 @@ class Frontend(Node):
         imu_msg.stamp = stamps
         imu_msg.accel = accel
         imu_msg.gyro = gyro
+
+        if len(imu_measurements) < 2:
+            self._publish_report(OpReport(
+                name="IMUSegmentSkipped",
+                exact=True,
+                family_in="IMU",
+                family_out="IMU",
+                closed_form=True,
+                metrics={
+                    "reason": "insufficient_samples",
+                    "keyframe_i": int(self._last_keyframe_id),
+                    "keyframe_j": int(keyframe_j),
+                    "n_samples": len(imu_measurements),
+                },
+                notes="IMU segment skipped due to insufficient samples.",
+            ))
+            return
 
         self.pub_imu_segment.publish(imu_msg)
 

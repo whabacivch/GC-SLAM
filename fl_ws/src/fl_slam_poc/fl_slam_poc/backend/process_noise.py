@@ -85,3 +85,106 @@ class AdaptiveProcessNoise:
             return 0.0
         return self.count / (self.prior_dof + self.count)
 
+
+class WishartPrior:
+    """
+    Wishart prior for precision matrix (inverse covariance).
+
+    Maintains a conjugate prior for adaptive noise estimation.
+    """
+    def __init__(self, n: float, S: np.ndarray):
+        self.n = float(n)
+        self.S = np.asarray(S, dtype=float)
+
+    @property
+    def dim(self) -> int:
+        return self.S.shape[0]
+
+    @property
+    def mean_precision(self) -> np.ndarray:
+        return self.n * self.S
+
+    @property
+    def mean_covariance(self) -> np.ndarray:
+        denom = self.n - self.dim - 1
+        if denom <= 0:
+            denom = 1.0
+        return np.linalg.inv(self.S) / denom
+
+    @classmethod
+    def from_mean_covariance(cls, mean_cov: np.ndarray, dof=None) -> "WishartPrior":
+        mean_cov = np.asarray(mean_cov, dtype=float)
+        dim = mean_cov.shape[0]
+        n = float(dof) if dof is not None else float(dim + 2)
+        denom = n - dim - 1
+        if denom <= 0:
+            denom = 1.0
+        S = np.linalg.inv(mean_cov) / denom
+        return cls(n=n, S=S)
+
+    def update_with_forgetting(self, residuals: np.ndarray, forgetting_factor: float) -> "WishartPrior":
+        residuals = np.asarray(residuals, dtype=float)
+        if residuals.size == 0:
+            return self
+        if residuals.ndim == 1:
+            residuals = residuals.reshape(1, -1)
+        scatter = residuals.T @ residuals
+
+        n_forgotten = forgetting_factor * self.n
+        # Maintain consistent scaling between (n, S) under forgetting.
+        # We treat inv(S) as the accumulated pseudo-scatter scale; scale it by
+        # the forgotten effective sample size n_forgotten.
+        S_inv_forgotten = n_forgotten * np.linalg.inv(self.S)
+        S_inv_new = S_inv_forgotten + scatter
+        S_new = np.linalg.inv(S_inv_new)
+        n_new = n_forgotten + residuals.shape[0]
+        return WishartPrior(n=n_new, S=S_new)
+
+
+class AdaptiveIMUNoiseModel:
+    """
+    Self-adaptive IMU noise model using Wishart conjugate updates.
+
+    Maintains priors for bias random walk covariances.
+    """
+    def __init__(
+        self,
+        accel_bias_prior: WishartPrior,
+        gyro_bias_prior: WishartPrior,
+        forgetting_factor: float = 0.995,
+    ):
+        self.accel_bias = accel_bias_prior
+        self.gyro_bias = gyro_bias_prior
+        self.gamma = float(forgetting_factor)
+        self.history = {
+            "accel_bias_trace": [],
+            "gyro_bias_trace": [],
+        }
+
+    def update_from_bias_innovations(
+        self,
+        accel_bias_innovations: np.ndarray,
+        gyro_bias_innovations: np.ndarray,
+        dt: float,
+    ) -> None:
+        if dt <= 0.0:
+            return
+        accel_bias_innovations = np.asarray(accel_bias_innovations, dtype=float)
+        gyro_bias_innovations = np.asarray(gyro_bias_innovations, dtype=float)
+        accel_rw = accel_bias_innovations / np.sqrt(dt)
+        gyro_rw = gyro_bias_innovations / np.sqrt(dt)
+
+        self.accel_bias = self.accel_bias.update_with_forgetting(accel_rw, self.gamma)
+        self.gyro_bias = self.gyro_bias.update_with_forgetting(gyro_rw, self.gamma)
+
+        self.history["accel_bias_trace"].append(float(np.trace(self.accel_bias.mean_covariance)))
+        self.history["gyro_bias_trace"].append(float(np.trace(self.gyro_bias.mean_covariance)))
+
+    def get_current_noise_params(self) -> dict:
+        return {
+            "accel_bias_cov": self.accel_bias.mean_covariance,
+            "gyro_bias_cov": self.gyro_bias.mean_covariance,
+            "accel_bias_confidence": float(self.accel_bias.n),
+            "gyro_bias_confidence": float(self.gyro_bias.n),
+        }
+

@@ -3,6 +3,10 @@
 **Compositional inference for dynamic SLAM using information-geometric methods**
 
 ---
+Embracing uncertainty is a cornerstone of robust robotics and SLAM systems, as pursuing absolute certainty often leads to brittle designs that fail under real-world conflicts and unknowns. Fundamental limits like the Heisenberg uncertainty principle highlight inherent trade-offs in measurement precision, while Gödel's incompleteness theorems remind us that no formal model can be fully complete or self-proving, ensuring "certainty" remains illusory. Instead, wise engineering accepts these realities, building antifragile systems that quantify uncertainty (e.g., via covariances and divergences), detect anomalies, and adapt dynamically—turning potential weaknesses into strengths for resilient performance in noisy, dynamic environments.
+
+In practice, this means layering defenses in SLAM: Use principled tools like Wishart conjugates for adaptive noise modeling, Hellinger bounds for outlier rejection, and Frobenius corrections for handling approximations, allowing systems to thrive amid conflicting data rather than assuming monotonic progress or perfect models.
+---
 
 ## MVP Status
 

@@ -4,6 +4,42 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-22: IMU Diagnostics + Adaptive Bias Noise ✅
+
+### Summary
+
+Hardened IMU wiring and diagnostics across the 3D pointcloud path, enforced fail-fast GPU contract for IMU fusion, standardized IMU timebase to stamp-derived dt, fixed IMU integration ordering in both NumPy and JAX paths, and added adaptive Wishart estimation for bias random walk covariance. Evaluation now validates OpReport diagnostics and IMU/Frobenius compliance by default.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
+  - Publish IMU segments in 3D pointcloud anchor births.
+  - Emit `IMUSegmentSkipped` OpReport on insufficient IMU samples.
+  - Removed loop factor truncation gate; rely on natural underflow (documented policy).
+  - Documented zero bias reference (Contract B) in IMU segment publishing.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
+  - Standardized IMU dt to `imu_stamps[-1] - imu_stamps[0]` and added timebase diagnostics.
+  - Applied Frobenius correction proof-of-execution fields in IMU OpReports.
+  - Dense Hellinger logits for routing (soft association), with optional keyframe mapping bias.
+  - Fixed IMU integration ordering in NumPy path (position before velocity).
+  - Added adaptive Wishart bias random walk covariances and bias observability metrics.
+  - Documented fail-fast GPU runtime contract for IMU fusion.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/imu_jax_kernel.py`
+  - Fixed IMU integration ordering in JAX path (position before velocity).
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/process_noise.py`
+  - Added `WishartPrior` and `AdaptiveIMUNoiseModel` for adaptive IMU bias random walk estimation.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/__init__.py`
+  - Exported adaptive IMU noise classes.
+- `tools/run_and_evaluate.sh`
+  - Capture `/cdwm/op_report` to JSONL for evaluation diagnostics.
+- `tools/evaluate_slam.py`
+  - Added OpReport validation (IMU + Frobenius + timebase + adaptive bias checks) as default.
+
+### Notes
+
+- **IMU GPU contract:** When `enable_imu_fusion=true`, backend requires GPU at startup (fail-fast).
+- **Timebase policy:** Canonical dt is derived from IMU stamp endpoints.
+
 ## 2026-01-22: Repository Flattening + Tooling Cleanup ✅
 
 ### Summary
