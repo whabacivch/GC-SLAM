@@ -38,15 +38,26 @@ else
   exit 1
 fi
 
-# Preflight checks (JAX GPU + eval deps)
+# Preflight checks (JAX CUDA + eval deps)
 echo "Running preflight checks..."
-python3 - <<'PY'
+python3 - <<PY
+import os
 import sys
+import traceback
+
+project_root = r"""$PROJECT_ROOT"""
+pkg_root = os.path.join(project_root, "fl_ws", "src", "fl_slam_poc")
+if pkg_root not in sys.path:
+    sys.path.insert(0, pkg_root)
 
 try:
-    import jax
+    # Ensure CUDA backend selection (avoid ROCm probing)
+    os.environ.setdefault("JAX_PLATFORMS", "cuda")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    from fl_slam_poc.common.jax_init import jax
 except Exception as exc:
-    print(f"ERROR: Failed to import jax: {exc}")
+    print(f"ERROR: Failed to initialize JAX: {exc}")
+    traceback.print_exc()
     sys.exit(1)
 
 devices = jax.devices()
@@ -59,6 +70,7 @@ try:
     import matplotlib  # noqa: F401
 except Exception as exc:
     print(f"ERROR: Missing evaluation dependency: {exc}")
+    traceback.print_exc()
     sys.exit(1)
 
 print(f"Preflight OK: jax {jax.__version__}, devices={devices}")
@@ -76,6 +88,10 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 export CYCLONEDDS_URI="${CYCLONEDDS_URI:-file://${PROJECT_ROOT}/config/cyclonedds.xml}"
 mkdir -p "$ROS_HOME" "$ROS_LOG_DIR"
 
+# Ensure launched node processes inherit CUDA config BEFORE any JAX import.
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
+export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
+
 # Run SLAM with rosbag
 echo "[1/3] Running SLAM system..."
 
@@ -87,17 +103,25 @@ echo "  Full log: $LOG_FILE"
 echo "  Starting playback with progress monitoring..."
 echo ""
 
+# Start OpReport recorder (robust vs `ros2 topic echo`)
+python3 "$PROJECT_ROOT/tools/capture_op_reports.py" --topic /cdwm/op_report --out "$OP_REPORT_FILE" \
+  > /dev/null 2>&1 &
+OP_REPORT_PID=$!
+
 # Launch SLAM in background with full logging
-# Explicitly force C++ RGB-D decompression (Python decompressor is removed).
 ros2 launch fl_slam_poc poc_m3dgr_rosbag.launch.py \
   bag:="$BAG_PATH" \
   enable_decompress_cpp:=true \
+  lidar_base_extrinsic:="[-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]" \
+  imu_topic:=/livox/mid360/imu \
+  imu_gyro_noise_density:=1.7e-4 \
+  imu_accel_noise_density:=1.9e-4 \
+  camera_fx:=610.16 \
+  camera_fy:=610.45 \
+  camera_cx:=326.35 \
+  camera_cy:=244.68 \
   > "$LOG_FILE" 2>&1 &
 LAUNCH_PID=$!
-
-# Capture OpReports for evaluation diagnostics
-ros2 topic echo /cdwm/op_report --field data --full-length > "$OP_REPORT_FILE" 2>/dev/null &
-OP_REPORT_PID=$!
 
 # Monitor progress by tailing log with filtered display
 tail -f "$LOG_FILE" 2>/dev/null | while IFS= read -r line; do
@@ -147,6 +171,11 @@ echo ""
 if [ ! -f "$EST_FILE" ]; then
     echo "ERROR: Estimated trajectory not found at $EST_FILE"
     exit 1
+fi
+
+# Activate venv if it exists (for evo package)
+if [ -d "$HOME/.venv" ]; then
+  source "$HOME/.venv/bin/activate" 2>/dev/null || true
 fi
 
 # Align ground truth timestamps

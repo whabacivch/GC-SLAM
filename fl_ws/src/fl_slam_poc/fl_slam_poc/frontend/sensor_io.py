@@ -329,6 +329,15 @@ class SensorIO:
                     # Bag playback often has no TF. If we have an explicit static extrinsic, use it.
                     # Convention: lidar_base_extrinsic is T_base_lidar (6DOF) mapping lidar-frame points into base_frame.
                     extr = self.config.get("lidar_base_extrinsic", None)
+                    # Treat empty list/string or all zeros (launch default) as "not provided" (avoid misleading errors).
+                    if isinstance(extr, str) and extr.strip() == "":
+                        extr = None
+                    elif isinstance(extr, list):
+                        if len(extr) == 0:
+                            extr = None
+                        elif len(extr) == 6 and all(abs(x) < 1e-9 for x in extr):
+                            # All zeros means "not provided"
+                            extr = None
                     if extr is not None:
                         try:
                             # Launch files sometimes pass arrays as strings (e.g. "[0,0,0,0,0,0]").
@@ -391,8 +400,9 @@ class SensorIO:
                                     )
                                     report.validate()
                                     self.node._publish_report(report)  # type: ignore[attr-defined]
-                    # If no TF and no extrinsic, keep existing CRITICAL warning behavior.
-                    if not hasattr(self, '_logged_pc_tf_fail'):
+                    # If no TF and no extrinsic (or extrinsic failed), keep existing CRITICAL warning behavior.
+                    # Only log error if frame_id still doesn't match base_frame (transform wasn't applied).
+                    if frame_id != base_frame and not hasattr(self, '_logged_pc_tf_fail'):
                         self._logged_pc_tf_fail = True
                         self.node.get_logger().error(
                             f"CRITICAL: Cannot transform pointcloud from '{frame_id}' to '{base_frame}'. "

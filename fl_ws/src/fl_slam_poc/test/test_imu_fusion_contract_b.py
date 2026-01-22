@@ -1,14 +1,13 @@
 import numpy as np
-import jax
-import jax.numpy as jnp
+# Use common JAX initialization to ensure consistent setup
+from fl_slam_poc.common.jax_init import jax, jnp
 
 from fl_slam_poc.backend.imu_jax_kernel import imu_batched_projection_kernel, imu_residual_from_raw
 from fl_slam_poc.backend.gaussian_info import make_evidence, mean_cov
 from fl_slam_poc.backend.dirichlet_routing import DirichletRoutingModule
 from fl_slam_poc.common.se3 import se3_compose, se3_exp
 
-
-jax.config.update("jax_enable_x64", True)
+# JAX is already configured (x64 + GPU) by common.jax_init
 
 
 def _schur_marginalize_joint(joint_mean: np.ndarray, joint_cov: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

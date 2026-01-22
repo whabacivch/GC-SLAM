@@ -229,15 +229,26 @@ POINTCLOUD_RATE_LIMIT_HZ = 30.0
 # IMU Constants
 # =============================================================================
 
-# Default IMU noise parameters (typical for consumer-grade IMU like RealSense)
-# Reference: Forster et al. (2017) "On-Manifold Preintegration"
-IMU_GYRO_NOISE_DENSITY_DEFAULT = 1.0e-3     # rad/s/sqrt(Hz)
-IMU_ACCEL_NOISE_DENSITY_DEFAULT = 1.0e-2    # m/s^2/sqrt(Hz)
+# Default IMU noise parameters.
+# Notes:
+# - The pipeline uses noise densities (measurement noise) for preintegration.
+# - IMU bias evolution is handled via a self-adaptive Wishart model; we intentionally
+#   DO NOT use IMU random-walk parameters as user-tunable inputs.
+IMU_GYRO_NOISE_DENSITY_DEFAULT = 1.7e-4     # rad/s/sqrt(Hz)
+IMU_ACCEL_NOISE_DENSITY_DEFAULT = 1.9e-4    # m/s^2/sqrt(Hz)
+
+# Legacy (deprecated): random-walk parameters are intentionally NOT used in the MVP pipeline.
+# Kept only for backward compatibility in standalone utilities/tests.
 IMU_GYRO_RANDOM_WALK_DEFAULT = 1.0e-5       # rad/s^2/sqrt(Hz)
 IMU_ACCEL_RANDOM_WALK_DEFAULT = 1.0e-4      # m/s^3/sqrt(Hz)
 
-# Default IMU topic (M3DGR dataset uses /camera/imu)
-IMU_TOPIC_DEFAULT = "/camera/imu"
+# Bias innovation prior (per sqrt(second)) used to seed the adaptive bias noise model.
+# This is a prior, not a dataset calibration input.
+IMU_GYRO_BIAS_INNOV_STD_PRIOR = 1.0e-4      # rad/s/sqrt(s)
+IMU_ACCEL_BIAS_INNOV_STD_PRIOR = 1.0e-3     # m/s^2/sqrt(s)
+
+# Default IMU topic (M3DGR: Livox MID-360 IMU)
+IMU_TOPIC_DEFAULT = "/livox/mid360/imu"
 
 # Gravity vector (world frame, z-down by default; override via ROS params if needed)
 GRAVITY_DEFAULT = (0.0, 0.0, -9.81)

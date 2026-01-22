@@ -18,8 +18,7 @@ Reference: Compositional Legendre framework, Hellinger hierarchical construction
 """
 
 from typing import Dict
-import jax
-import jax.numpy as jnp
+from fl_slam_poc.common.jax_init import jax, jnp
 from jax import jit
 from jax.scipy.linalg import cholesky, solve_triangular
 

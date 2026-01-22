@@ -37,6 +37,22 @@ Use `tools/inspect_rosbag_deep.py` to regenerate counts/frames when bags change.
   - `/livox/mid360/imu.header.frame_id = livox_frame`
   - `/livox/avia/*` topics may be present, but require `livox_ros_driver` message package to decode.
 
+### Adopted calibration + launch defaults (MVP)
+
+These are the **explicit parameters we run with** for M3DGR (to compensate for missing `/tf(_static)` and missing `CameraInfo`):
+
+- **Base/body frame policy**: `base_frame` is treated as the dataset **body/IMU frame \(b\)** (we keep the name `base_footprint` for M3DGR because it matches bag truth).
+- **LiDAR mounting** (MID-360, no-TF): `lidar_base_extrinsic = [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]` interpreted as \(T_{b\leftarrow \text{mid360}}\) with format `[x,y,z,rx,ry,rz]` and `R=I`.
+- **IMU source**: `/livox/mid360/imu`
+- **RealSense intrinsics** (640×480, bag has no `CameraInfo`):
+  - `camera_fx = 610.16`
+  - `camera_fy = 610.45`
+  - `camera_cx = 326.35`
+  - `camera_cy = 244.68`
+- **IMU noise densities** (used by preintegration; random-walk terms are intentionally not used):
+  - `imu_gyro_noise_density = 1.7e-4` (rad/s/√Hz)
+  - `imu_accel_noise_density = 1.9e-4` (m/s²/√Hz)
+
 ### Topic inventory (observed)
 
 Run:
@@ -53,8 +69,8 @@ Key topics:
 | --- | --- | --- | --- |
 | `/odom` | `nav_msgs/msg/Odometry` | **Yes** | Converted to delta odom by `tb3_odom_bridge` and fused in backend (`/sim/odom`). Frame truth: `odom_combined -> base_footprint`. |
 | `/livox/mid360/lidar` | `livox_ros_driver2/msg/CustomMsg` | **Yes** | Converted to `PointCloud2` by `livox_converter` and consumed by frontend pointcloud path. Preserves `frame_id=livox_frame`. |
-| `/livox/mid360/imu` | `sensor_msgs/msg/Imu` | Not yet (MVP) | Present for future LiDAR-IMU coupling / calibration; currently frontend uses `/camera/imu`. |
-| `/camera/imu` | `sensor_msgs/msg/Imu` | **Yes** | Frontend buffers IMU and publishes `/sim/imu_segment` (Contract B); backend re-integrates. Frame: `camera_imu_optical_frame`. |
+| `/livox/mid360/imu` | `sensor_msgs/msg/Imu` | **Yes** | Frontend buffers IMU and publishes `/sim/imu_segment` (Contract B); backend re-integrates. Frame: `livox_frame`. |
+| `/camera/imu` | `sensor_msgs/msg/Imu` | Not used (MVP) | Present in bag but not used by default in the M3DGR pipeline. |
 | `/camera/color/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Optional | Decompressed by `image_decompress_cpp` to `/camera/image_raw`. Downstream usage depends on `enable_image/publish_rgbd_evidence`. |
 | `/camera/aligned_depth_to_color/image_raw/compressedDepth` | `sensor_msgs/msg/CompressedImage` | Optional | Decompressed by `image_decompress_cpp` to `/camera/depth/image_raw`. Depth is aligned to color (same frame). |
 | `/vrpn_client_node/UGV/pose` | `geometry_msgs/msg/PoseStamped` | **Evaluation only** | Ground-truth source for offline evaluation. Must never be fused into inference. |
@@ -79,6 +95,8 @@ Key topics:
   - Use launch arg `lidar_base_extrinsic` as `T_base_lidar = [x,y,z,rx,ry,rz]`.
   - If omitted, frontend will warn and pointcloud may remain in sensor frame.
 - With no CameraInfo, camera intrinsics must be provided via parameters and logged.
+- With no TF, **IMU measurements are assumed to be expressed in the body/base frame** unless an IMU extrinsic is explicitly introduced in the future. Frame IDs are still logged for audit.
+- **Random-walk IMU params are intentionally not used**: bias evolution is governed by the adaptive Wishart model (seeded by a fixed prior), not user-provided `imu_*_random_walk` values.
 
 ## TurtleBot3 / other bags (placeholder)
 

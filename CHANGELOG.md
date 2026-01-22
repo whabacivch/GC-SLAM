@@ -8,7 +8,7 @@ This file tracks all significant changes, design decisions, and implementation m
 
 ### Summary
 
-Hardened IMU wiring and diagnostics across the 3D pointcloud path, enforced fail-fast GPU contract for IMU fusion, standardized IMU timebase to stamp-derived dt, fixed IMU integration ordering in both NumPy and JAX paths, and added adaptive Wishart estimation for bias random walk covariance. Evaluation now validates OpReport diagnostics and IMU/Frobenius compliance by default.
+Hardened IMU wiring and diagnostics across the 3D pointcloud path, enforced fail-fast GPU contract for IMU fusion, standardized IMU timebase to stamp-derived dt, fixed IMU integration ordering in both NumPy and JAX paths, and added self-adaptive Wishart estimation for bias innovation covariance. **IMU random-walk parameters are intentionally not used in the MVP pipeline** (bias noise is learned online from innovations and seeded by a fixed prior). Evaluation now validates OpReport diagnostics and IMU/Frobenius compliance by default.
 
 ### Changes
 
@@ -22,7 +22,8 @@ Hardened IMU wiring and diagnostics across the 3D pointcloud path, enforced fail
   - Applied Frobenius correction proof-of-execution fields in IMU OpReports.
   - Dense Hellinger logits for routing (soft association), with optional keyframe mapping bias.
   - Fixed IMU integration ordering in NumPy path (position before velocity).
-  - Added adaptive Wishart bias random walk covariances and bias observability metrics.
+  - Added adaptive Wishart bias innovation covariances and bias observability metrics.
+  - Removed `imu_*_random_walk` parameter plumbing; adaptive bias noise is seeded by a fixed prior.
   - Documented fail-fast GPU runtime contract for IMU fusion.
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/imu_jax_kernel.py`
   - Fixed IMU integration ordering in JAX path (position before velocity).

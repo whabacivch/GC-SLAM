@@ -25,6 +25,45 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def _json_safe(obj):
+    """
+    Convert common scientific types to JSON-serializable Python types.
+
+    We must never crash the pipeline while emitting OpReports; if a value cannot be
+    converted, we fall back to a string repr (still audit-visible, not silent).
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    # Containers
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(x) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+
+    # NumPy / JAX arrays & scalars (handled without importing jax)
+    try:
+        import numpy as np  # local import to keep common/ mostly lightweight
+
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.generic):
+            return obj.item()
+    except Exception:
+        # numpy may be unavailable in some contexts; continue with generic handling
+        pass
+
+    # Many array-like objects (including JAX ArrayImpl) support .tolist()
+    tolist = getattr(obj, "tolist", None)
+    if callable(tolist):
+        try:
+            return tolist()
+        except Exception:
+            pass
+
+    return repr(obj)
+
+
 @dataclass
 class OpReport:
     """
@@ -124,11 +163,11 @@ class OpReport:
             "frobenius_applied": self.frobenius_applied,
             "frobenius_operator": self.frobenius_operator,
             "frobenius_delta_norm": self.frobenius_delta_norm,
-            "frobenius_input_stats": self.frobenius_input_stats,
-            "frobenius_output_stats": self.frobenius_output_stats,
+            "frobenius_input_stats": _json_safe(self.frobenius_input_stats),
+            "frobenius_output_stats": _json_safe(self.frobenius_output_stats),
             "domain_projection": self.domain_projection,
             "allow_ablation": self.allow_ablation,
-            "metrics": dict(self.metrics),
+            "metrics": _json_safe(dict(self.metrics)),
             "notes": self.notes,
             "timestamp": self.timestamp,
         }

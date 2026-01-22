@@ -149,8 +149,6 @@ class Frontend(Node):
         self.declare_parameter("imu_topic", constants.IMU_TOPIC_DEFAULT)
         self.declare_parameter("imu_gyro_noise_density", constants.IMU_GYRO_NOISE_DENSITY_DEFAULT)
         self.declare_parameter("imu_accel_noise_density", constants.IMU_ACCEL_NOISE_DENSITY_DEFAULT)
-        self.declare_parameter("imu_gyro_random_walk", constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
-        self.declare_parameter("imu_accel_random_walk", constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
         self.declare_parameter("keyframe_translation_threshold", 0.5)
         self.declare_parameter("keyframe_rotation_threshold", 0.26)
         self.declare_parameter("gravity", list(constants.GRAVITY_DEFAULT))
@@ -161,8 +159,8 @@ class Frontend(Node):
         self.declare_parameter("camera_frame", "camera_link")
         self.declare_parameter("scan_frame", "base_link")
         self.declare_parameter("tf_timeout_sec", 0.05)
-        # No-TF LiDAR extrinsic (T_base_lidar): [x,y,z,rx,ry,rz]. If empty, TF is required.
-        self.declare_parameter("lidar_base_extrinsic", "")
+        # No-TF LiDAR extrinsic (T_base_lidar): [x,y,z,rx,ry,rz]. If empty (all zeros), TF is required.
+        self.declare_parameter("lidar_base_extrinsic", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         
         # Fisher-Rao
         self.declare_parameter("fr_distance_scale_prior", 1.0)

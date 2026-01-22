@@ -20,6 +20,8 @@ Bag topic inventory + usage map (canonical): `docs/BAG_TOPICS_AND_USAGE.md`.
 - Backend: information-geometric fusion, trajectory estimation (6DOF/15DOF state)
 - Evaluation: ATE/RPE metrics and publication-quality plots
 
+**Policy note:** IMU bias evolution is handled by an adaptive Wishart model (seeded by a fixed prior). The MVP pipeline intentionally does **not** use `imu_*_random_walk` parameters.
+
 **Current Priorities:** See [`ROADMAP.md`](ROADMAP.md) for:
 - Priority 1: IMU integration + 15D state extension, wheel odom separation, dense RGB-D in 3D mode
 - Priority 2-4: Alternative datasets, GPU acceleration, research features
@@ -57,7 +59,7 @@ graph TB
     subgraph "Rosbag Topics - M3DGR (Inputs)"
         ODOM["/odom<br/>(nav_msgs/Odometry)<br/>absolute pose"]
         LIVOX["/livox/mid360/lidar<br/>(Livox CustomMsg)"]
-        IMU["/camera/imu<br/>(sensor_msgs/Imu)"]
+        IMU["/livox/mid360/imu<br/>(sensor_msgs/Imu)"]
         RGB_COMPRESSED["/camera/color/image_raw/compressed"]
         DEPTH_COMPRESSED["/camera/aligned_depth_to_color/image_raw/compressedDepth"]
     end
@@ -105,7 +107,7 @@ graph TB
     ODOM_BRIDGE -->|"/sim/odom<br/>(delta pose)"| FRONTEND
     ODOM_BRIDGE -->|"/sim/odom<br/>(delta pose)"| BACKEND
     LIVOX_CONV -->|"/lidar/points<br/>(PointCloud2)"| FRONTEND
-    IMU -->|"/camera/imu"| FRONTEND
+    IMU -->|"/livox/mid360/imu"| FRONTEND
 
     FRONTEND --> SENSOR_IO
     SENSOR_IO --> ANCHOR_MGR

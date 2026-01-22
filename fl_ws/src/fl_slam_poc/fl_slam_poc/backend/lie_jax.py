@@ -16,8 +16,7 @@ If JAX is not installed, import will fail loudly.
 Reference: Barfoot (2017), Forster et al. (2017)
 """
 
-import jax
-import jax.numpy as jnp
+from fl_slam_poc.common.jax_init import jax, jnp
 from jax import jit
 from typing import Tuple
 

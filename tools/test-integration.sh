@@ -38,13 +38,21 @@ else
 fi
 
 echo "Running preflight checks..."
-python3 - <<'PY'
+python3 - <<PY
+import os
 import sys
+import traceback
+
+project_root = r"""${PROJECT_DIR}"""
+pkg_root = os.path.join(project_root, "fl_ws", "src", "fl_slam_poc")
+if pkg_root not in sys.path:
+    sys.path.insert(0, pkg_root)
 
 try:
-    import jax
+    from fl_slam_poc.common.jax_init import jax
 except Exception as exc:
-    print(f"ERROR: Failed to import jax: {exc}")
+    print(f"ERROR: Failed to initialize JAX: {exc}")
+    traceback.print_exc()
     sys.exit(1)
 
 devices = jax.devices()

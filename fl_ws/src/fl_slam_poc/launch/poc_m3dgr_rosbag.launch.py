@@ -1,12 +1,27 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from typing import List
 
 
-def generate_launch_description():
+def launch_setup(context, *args, **kwargs):
+    # NOTE:
+    # The launcher process cannot initialize JAX "for" child node processes.
+    # The correct way to ensure JAX is configured before import in node processes
+    # is to pass environment variables into the backend node process (see below).
+
+    # Evaluate LaunchConfiguration values to actual Python values for gravity list
+    gravity_x_val = float(context.launch_configurations.get("gravity_x", "0.0"))
+    gravity_y_val = float(context.launch_configurations.get("gravity_y", "0.0"))
+    gravity_z_val = float(context.launch_configurations.get("gravity_z", "-9.81"))
+    gravity_list = [gravity_x_val, gravity_y_val, gravity_z_val]  # Real Python list
+    # NOTE: launch's typed substitution requires typing.List[T], not built-in list.
+    gravity_value = ParameterValue(gravity_list, value_type=List[float])
+
+    # Create LaunchConfiguration objects for other parameters (not evaluated yet)
     use_sim_time = LaunchConfiguration("use_sim_time")
     play_bag = LaunchConfiguration("play_bag")
     bag = LaunchConfiguration("bag")
@@ -51,91 +66,10 @@ def generate_launch_description():
     imu_topic = LaunchConfiguration("imu_topic")
     imu_gyro_noise_density = LaunchConfiguration("imu_gyro_noise_density")
     imu_accel_noise_density = LaunchConfiguration("imu_accel_noise_density")
-    imu_gyro_random_walk = LaunchConfiguration("imu_gyro_random_walk")
-    imu_accel_random_walk = LaunchConfiguration("imu_accel_random_walk")
     keyframe_translation_threshold = LaunchConfiguration("keyframe_translation_threshold")
     keyframe_rotation_threshold = LaunchConfiguration("keyframe_rotation_threshold")
-    gravity_x = LaunchConfiguration("gravity_x")
-    gravity_y = LaunchConfiguration("gravity_y")
-    gravity_z = LaunchConfiguration("gravity_z")
 
-    gravity_value = ParameterValue(
-        PythonExpression(["[", gravity_x, ",", gravity_y, ",", gravity_z, "]"]),
-        value_type=list,
-    )
-
-    return LaunchDescription(
-        [
-            DeclareLaunchArgument("use_sim_time", default_value="true"),
-            DeclareLaunchArgument("play_bag", default_value="true"),
-            DeclareLaunchArgument("bag", default_value=""),
-            DeclareLaunchArgument("bag_start_delay_sec", default_value="2.0"),
-
-            DeclareLaunchArgument("enable_frontend", default_value="true"),
-            DeclareLaunchArgument("enable_backend", default_value="true"),
-            DeclareLaunchArgument("enable_odom_bridge", default_value="true"),
-
-            # Livox CustomMsg -> PointCloud2
-            DeclareLaunchArgument("enable_livox_convert", default_value="true"),
-            DeclareLaunchArgument("livox_input_topic", default_value="/livox/mid360/lidar"),
-            DeclareLaunchArgument("pointcloud_topic", default_value="/lidar/points"),
-            # Preserve bag-truth sensor frame (recommended). M3DGR uses 'livox_frame'.
-            DeclareLaunchArgument("pointcloud_frame_id", default_value="livox_frame"),
-            # Optional: support different Livox CustomMsg packages
-            DeclareLaunchArgument("livox_input_msg_type", default_value="auto"),
-            # Explicit LiDAR extrinsic (no-TF mode): T_base_lidar as [x,y,z,rx,ry,rz]
-            DeclareLaunchArgument("lidar_base_extrinsic", default_value=""),
-
-            # Core topics / frames
-            DeclareLaunchArgument("odom_topic", default_value="/odom"),
-            # Bag-truth (M3DGR Dynamic01): odom_combined -> base_footprint
-            DeclareLaunchArgument("odom_frame", default_value="odom_combined"),
-            DeclareLaunchArgument("base_frame", default_value="base_footprint"),
-
-            # RGB-D decompression (M3DGR: compressed RGB + compressedDepth)
-            # C++ decompressor is enabled by default to avoid NumPy/cv_bridge ABI issues.
-            DeclareLaunchArgument("enable_decompress_cpp", default_value="true"),
-            DeclareLaunchArgument("rgb_compressed_topic", default_value="/camera/color/image_raw/compressed"),
-            DeclareLaunchArgument("depth_compressed_topic", default_value="/camera/aligned_depth_to_color/image_raw/compressedDepth"),
-            DeclareLaunchArgument("camera_topic", default_value="/camera/image_raw"),
-            DeclareLaunchArgument("depth_topic", default_value="/camera/depth/image_raw"),
-            # M3DGR Dynamic01 has no CameraInfo topic in the bag by default.
-            DeclareLaunchArgument("camera_info_topic", default_value="/camera/depth/camera_info"),
-
-            DeclareLaunchArgument("publish_rgbd_evidence", default_value="false"),
-            DeclareLaunchArgument("rgbd_evidence_topic", default_value="/sim/rgbd_evidence"),
-            DeclareLaunchArgument("enable_image", default_value="false"),
-            DeclareLaunchArgument("enable_depth", default_value="false"),
-            DeclareLaunchArgument("enable_camera_info", default_value="false"),
-            # Intrinsics fallback (used when enable_camera_info=false)
-            # M3DGR RealSense D435i camera intrinsics (640x480)
-            # Source: M3DGR dataset documentation
-            DeclareLaunchArgument("camera_fx", default_value="383.0"),
-            DeclareLaunchArgument("camera_fy", default_value="383.0"),
-            DeclareLaunchArgument("camera_cx", default_value="320.0"),
-            DeclareLaunchArgument("camera_cy", default_value="240.0"),
-
-            DeclareLaunchArgument(
-                "sensor_qos_reliability",
-                default_value="reliable",  # Use single subscription to avoid duplicate processing
-                description="QoS reliability for sensor subscriptions: reliable, best_effort, system_default, both",
-            ),
-
-            # IMU Integration (enabled by default for M3DGR)
-            DeclareLaunchArgument("enable_imu", default_value="true"),
-            DeclareLaunchArgument("imu_topic", default_value="/camera/imu"),
-            DeclareLaunchArgument("imu_gyro_noise_density", default_value="1.0e-3"),
-            DeclareLaunchArgument("imu_accel_noise_density", default_value="1.0e-2"),
-            DeclareLaunchArgument("imu_gyro_random_walk", default_value="1.0e-5"),
-            DeclareLaunchArgument("imu_accel_random_walk", default_value="1.0e-4"),
-            # Motion-based keyframe thresholds
-            DeclareLaunchArgument("keyframe_translation_threshold", default_value="0.5"),
-            DeclareLaunchArgument("keyframe_rotation_threshold", default_value="0.26"),
-            # Gravity vector (world frame)
-            DeclareLaunchArgument("gravity_x", default_value="0.0"),
-            DeclareLaunchArgument("gravity_y", default_value="0.0"),
-            DeclareLaunchArgument("gravity_z", default_value="-9.81"),
-
+    return [
             # Livox converter node
             Node(
                 package="fl_slam_poc",
@@ -216,8 +150,6 @@ def generate_launch_description():
                         "imu_topic": imu_topic,
                         "imu_gyro_noise_density": imu_gyro_noise_density,
                         "imu_accel_noise_density": imu_accel_noise_density,
-                        "imu_gyro_random_walk": imu_gyro_random_walk,
-                        "imu_accel_random_walk": imu_accel_random_walk,
                         "keyframe_translation_threshold": keyframe_translation_threshold,
                         "keyframe_rotation_threshold": keyframe_rotation_threshold,
                         "gravity": gravity_value,
@@ -256,6 +188,12 @@ def generate_launch_description():
                 executable="backend_node",
                 name="fl_backend",
                 output="screen",
+                additional_env={
+                    # Ensure backend process inherits JAX config BEFORE any import.
+                    # Use "cuda" (not "gpu") to avoid JAX attempting ROCm first.
+                    "JAX_PLATFORMS": "cuda",
+                    "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+                },
                 parameters=[
                     {
                         "use_sim_time": use_sim_time,
@@ -265,8 +203,6 @@ def generate_launch_description():
 
                         # IMU Integration parameters
                         "enable_imu_fusion": enable_imu,
-                        "imu_gyro_random_walk": imu_gyro_random_walk,
-                        "imu_accel_random_walk": imu_accel_random_walk,
                         "gravity": gravity_value,
                     }
                 ],
@@ -285,4 +221,59 @@ def generate_launch_description():
                 condition=IfCondition(PythonExpression(["'", play_bag, "' == 'true'"])),
             ),
         ]
-    )
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        # Declare all launch arguments first
+        DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument("play_bag", default_value="true"),
+        DeclareLaunchArgument("bag", default_value=""),
+        DeclareLaunchArgument("bag_start_delay_sec", default_value="2.0"),
+        DeclareLaunchArgument("enable_frontend", default_value="true"),
+        DeclareLaunchArgument("enable_backend", default_value="true"),
+        DeclareLaunchArgument("enable_odom_bridge", default_value="true"),
+        DeclareLaunchArgument("enable_livox_convert", default_value="true"),
+        DeclareLaunchArgument("livox_input_topic", default_value="/livox/mid360/lidar"),
+        DeclareLaunchArgument("pointcloud_topic", default_value="/lidar/points"),
+        DeclareLaunchArgument("pointcloud_frame_id", default_value="livox_frame"),
+        DeclareLaunchArgument("livox_input_msg_type", default_value="auto"),
+        # MID-360 mounting extrinsic (no-TF bags): T_b_mid360 = [x,y,z,rx,ry,rz]
+        # For M3DGR Dynamic01, we default this to the provided MID-360 calibration:
+        # t=[-0.011, 0.0, 0.778], R=I.
+        DeclareLaunchArgument("lidar_base_extrinsic", default_value="[-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]"),
+        DeclareLaunchArgument("odom_topic", default_value="/odom"),
+        DeclareLaunchArgument("odom_frame", default_value="odom_combined"),
+        DeclareLaunchArgument("base_frame", default_value="base_footprint"),
+        DeclareLaunchArgument("enable_decompress_cpp", default_value="true"),
+        DeclareLaunchArgument("rgb_compressed_topic", default_value="/camera/color/image_raw/compressed"),
+        DeclareLaunchArgument("depth_compressed_topic", default_value="/camera/aligned_depth_to_color/image_raw/compressedDepth"),
+        DeclareLaunchArgument("camera_topic", default_value="/camera/image_raw"),
+        DeclareLaunchArgument("depth_topic", default_value="/camera/depth/image_raw"),
+        DeclareLaunchArgument("camera_info_topic", default_value="/camera/depth/camera_info"),
+        DeclareLaunchArgument("publish_rgbd_evidence", default_value="false"),
+        DeclareLaunchArgument("rgbd_evidence_topic", default_value="/sim/rgbd_evidence"),
+        DeclareLaunchArgument("enable_image", default_value="false"),
+        DeclareLaunchArgument("enable_depth", default_value="false"),
+        DeclareLaunchArgument("enable_camera_info", default_value="false"),
+        # M3DGR: bag does not include CameraInfo; intrinsics must be declared.
+        # RealSense 640x480 (dataset values).
+        DeclareLaunchArgument("camera_fx", default_value="610.16"),
+        DeclareLaunchArgument("camera_fy", default_value="610.45"),
+        DeclareLaunchArgument("camera_cx", default_value="326.35"),
+        DeclareLaunchArgument("camera_cy", default_value="244.68"),
+        DeclareLaunchArgument("sensor_qos_reliability", default_value="reliable"),
+        DeclareLaunchArgument("enable_imu", default_value="true"),
+        # M3DGR: primary IMU topic should be Livox MID-360 IMU.
+        DeclareLaunchArgument("imu_topic", default_value="/livox/mid360/imu"),
+        # M3DGR (Xsens-class IMU parameters; random-walk terms are intentionally NOT used).
+        DeclareLaunchArgument("imu_gyro_noise_density", default_value="1.7e-4"),
+        DeclareLaunchArgument("imu_accel_noise_density", default_value="1.9e-4"),
+        DeclareLaunchArgument("keyframe_translation_threshold", default_value="0.5"),
+        DeclareLaunchArgument("keyframe_rotation_threshold", default_value="0.26"),
+        DeclareLaunchArgument("gravity_x", default_value="0.0"),
+        DeclareLaunchArgument("gravity_y", default_value="0.0"),
+        DeclareLaunchArgument("gravity_z", default_value="-9.8051"),
+        # Use OpaqueFunction to evaluate context and create nodes
+        OpaqueFunction(function=launch_setup),
+    ])

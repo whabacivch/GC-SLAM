@@ -39,11 +39,7 @@ import time
 from collections import deque
 from typing import Optional, Dict, List
 
-# Configure JAX for GPU before any JAX imports
-import os
-os.environ["JAX_PLATFORMS"] = "gpu"
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # Reduce memory preallocation
-
+# JAX is initialized via common.jax_init module (imported lazily when needed)
 import numpy as np
 import rclpy
 from rclpy.clock import Clock, ClockType
@@ -222,8 +218,6 @@ class FLBackend(Node):
         self.declare_parameter("enable_imu_fusion", True)
         self.declare_parameter("imu_gyro_noise_density", constants.IMU_GYRO_NOISE_DENSITY_DEFAULT)
         self.declare_parameter("imu_accel_noise_density", constants.IMU_ACCEL_NOISE_DENSITY_DEFAULT)
-        self.declare_parameter("imu_gyro_random_walk", constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
-        self.declare_parameter("imu_accel_random_walk", constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
         self.declare_parameter("imu_bias_adapt_forgetting", 0.995)
         self.declare_parameter("gravity", list(constants.GRAVITY_DEFAULT))
 
@@ -235,8 +229,6 @@ class FLBackend(Node):
         enable_imu_param = self.get_parameter("enable_imu_fusion")
         gyro_noise_param = self.get_parameter("imu_gyro_noise_density")
         accel_noise_param = self.get_parameter("imu_accel_noise_density")
-        gyro_walk_param = self.get_parameter("imu_gyro_random_walk")
-        accel_walk_param = self.get_parameter("imu_accel_random_walk")
         bias_forgetting_param = self.get_parameter("imu_bias_adapt_forgetting")
 
         self.enable_imu_fusion = bool(enable_imu_param.value if enable_imu_param.value is not None else True)
@@ -246,12 +238,6 @@ class FLBackend(Node):
         self.imu_accel_noise_density = float(
             accel_noise_param.value if accel_noise_param.value is not None else constants.IMU_ACCEL_NOISE_DENSITY_DEFAULT
         )
-        self.imu_gyro_random_walk = float(
-            gyro_walk_param.value if gyro_walk_param.value is not None else constants.IMU_GYRO_RANDOM_WALK_DEFAULT
-        )
-        self.imu_accel_random_walk = float(
-            accel_walk_param.value if accel_walk_param.value is not None else constants.IMU_ACCEL_RANDOM_WALK_DEFAULT
-        )
         self.imu_bias_adapt_forgetting = float(
             bias_forgetting_param.value if bias_forgetting_param.value is not None else 0.995
         )
@@ -259,11 +245,17 @@ class FLBackend(Node):
         self.gravity = np.array(gravity_param, dtype=float)
 
         self.imu_adaptive_noise = None
+        # Fixed prior for bias innovation covariance (adaptive model learns online).
+        # This is intentionally NOT exposed as an IMU "random-walk" parameter.
+        self._imu_bias_innov_gyro_cov_prior = np.eye(3, dtype=float) * (
+            float(constants.IMU_GYRO_BIAS_INNOV_STD_PRIOR) ** 2
+        )
+        self._imu_bias_innov_accel_cov_prior = np.eye(3, dtype=float) * (
+            float(constants.IMU_ACCEL_BIAS_INNOV_STD_PRIOR) ** 2
+        )
         if self.enable_imu_fusion:
-            gyro_cov = np.eye(3, dtype=float) * (self.imu_gyro_random_walk ** 2)
-            accel_cov = np.eye(3, dtype=float) * (self.imu_accel_random_walk ** 2)
-            gyro_prior = WishartPrior.from_mean_covariance(gyro_cov)
-            accel_prior = WishartPrior.from_mean_covariance(accel_cov)
+            gyro_prior = WishartPrior.from_mean_covariance(self._imu_bias_innov_gyro_cov_prior)
+            accel_prior = WishartPrior.from_mean_covariance(self._imu_bias_innov_accel_cov_prior)
             self.imu_adaptive_noise = AdaptiveIMUNoiseModel(
                 accel_bias_prior=accel_prior,
                 gyro_bias_prior=gyro_prior,
@@ -972,7 +964,7 @@ class FLBackend(Node):
         - Hellinger-tilted likelihood for robustness
         - Dirichlet routing with Frobenius retention
         """
-        import jax.numpy as jnp
+        from fl_slam_poc.common.jax_init import jnp
         from fl_slam_poc.backend.imu_jax_kernel import imu_batched_projection_kernel
         from fl_slam_poc.backend.dirichlet_routing import DirichletRoutingModule
         
@@ -1244,8 +1236,8 @@ class FLBackend(Node):
 
         if noise_params is None:
             noise_params = {
-                "gyro_bias_cov": np.eye(3) * (self.imu_gyro_random_walk**2),
-                "accel_bias_cov": np.eye(3) * (self.imu_accel_random_walk**2),
+                "gyro_bias_cov": self._imu_bias_innov_gyro_cov_prior,
+                "accel_bias_cov": self._imu_bias_innov_accel_cov_prior,
             }
 
         Q_bias = np.zeros((6, 6), dtype=np.float64)
@@ -1264,7 +1256,7 @@ class FLBackend(Node):
         # =====================================================================
         routing_diag = self._imu_routing_module.get_update_diagnostics()
         max_resp = float(np.max(routing_weights)) if routing_weights.size > 0 else 0.0
-        bias_update_source = "measurement" if np.linalg.norm(bias_innovation) > 1e-12 else "random_walk_only"
+        bias_update_source = "measurement" if np.linalg.norm(bias_innovation) > 1e-12 else "prior_only"
         
         if self.imu_factor_count <= 5:
             v_new = mu_new[6:9]
@@ -1487,7 +1479,7 @@ class FLBackend(Node):
         the first IMU message arrives.
         """
         try:
-            import jax
+            from fl_slam_poc.common.jax_init import jax
             devices = jax.devices()
             has_gpu = any(d.platform == "gpu" for d in devices)
             
@@ -1520,7 +1512,7 @@ class FLBackend(Node):
     def _warmup_imu_kernel(self):
         """Warm up JAX IMU kernel compilation to avoid first-call latency."""
         try:
-            import jax.numpy as jnp
+            from fl_slam_poc.common.jax_init import jnp
             from fl_slam_poc.backend.imu_jax_kernel import imu_batched_projection_kernel
 
             # Minimal dummy data for warmup

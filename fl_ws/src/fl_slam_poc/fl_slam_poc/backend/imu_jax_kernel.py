@@ -15,32 +15,15 @@ Key implementation notes:
 Reference: Forster et al. (2017), Hellinger hierarchical construction
 """
 
-import jax
-import jax.numpy as jnp
+# Import JAX from common initialization module (ensures single initialization)
+from fl_slam_poc.common.jax_init import jax, jnp
 from jax import lax
 from jax.scipy.linalg import cholesky, solve_triangular
 from typing import Tuple
 
-# Configure JAX for GPU and enable x64 precision
-# Must be set before any JAX operations
-import os
-
-# Force GPU-only execution
-os.environ["JAX_PLATFORMS"] = "gpu"
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-
-# Enable x64 for numerical stability (required for precision)
-jax.config.update("jax_enable_x64", True)
-
-# Hard require GPU; raise if unavailable
-# Check platform (not device_kind) since device_kind is vendor-specific string
-if not any(d.platform == "gpu" for d in jax.devices()):
-    available_devices = [f"{d.platform}:{d.device_kind}" for d in jax.devices()]
-    raise RuntimeError(
-        f"JAX GPU backend is required but not available.\n"
-        f"Available JAX devices: {available_devices}\n"
-        f"To fix: Ensure CUDA is installed and JAX can detect GPU devices."
-    )
+# NOTE: JAX is already initialized and configured (GPU + x64) by common.jax_init.
+# GPU availability check is deferred to backend_node._check_gpu_availability()
+# to avoid checking at module import time.
 
 from fl_slam_poc.backend.lie_jax import so3_exp, so3_log, se3_plus, se3_minus
 

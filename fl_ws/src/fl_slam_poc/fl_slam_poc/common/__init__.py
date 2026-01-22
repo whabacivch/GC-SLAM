@@ -15,12 +15,15 @@ from typing import Any
 __all__ = [
     "OpReport",
     "constants",
+    "jax_init",
 ]
 
 _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "OpReport": ("fl_slam_poc.common.op_report", "OpReport"),
     # Expose these as submodules, but do not eagerly import them at package import time.
     "constants": ("fl_slam_poc.common.constants", None),
+    # JAX initialization module (imported eagerly to ensure JAX is initialized once)
+    "jax_init": ("fl_slam_poc.common.jax_init", None),
 }
 
 
