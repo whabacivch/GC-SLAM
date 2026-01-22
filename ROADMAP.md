@@ -2,8 +2,30 @@
 
 This roadmap is organized around the current **M3DGR rosbag MVP** pipeline and a clean separation between:
 - **MVP operational code**: required to run `tools/run_and_evaluate.sh`
-- **Near-term priorities**: IMU integration + 15D state extension
+- **Near-term priorities**: Wheel odom separation, dense RGB-D in 3D mode, evaluation hardening
 - **Future/experimental code**: kept for later work, but not required for the MVP
+
+---
+
+## ✅ Completed Milestones
+
+### IMU Integration & 15D State Extension (2026-01-21)
+- **Contract B IMU Fusion**: Frontend publishes raw IMU segments (`/sim/imu_segment`), backend re-integrates with sigma-point propagation and bias coupling
+- **15D State Extension**: Backend maintains 15DOF state (pose + velocity + biases) per anchor module
+- **Two-State Schur Marginalization**: Joint e-projection followed by exact Schur marginalization
+- **Hellinger-Dirichlet Fusion**: Batched moment matching with Hellinger-tilted likelihood and Dirichlet-categorical routing
+- **Files**: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/imu_jax_kernel.py`, `dirichlet_routing.py`, `lie_jax.py`, `gaussian_info.py`
+- **Message**: `IMUSegment.msg` (replaces deprecated `IMUFactor.msg`)
+
+### Package Structure Flattening (2026-01-22)
+- Flattened package structure: `common/`, `frontend/`, `backend/` at top level
+- Moved utility nodes into `frontend/`
+- Updated all imports and entry points
+
+### Existing Adaptive Components
+- **Adaptive Process Noise** (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/process_noise.py`): Inverse-Wishart model for online process noise estimation
+- **Adaptive Parameters** (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/adaptive.py`): Bayesian online parameter estimation with Normal priors
+- **Reference**: See `docs/Self-Adaptive Systems Guide.md` for full self-adaptive system specifications
 
 ---
 
@@ -38,29 +60,37 @@ These are **observed facts from the bag** and should be treated as the default c
 **Nodes in the MVP pipeline**
 - Frontend: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
 - Backend: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
-- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/image_decompress.py`
-- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/livox_converter.py`
-- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/tb3_odom_bridge.py` (generic abs→delta odom bridge; legacy name)
+- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/image_decompress.py` (moved from `utility_nodes/` during flattening)
+- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/livox_converter.py` (moved from `utility_nodes/` during flattening)
+- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/tb3_odom_bridge.py` (moved from `utility_nodes/` during flattening; generic abs→delta odom bridge, legacy name)
 
 **Evaluation**
 - `tools/align_ground_truth.py`
 - `tools/evaluate_slam.py`
 
-**Current State (6DOF per module)**
+**Current State (15DOF per module)**
 ```python
-mu = [x, y, z, rx, ry, rz]  # SE(3) in rotation vector form
-cov = 6×6 matrix  # se(3) tangent space covariance
+mu = [x, y, z, rx, ry, rz, vx, vy, vz, bg_x, bg_y, bg_z, ba_x, ba_y, ba_z]  # 15D: pose + velocity + biases
+cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 ```
+
+**Note**: State was extended from 6DOF to 15DOF as part of IMU integration (completed 2026-01-21). See Completed Milestones above.
 
 ---
 
 ## 2) Near-Term Priority: IMU Integration & 15D State Extension
 
+### Status: ✅ COMPLETED (2026-01-21)
+
+**Implementation**: Contract B IMU fusion architecture with raw IMU segments, sigma-point propagation, and two-state Schur marginalization. See Completed Milestones section above for details.
+
 ### Overview
 
-Prioritize IMU integration to fix rotation accuracy, extend backend state from 6DOF SE(3) to 15DOF (pose + velocity + biases), and harden multi-sensor fusion. Visual features remain histogram-based for now (deferred). All changes preserve the Frobenius-Legendre design invariants.
+IMU integration has been completed to fix rotation accuracy, extend backend state from 6DOF SE(3) to 15DOF (pose + velocity + biases), and harden multi-sensor fusion. The implementation uses **Contract B architecture**: frontend publishes raw IMU segments (`IMUSegment.msg`), backend re-integrates with sigma-point propagation and bias coupling, then performs joint e-projection followed by exact Schur marginalization.
 
 **Expected improvement:** Rotation RPE should improve ~30-50% with IMU vs. without (wheel odom + LiDAR only).
+
+**Self-Adaptive Systems Integration**: See Section 2.7 below for adaptive IMU noise model integration (future enhancement).
 
 ---
 
@@ -93,105 +123,78 @@ Everything that produces interval factors (wheel odom, IMU) should be scheduled 
 
 **Invariants preserved:** Pure I/O layer, no math/inference in `SensorIO`; buffering only, no gating.
 
-#### 1.2 IMU Preintegration Operator
+#### 1.2 IMU Preintegration Operator ✅ COMPLETED
 
 **Files:**
-- New: `fl_ws/src/fl_slam_poc/fl_slam_poc/operators/imu_preintegration.py`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/imu_preintegration.py` (moved from `operators/` during flattening)
 
-**Implementation:**
-- Create `IMUPreintegrator` class that integrates IMU measurements between keyframes
-- Output: `(delta_R, delta_v, delta_p, Sigma_preint, bias_ref)`
-- Use Forster et al. (2017) / GTSAM-style preintegration equations
-- Emit `OpReport` with:
-  - `approximation_triggers: {"Linearization"}` (bias is assumed constant during interval)
-  - `frobenius_applied: True` (apply required Frobenius correction; for Gaussian-family factors this may be an identity correction but must remain auditable)
-  - `family_in: "IMU"`, `family_out: "Gaussian"`, `closed_form: True`
+**Implementation Status:**
+- ✅ `IMUPreintegrator` class exists for preintegration utilities
+- ✅ Used in Contract B architecture: raw IMU segments published, backend re-integrates in-kernel
+- ✅ Reference: Forster et al., "On-Manifold Preintegration for Real-Time Visual-Inertial Odometry" (TRO 2017)
 
-**Reference:** Forster et al., "On-Manifold Preintegration for Real-Time Visual-Inertial Odometry" (TRO 2017)
+**Note**: Contract B architecture uses raw IMU segments rather than preintegrated factors. Preintegration utilities remain available for reference/utilities.
 
-#### 1.3 IMU Factor Message
+#### 1.3 IMU Segment Message ✅ COMPLETED
 
 **Files:**
-- New: `fl_ws/src/fl_slam_poc/msg/IMUFactor.msg`
-- Update: `fl_ws/src/fl_slam_poc/CMakeLists.txt` (add to `rosidl_generate_interfaces`)
+- ✅ `fl_ws/src/fl_slam_poc/msg/IMUSegment.msg` (replaces deprecated `IMUFactor.msg`)
+- ✅ `fl_ws/src/fl_slam_poc/CMakeLists.txt` (already includes `IMUSegment.msg`)
 
-**Message definition:**
-```
-std_msgs/Header header
-uint64 keyframe_i      # reference keyframe ID
-uint64 keyframe_j      # target keyframe ID
-float64 dt             # integration interval (seconds)
+**Message**: `IMUSegment.msg` contains raw IMU measurements between keyframes with explicit units/frames/timebase semantics. Backend re-integrates these segments with sigma-point propagation.
 
-# Preintegrated increments (body frame)
-float64[3] delta_p     # position increment
-float64[3] delta_v     # velocity increment
-float64[3] delta_rotvec # rotation increment (axis-angle)
-
-# Bias reference used during preintegration
-float64[3] bias_gyro
-float64[3] bias_accel
-
-# Covariance (9×9 flattened row-major: [p, v, R])
-float64[81] cov_preint
-```
-
-#### 1.4 Frontend IMU Factor Publishing
+#### 1.4 Frontend IMU Segment Publishing ✅ COMPLETED
 
 **Files:** `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
 
-**Changes:**
-- Add `IMUPreintegrator` instance (initialized with noise parameters from ROS params)
-- Declare parameters: `imu_topic`, `imu_gyro_noise_density`, `imu_accel_noise_density`, `imu_gyro_random_walk`, `imu_accel_random_walk`, `enable_imu` (default `True`)
-- Add publisher: `/sim/imu_factor` (topic configurable)
-- On each **keyframe interval** `(i → j)`, call `preintegrator.integrate(start_stamp, end_stamp, imu_measurements)` and publish `IMUFactor` message
-
-**Important:** anchor birth remains a separate event; it can be associated to the nearest keyframe but must not define factor timing.
+**Status:**
+- ✅ Publishes `/sim/imu_segment` raw IMU slices at keyframe creation
+- ✅ Parameters: `imu_topic`, `imu_gyro_noise_density`, `imu_accel_noise_density`, `imu_gyro_random_walk`, `imu_accel_random_walk`, `enable_imu`
+- ✅ Keyframe-based timing (anchor birth remains separate event)
 
 ---
 
-### Phase 2: Backend 15D State Extension
+### Phase 2: Backend 15D State Extension ✅ COMPLETED
 
-#### 2.1 State Representation Update
+#### 2.1 State Representation Update ✅ COMPLETED
 
 **Files:** `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
 
-**New state (15DOF):**
+**State (15DOF):**
 ```python
 mu = [x, y, z, rx, ry, rz, vx, vy, vz, bg_x, bg_y, bg_z, ba_x, ba_y, ba_z]
 cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 ```
 
-**Changes to `SparseAnchorModule`:**
-- Extend `mu` from 6D to 15D (initialize velocity=0, biases=0 for existing anchors)
-- Extend `cov` from 6×6 to 15×15 (diagonal extension: add high-variance priors for v, b_g, b_a)
-- Update `make_evidence(mu, cov)` calls to handle 15D information form (L: 15×15, h: 15D)
+**Status:**
+- ✅ `SparseAnchorModule` extended to 15D (velocity=0, biases=0 initialization)
+- ✅ `cov` extended to 15×15 with high-variance priors for v, b_g, b_a
+- ✅ `make_evidence(mu, cov)` handles 15D information form (L: 15×15, h: 15D)
 
 **Compatibility:**
-- Odometry factors remain 6DOF (update first 6 rows/cols of 15×15 L/h)
-- Loop factors remain 6DOF (update first 6 rows/cols of 15×15 L/h)
-- IMU factors are 9DOF (δp, δv, δR) and update rows/cols [0:9]
-- Biases [9:15] are updated only by IMU factors and random walk process noise
+- ✅ Odometry factors remain 6DOF (update first 6 rows/cols of 15×15 L/h)
+- ✅ Loop factors remain 6DOF (update first 6 rows/cols of 15×15 L/h)
+- ✅ IMU segments integrated in-kernel with sigma-point propagation (Contract B)
+- ✅ Biases [9:15] updated by IMU integration and random walk process noise
 
-#### 2.2 IMU Factor Fusion in Backend
+#### 2.2 IMU Segment Fusion in Backend ✅ COMPLETED
 
 **Files:** `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
 
-**Changes:**
-- Add subscription: `/sim/imu_factor` → `on_imu_factor(msg: IMUFactor)`
-- Implement two-pose factor fusion:
-  - Look up anchor modules `i` and `j` by `keyframe_i`, `keyframe_j`
-  - Construct information matrix `L_imu` (9×9) and information vector `h_imu`
-  - Use two-pose factor semantics: augment state to [pose_i, pose_j] (30D), fuse, marginalize out anchor `i`
-- Emit `OpReport`: `approximation_triggers: {"Linearization"}`, `frobenius_applied: True`
+**Status:**
+- ✅ Subscription: `/sim/imu_segment` → `on_imu_segment(msg: IMUSegment)`
+- ✅ Contract B architecture: raw IMU segments re-integrated with sigma-point propagation
+- ✅ Two-state factor update: joint e-projection on [pose_i, pose_j] (30D) followed by exact Schur marginalization
+- ✅ Emits `OpReport` with Contract B diagnostics: `approximation_triggers: {"Linearization"}`, `frobenius_applied: True`
 
-#### 2.3 Information-Form Gaussian Fusion (15D)
+#### 2.3 Information-Form Gaussian Fusion (15D) ✅ COMPLETED
 
-**Files:** `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/fusion/gaussian_info.py`
+**Files:** `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/gaussian_info.py` (flattened from `backend/fusion/gaussian_info.py`)
 
-**Changes:**
-- Verify `make_evidence`, `fuse_info`, `mean_cov` work correctly for 15D inputs
-- Add utility function: `make_evidence_block(mu, cov, indices)` to construct partial information forms
-- Document state ordering convention: `[p(3), θ(3), v(3), b_g(3), b_a(3)]`
+**Status:**
+- ✅ `make_evidence`, `fuse_info`, `mean_cov` work correctly for 15D inputs
+- ✅ `embed_info_form` utility for dimension embedding (6D → 15D)
+- ✅ State ordering convention documented: `[p(3), θ(3), v(3), b_g(3), b_a(3)]`
 
 ---
 
@@ -212,6 +215,8 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 **Rationale:** Wheel odom measures what it measures (XY + yaw), not a full 6DOF pose. Allows IMU to dominate roll/pitch estimation.
 
+**Self-Adaptive Systems Integration**: See `docs/Self-Adaptive Systems Guide.md` Section 2 (Adaptive Sensor Weighting via Fisher Information) for future enhancement: sensor weights should adapt based on Fisher information and reliability scores, replacing fixed covariance with online-estimated Wishart priors.
+
 #### 3.2 Factor Scheduling & Keyframe Policy
 
 **Files:**
@@ -225,7 +230,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
   - Log each keyframe decision: `"Keyframe {id} created at t={t:.3f}s (policy: {reason})"`
 - **Factor streams (explicit):**
   - Odometry factors: published between consecutive keyframes (6DOF delta)
-  - IMU factors: published between consecutive keyframes (9DOF preintegrated)
+  - IMU segments: published between consecutive keyframes (raw IMU measurements, Contract B architecture)
   - Loop factors: published when loop detected (6DOF relative pose)
   - RGB-D factors (optional): published when RGB-D pair available (3DOF position)
 - **Backend factor ingestion logging:**
@@ -255,7 +260,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 #### 5.1 Provenance & Contribution Summary
 
 **Files:**
-- New: `fl_ws/src/fl_slam_poc/fl_slam_poc/utils/provenance.py`
+- New: `fl_ws/src/fl_slam_poc/fl_slam_poc/common/provenance.py` (or `backend/provenance.py` if backend-specific)
 - Update: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`, `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
 
 **Implementation:**
@@ -327,15 +332,16 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 ### Milestones & Ordering
 
-**Milestone 1: IMU Sensor + Preintegration (Phase 1)**
-- Implement IMU I/O, preintegration operator, message definition, frontend publishing
-- **Validation:** Run M3DGR with `enable_imu:=true`, verify `/sim/imu_factor` messages published
-- **Logs:** Check OpReport shows `Linearization` trigger + Frobenius correction
+**Milestone 1: IMU Sensor + Preintegration (Phase 1) ✅ COMPLETED**
+- ✅ IMU I/O, message definition (`IMUSegment.msg`), frontend publishing
+- ✅ Contract B architecture: raw IMU segments published to `/sim/imu_segment`
+- ✅ **Validation:** M3DGR runs with `enable_imu:=true`, `/sim/imu_segment` messages published
+- ✅ **Logs:** OpReport shows `Linearization` trigger + Frobenius correction
 
-**Milestone 2: 15D State + Backend Fusion (Phase 2)**
-- Extend state representation, implement IMU factor fusion in backend
-- **Validation:** Run M3DGR, verify backend ingests IMU factors without errors
-- **Logs:** Check backend status shows `n_imu_factors > 0`
+**Milestone 2: 15D State + Backend Fusion (Phase 2) ✅ COMPLETED**
+- ✅ State representation extended to 15D, Contract B IMU fusion implemented
+- ✅ **Validation:** M3DGR runs, backend ingests IMU segments without errors
+- ✅ **Logs:** Backend status shows IMU segments processed, Contract B diagnostics present
 
 **Milestone 3: Wheel Odom Separation (Phase 3.1)**
 - Update wheel odom to be a partial factor (strong XY/yaw, weak z/roll/pitch)
@@ -365,6 +371,26 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 - **No ground-truth ingestion:** Backend never subscribes to GT topics (verified in tests)
 - **OpReport taxonomy:** Every new operator emits OpReport with required fields
 
+#### 2.7 Adaptive IMU Noise Model (Future Enhancement)
+
+**Reference**: `docs/Self-Adaptive Systems Guide.md` Section 1 (Adaptive Noise Covariance via Wishart Conjugate Updates)
+
+**Future Work:**
+- Integrate `AdaptiveIMUNoiseModel` from Self-Adaptive Systems Guide
+- Replace fixed IMU noise parameters with online Wishart conjugate updates
+- Track accelerometer/gyroscope noise and bias random walk separately
+- Use adaptive forgetting factor inferred from changepoint/hazard model
+- Emit diagnostics: noise covariance traces, anomaly detection
+
+**Files (to be created):**
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/adaptive_noise.py` (Wishart prior implementation)
+- Integration with `imu_jax_kernel.py` for adaptive noise in sigma-point propagation
+
+**Design Invariants:**
+- No hard gates: noise adaptation via continuous Wishart updates, not threshold-based rejection
+- Startup is not a mode: behavior emerges from prior effective sample size, not time-based branching
+- Constants surfaced as priors: initial confidence (ESS), forgetting factor (hazard rate Beta hyperparameters)
+
 ---
 
 ## 3) Medium-Term: Alternative Datasets & Algorithm Fixes
@@ -375,8 +401,8 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 **Primary files:**
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/transforms/se3.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/tb3_odom_bridge.py`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/se3.py` (flattened from `common/transforms/se3.py`)
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/tb3_odom_bridge.py` (moved from `utility_nodes/` during flattening)
 
 **Checklist:**
 - Verify pose composition conventions and frame semantics (odom/base).
@@ -388,8 +414,8 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 **Symptom:** Remaining non-monotonic gaps / duplicates impacting association and evaluation.
 
 **Primary files:**
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/processing/sensor_io.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/parameters/timestamp.py`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensor_io.py` (flattened from `frontend/processing/sensor_io.py`)
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/timestamp.py` (flattened from `backend/parameters/timestamp.py`)
 - `tools/align_ground_truth.py`
 
 ### C) TurtleBot3 (2D) validation
@@ -403,7 +429,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 **Files:**
 - `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
 - `tools/download_r2b_dataset.sh`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/loops/pointcloud_gpu.py`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/pointcloud_gpu.py` (flattened from `frontend/loops/pointcloud_gpu.py`)
 
 ---
 
@@ -763,7 +789,7 @@ When enabling world/base map in future:
 **Integration points:**
 
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py` - Add splat map instance, update loop
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/processing/sensor_io.py` - Add Lab color conversion utilities
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensor_io.py` - Add Lab color conversion utilities
 
 **Message definitions:**
 
@@ -862,9 +888,15 @@ pi_outlier = 0.1       # outlier mixture weight
 
 **Integration:**
 
-- Keypoints detected in `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/loops/keypoint_detector.py`
+- Keypoints detected in `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/loop_processor.py` (or new `keypoint_detector.py`)
 - Bearing factors published to `/sim/bearing_factor` (new message type)
 - Backend fuses bearing factors as vMF evidence on anchor directions
+
+**Self-Adaptive Systems Integration**: See `docs/Self-Adaptive Systems Guide.md` Section 4 (Adaptive Loop Closure Confidence) for adaptive loop gating:
+- Hellinger-based soft gating (no hard χ² thresholds)
+- Adaptive λ threshold based on false positive rate tracking
+- Trajectory consistency checking
+- Certificate-based quality metrics for downstream scaling (no accept/reject branching)
 
 ---
 
@@ -903,6 +935,11 @@ pi_outlier = 0.1       # outlier mixture weight
   - `frobenius_applied: True` (third-order correction to transport error)
   - Log: loop factor id, selected scope, objective value, diagnostics (predicted vs realized posterior change)
 
+**Self-Adaptive Systems Integration**: See `docs/Self-Adaptive Systems Guide.md` Section 5 (Adaptive Frobenius Correction Strength):
+- Adaptive β correction strength based on observed linearization error
+- Certificate-based quality metrics (correction magnitude, expected error reduction)
+- No hard gates: continuous scaling based on certificate quality
+
 ---
 
 ### D) Dirichlet Semantic SLAM Integration
@@ -910,7 +947,13 @@ pi_outlier = 0.1       # outlier mixture weight
 **Files:**
 - `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/dirichlet_backend_node.py`
 - `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/sim_semantics_node.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/operators/dirichlet_geom.py`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/dirichlet_geom.py` (moved from `operators/` during flattening)
+
+**Self-Adaptive Systems Integration**: See `docs/Self-Adaptive Systems Guide.md` Section 3 (Adaptive Association via Dirichlet Concentration Tracking):
+- Adaptive concentration regulation based on system-wide entropy
+- Entropy-based confidence tracking (no hard gating)
+- Hellinger-based entity similarity for robust association
+- Temporal decay for dynamic scenes
 
 ---
 
@@ -927,15 +970,43 @@ pi_outlier = 0.1       # outlier mixture weight
 **RViz:** `config/fl_slam_rviz.rviz` (local/optional)
 **Rerun bridge:** removed from MVP; revisit later if needed
 
+### G) Self-Adaptive System Integration
+
+**Reference**: `docs/Self-Adaptive Systems Guide.md`
+
+**System-Wide Adaptive Coordinator** (Section 6):
+- Health monitoring across all subsystems (IMU, odom, loops, association)
+- Cross-system adaptation via expected-utility maximization (myopic, single-step)
+- Adaptation budget: maximize benefit (divergence reduction) subject to frame budget
+- Graceful degradation: when one subsystem degrades, others compensate via continuous scaling
+
+**Monge-Ampère Transport for Dynamic Maps** (Section 7):
+- Optimal transport for dynamic scene handling (moving objects, scene changes)
+- Hellinger trigger for transport initiation
+- Scene flow adapter for filtering dynamic points in SLAM
+- Equivariant Wishart transport for covariance adaptation
+
+**Integration Points:**
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/adaptive_coordinator.py` (to be created)
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/adaptive_transport.py` (to be created)
+- Diagnostics publisher: `/cdwm/adaptive_diagnostics` topic
+
+**Design Invariants Compliance:**
+- No hard gates: all adaptations via continuous scaling, not accept/reject branching
+- Startup is not a mode: behavior emerges from priors, not time-based logic
+- Expected vs realized benefit: internal objectives only (divergence reduction, ELBO increase), not external metrics (ATE/RPE)
+- Constants surfaced as priors: effective sample size, hazard rates, certificate risk levels, frame budgets
+
 ---
 
 ## Roadmap Summary
 
 ### Immediate Work (Priority 1)
-1. IMU integration + 15D state (Phases 1-2)
+1. ✅ IMU integration + 15D state (Phases 1-2) - **COMPLETED**
 2. Wheel odom separation + factor scheduling (Phase 3)
 3. Dense RGB-D in 3D mode (Phase 4)
 4. Provenance + evaluation hardening (Phases 5-6)
+5. Self-adaptive systems integration (see Section 5.G)
 
 ### Near-Term Future Work (Priority 2)
 - Camera-frame Gaussian splat map with vMF shading (K=512, J=2)
@@ -948,11 +1019,13 @@ pi_outlier = 0.1       # outlier mixture weight
 - Gazebo live testing
 
 ### Long-Term (Priority 4)
-- Visual loop factors (bearing-based)
-- GNSS integration (if dataset available)
-- Semantic observations (Dirichlet factors)
-- Backend optimizations (hierarchical/budgeted recomposition)
-- Dirichlet semantic SLAM integration
+- Visual loop factors (bearing-based) with adaptive gating
+- GNSS integration (if dataset available) with adaptive sensor weighting
+- Semantic observations (Dirichlet factors) with adaptive concentration
+- Backend optimizations (hierarchical/budgeted recomposition) with adaptive Frobenius correction
+- Dirichlet semantic SLAM integration with adaptive association
+- Monge-Ampère transport for dynamic maps
+- System-wide adaptive coordinator
 - Visualization enhancements
 
 ---

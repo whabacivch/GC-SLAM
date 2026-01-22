@@ -10,7 +10,7 @@ These rules apply only to this project. Other projects have their own rules.
 - Design invariants and formal notation: `docs/Project_Implimentation_Guide.sty`
 - Mathematical reference compendium: `docs/Comprehensive Information Geometry.md`
 - System architecture diagram: `.codeviz/Impact Project 1/Impact-Project-1.md`
-- Gazebo integration guide: `legacy_docs/GAZEBO_INTEGRATION.md`
+- Gazebo integration guide (experimental/future): `archive/legacy_docs/GAZEBO_INTEGRATION.md` (see ROADMAP.md - Priority 3/4)
 - Development log (required updates): `CHANGELOG.md`
 - POC testing status and notes: `docs/POC_Testing_Status.md`
 - ROS 2 workspace (code + packages): `fl_ws/`
@@ -23,28 +23,34 @@ These rules apply only to this project. Other projects have their own rules.
 - MVP run + evaluation (M3DGR): `bash tools/run_and_evaluate.sh` (produces metrics/plots under `results/`).
 - Key nodes (launched by `poc_m3dgr_rosbag.launch.py`): `frontend_node`, `backend_node`, plus utility nodes for decompression/conversion/odom bridging.
 - Run integration test (alternative datasets): `tools/test-integration.sh`. See `docs/TESTING.md` for complete documentation.
-- Operator/model change map: operators in `fl_ws/src/fl_slam_poc/fl_slam_poc/operators/`, models in `fl_ws/src/fl_slam_poc/fl_slam_poc/models/`.
+- Package structure: `fl_slam_poc/common/` (pure Python utilities), `fl_slam_poc/frontend/` (sensor processing + utility nodes), `fl_slam_poc/backend/` (state estimation + fusion).
 - Logs/artifacts (ignore in reviews): `fl_ws/log/`, `fl_ws/build*/`, `fl_ws/install*/`.
 
-## Gazebo Workflow (Recommended)
-- Principle: Gazebo is a sensor/world *source* only; do not move estimation invariants into the simulator layer.
-- Prereqs: ROS 2 Jazzy + Gazebo + `turtlebot3_gazebo`; if using camera/depth with `cv_bridge`, prefer `numpy<2.0`.
-- Phase 2 note: Gazebo launch files are stored under `phase2/` and are not installed by the MVP package by default.
-- Launch (TB3 world + SLAM stack): see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
-- Launch (external Gazebo already running): see `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
-- Validate wiring: watch `/cdwm/frontend_status` and `/cdwm/backend_status`; verify `/sim/odom`, `/sim/loop_factor`, `/cdwm/state` are active.
-- Topics are configurable in the launch file; detailed crosswalk + debug checklist lives in `legacy_docs/GAZEBO_INTEGRATION.md`.
+## Current Priorities (See ROADMAP.md)
+- **Priority 1 (Immediate):** IMU integration + 15D state extension, wheel odom separation, dense RGB-D in 3D mode, evaluation hardening.
+- **Priority 2 (Near-term):** Camera-frame Gaussian splat map with vMF shading.
+- **Priority 3 (Medium-term):** Alternative datasets (TurtleBot3, NVIDIA r2b), GPU acceleration, Gazebo live testing.
+- **Priority 4 (Long-term):** Visual loop factors, GNSS integration, semantic observations, backend optimizations.
 
-## System Snapshot (Operational)
+## Experimental/Future Workflows
+
+### Gazebo Simulation (Not Part of MVP - Priority 3/4)
+- **Status:** Experimental/future work. See `ROADMAP.md` - Gazebo is listed under "Medium-Term (Priority 3)" and "Long-Term (Priority 4)".
+- **Current MVP:** Focus is on M3DGR rosbag evaluation pipeline. Gazebo integration is deferred.
+- **If re-enabled:** Principle: Gazebo is a sensor/world *source* only; do not move estimation invariants into the simulator layer.
+- **Files:** Gazebo launch files and nodes are stored under `phase2/` and are not installed by the MVP package by default.
+- **Reference:** See `archive/legacy_docs/GAZEBO_INTEGRATION.md` for historical documentation (may be outdated).
+
+## System Snapshot (MVP - M3DGR Rosbag Pipeline)
 **Component Summary**
-- `sim_world_node`: ground truth + noisy odom (`/sim/ground_truth`, `/odom`).
-- `tb3_odom_bridge_node`: absolute → delta odom (`/odom` → `/sim/odom`).
-- `frontend_node`: association + ICP + anchor/loop creation (`/scan`, `/camera/*`, `/odom` → `/sim/*`).
-- `fl_backend_node`: inference + loop fusion (`/sim/odom`, `/sim/loop_factor`, `/sim/anchor_create` → `/cdwm/*`).
+- `tb3_odom_bridge`: absolute → delta odom conversion (`/odom` → `/sim/odom`). Generic odom bridge (legacy name, not TB3-specific).
+- `image_decompress`: rosbag image decompression for RGB-D processing (optional, when `enable_decompress:=true`).
+- `livox_converter`: Livox LiDAR message conversion (`/livox/mid360/lidar` → `/lidar/points`).
+- `frontend_node`: sensor association, ICP loop detection, anchor management (`/scan`, `/lidar/points`, `/camera/*`, `/odom` → `/sim/loop_factor`, `/sim/anchor_create`, `/sim/imu_segment`).
+- `backend_node`: information-geometric fusion, trajectory estimation (`/sim/odom`, `/sim/loop_factor`, `/sim/anchor_create`, `/sim/imu_segment` → `/cdwm/state`, `/cdwm/trajectory`, `/cdwm/map`).
 
-**Key Data Flow**
-Sensors → Frontend (association + ICP) → LoopFactor → Backend (fusion) → State/Trajectory  
-Ground Truth Odom → Odom Bridge (abs→delta) ───────────────────────────────┘
+**Key Data Flow (MVP)**
+Rosbag Topics → Utility Nodes (decompress/convert/bridge) → Frontend (association + ICP) → LoopFactor/AnchorCreate → Backend (fusion) → State/Trajectory/Map
 
 ## Non-Negotiable Design Invariants
 - Closed-form-first: prefer analytic operators; only use solvers when no closed-form exists.
@@ -95,8 +101,13 @@ Ground Truth Odom → Odom Bridge (abs→delta) ──────────�
 ## Implementation Conventions (Project-Specific)
 - ROS 2 workspace lives in `Impact Project_v1/fl_ws`.
 - Primary package: `Impact Project_v1/fl_ws/src/fl_slam_poc`.
-- Add new operators under `fl_slam_poc/operators/`.
-- Add new nodes under `fl_slam_poc/nodes/`.
+- Package structure (flattened):
+  - `fl_slam_poc/common/` - Pure Python utilities (no ROS imports): SE(3) operations, Dirichlet geometry, IMU preintegration, constants, op reports.
+  - `fl_slam_poc/frontend/` - Sensor processing + utility nodes: frontend orchestration, sensor I/O, anchor management, loop processing, ICP, point cloud GPU, utility nodes (image_decompress, livox_converter, tb3_odom_bridge).
+  - `fl_slam_poc/backend/` - State estimation + fusion: backend orchestration, Gaussian fusion, IMU kernels, information distances, parameter models (NIG, birth, adaptive), routing.
+- Add new operators/utilities to `fl_slam_poc/common/`.
+- Add new sensor processing or utility nodes to `fl_slam_poc/frontend/`.
+- Add new fusion/estimation code to `fl_slam_poc/backend/`.
 - Add launch files under `fl_slam_poc/launch/`.
 
 ## Operator Taxonomy (Required Reporting)
