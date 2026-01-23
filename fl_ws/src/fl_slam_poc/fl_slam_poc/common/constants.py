@@ -339,11 +339,10 @@ PROCESS_NOISE_VELOCITY_STD = 0.1       # m/s per sqrt(s)
 PROCESS_NOISE_GYRO_BIAS_STD = 1.0e-5   # rad/s per sqrt(s) (matches IMU_GYRO_RANDOM_WALK_DEFAULT)
 PROCESS_NOISE_ACCEL_BIAS_STD = 1.0e-4  # m/s^2 per sqrt(s) (matches IMU_ACCEL_RANDOM_WALK_DEFAULT)
 
-# State dimension
-STATE_DIM_POSE = 6      # [x, y, z, rx, ry, rz]
+# State dimension (15D only - no 6D pose-only path)
 STATE_DIM_VELOCITY = 3  # [vx, vy, vz]
 STATE_DIM_BIAS = 6      # [bg_x, bg_y, bg_z, ba_x, ba_y, ba_z]
-STATE_DIM_FULL = 15     # Pose + Velocity + Bias
+STATE_DIM_FULL = 15     # Pose(6) + Velocity(3) + Bias(6)
 
 # IMU preintegration ordering (Contract B)
 # Covariance is 9x9 in basis [delta_p(3), delta_v(3), delta_theta(3)]
@@ -371,3 +370,63 @@ MIN_MIXTURE_WEIGHT = 1e-15
 
 # Hellinger tilt weight for robustness to outliers
 HELLINGER_TILT_WEIGHT = 2.0
+
+# =============================================================================
+# Debug/Logging Thresholds
+# =============================================================================
+# These control how many times certain log messages are emitted before throttling
+
+RESPONSIBILITY_DEBUG_LOG_THRESHOLD = 5  # First N responsibility computations logged
+BIRTH_DEBUG_LOG_THRESHOLD = 10  # First N birth events logged
+LOOP_DEBUG_LOG_THRESHOLD = 5  # First N loop factor events logged
+ICP_VALIDATION_LOG_THRESHOLD = 5  # First N ICP validation results logged
+LOOP_FACTOR_VALIDATION_LOG_THRESHOLD = 3  # First N loop factor validations logged
+LOOP_PUBLISHED_LOG_THRESHOLD = 5  # First N published loop factors logged
+SCAN_BUFFER_LOG_FREQUENCY = 10  # Log scan buffer every N scans
+IMU_FACTOR_LOG_THRESHOLD = 5  # First N IMU factor events logged
+IMU_SEGMENT_BUFFER_LOG_THRESHOLD = 3  # First N IMU segment buffer events logged
+LOOP_RECEIVE_LOG_THRESHOLD = 3  # First N loop factor receives logged
+LOOP_PROCESS_LOG_THRESHOLD = 5  # First N loop factor processes logged
+LOOP_COMPLETION_LOG_THRESHOLD = 3  # First N loop completions logged
+
+# =============================================================================
+# Frontend Processing Constants
+# =============================================================================
+
+ANCHOR_CREATE_MAX_POINTS = 1000  # Max points to include in anchor message
+DEPTH_POINTS_FALLBACK_MAX = 1000  # Max depth points when pointcloud unavailable
+RGBD_PUBLISH_RATE_DIVISOR = 5  # Publish RGB-D every N scans
+RGBD_SPATIAL_GRID_SIZE = 0.1  # Grid size for spatial subsampling (meters)
+RGBD_KAPPA_NORMAL_DEFAULT = 10.0  # vMF concentration for surface normals
+RGBD_COLOR_VARIANCE_DEFAULT = 0.01  # Color noise variance (RGB space)
+RGBD_ALPHA_MEAN_DEFAULT = 1.0  # Dirichlet alpha mean for occupancy
+RGBD_ALPHA_VAR_DEFAULT = 0.1  # Dirichlet alpha variance for occupancy
+STATUS_PUBLISH_INTERVAL_SEC = 1.0  # Status message publish interval
+
+# =============================================================================
+# Adaptive Parameter Floors
+# =============================================================================
+# Minimum values to prevent numerical instability
+
+FR_DISTANCE_SCALE_FLOOR = 0.01  # Min Fisher-Rao distance scale
+ICP_MAX_ITER_FLOOR = 3.0  # Min ICP iterations
+ICP_TOLERANCE_FLOOR = 1e-6  # Min ICP convergence tolerance
+
+# =============================================================================
+# IMU Thresholds
+# =============================================================================
+
+IMU_MIN_MEASUREMENTS_PUBLISH = 2  # Min IMU samples to publish segment
+IMU_MIN_MEASUREMENTS_WARNING = 10  # Warn if fewer than this many samples
+IMU_BUFFER_SIZE_WARNING = 100  # Warn if buffer exceeds this size
+IMU_COVARIANCE_DEGENERATE = 1e6  # Covariance value indicating degenerate measurement
+IMU_CHOLESKY_REGULARIZATION_FALLBACK = 1e-6  # Regularization for Cholesky failures
+
+# =============================================================================
+# Sensor I/O Constants
+# =============================================================================
+
+POINTCLOUD_RATE_LIMIT_HZ_DEFAULT = 30.0  # Default rate limit for point clouds
+RGB_BYTES_PER_PIXEL = 3  # Bytes per pixel for RGB8/BGR8 encoding
+RGBA_BYTES_PER_PIXEL = 4  # Bytes per pixel for RGBA8/BGRA8 encoding
+MM_TO_M_SCALE = 1e-3  # Millimeter to meter conversion factor

@@ -17,13 +17,13 @@ from fl_slam_poc.backend.fusion.gaussian_info import (
 )
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.op_report import OpReport
-from fl_slam_poc.common.geometry.se3_numpy import (
+from fl_slam_poc.common.jax_utils import (
     quat_to_rotvec,
-    se3_adjoint,
-    se3_compose,
-    se3_cov_compose,
-    se3_inverse,
-    se3_relative,
+    se3_adjoint_np,
+    se3_compose_np,
+    se3_cov_compose_np,
+    se3_inverse_np,
+    se3_relative_np,
 )
 
 if TYPE_CHECKING:
@@ -117,14 +117,20 @@ def process_loop(backend: "FLBackend", msg: "LoopFactor") -> None:
     cov_current_pose = cov_full[:6, :6]
     mu_anchor_pose = mu_anchor[:6]
     cov_anchor_pose = cov_anchor[:6, :6]
+    cov_trace_curr_before = float(np.trace(cov_current_pose))
+    cov_trace_anchor_before = float(np.trace(cov_anchor_pose))
 
-    def _spd_solve(A: np.ndarray, b: np.ndarray) -> np.ndarray:
-        try:
-            Lc = np.linalg.cholesky(A)
-            y = np.linalg.solve(Lc, b)
-            return np.linalg.solve(Lc.T, y)
-        except np.linalg.LinAlgError:
-            return np.linalg.lstsq(A, b, rcond=None)[0]
+    def _spd_solve(A: np.ndarray, b: np.ndarray, name: str) -> np.ndarray:
+        """Strict SPD solve via Cholesky - no fallback."""
+        A = np.asarray(A, dtype=float)
+        b = np.asarray(b, dtype=float)
+        if A.ndim != 2 or A.shape[0] != A.shape[1]:
+            raise ValueError(f"{name}: expected square matrix, got {A.shape}")
+        if b.shape[0] != A.shape[0]:
+            raise ValueError(f"{name}: rhs shape {b.shape} incompatible with {A.shape}")
+        Lc = np.linalg.cholesky(A)
+        y = np.linalg.solve(Lc, b)
+        return np.linalg.solve(Lc.T, y)
 
     def _gaussian_product(
         mu_a: np.ndarray, cov_a: np.ndarray, mu_b: np.ndarray, cov_b: np.ndarray
@@ -134,24 +140,24 @@ def process_loop(backend: "FLBackend", msg: "LoopFactor") -> None:
         mu_a = np.asarray(mu_a, dtype=float).reshape(-1)
         mu_b = np.asarray(mu_b, dtype=float).reshape(-1)
 
-        I_a = _spd_solve(cov_a, np.eye(cov_a.shape[0]))
-        I_b = _spd_solve(cov_b, np.eye(cov_b.shape[0]))
+        I_a = _spd_solve(cov_a, np.eye(cov_a.shape[0]), "loop.cov_a")
+        I_b = _spd_solve(cov_b, np.eye(cov_b.shape[0]), "loop.cov_b")
         Sigma_inv = I_a + I_b
-        Sigma = _spd_solve(Sigma_inv, np.eye(Sigma_inv.shape[0]))
+        Sigma = _spd_solve(Sigma_inv, np.eye(Sigma_inv.shape[0]), "loop.Sigma_inv")
         mu = Sigma @ (I_a @ mu_a + I_b @ mu_b)
         Sigma = 0.5 * (Sigma + Sigma.T)
         return mu, Sigma
 
     cov_rel_eff = cov_rel / max(weight, constants.WEIGHT_EPSILON)
 
-    mu_curr_pred = se3_compose(mu_anchor_pose, rel)
-    cov_curr_pred = se3_cov_compose(cov_anchor_pose, cov_rel_eff, mu_anchor_pose)
+    mu_curr_pred = se3_compose_np(mu_anchor_pose, rel)
+    cov_curr_pred = se3_cov_compose_np(cov_anchor_pose, cov_rel_eff, mu_anchor_pose)
 
-    rel_inv = se3_inverse(rel)
-    Ad_rel_inv = se3_adjoint(rel_inv)
+    rel_inv = se3_inverse_np(rel)
+    Ad_rel_inv = se3_adjoint_np(rel_inv)
     cov_rel_inv = Ad_rel_inv @ cov_rel_eff @ Ad_rel_inv.T
-    mu_anchor_pred = se3_compose(mu_current_pose, rel_inv)
-    cov_anchor_pred = se3_cov_compose(cov_current_pose, cov_rel_inv, mu_current_pose)
+    mu_anchor_pred = se3_compose_np(mu_current_pose, rel_inv)
+    cov_anchor_pred = se3_cov_compose_np(cov_current_pose, cov_rel_inv, mu_current_pose)
 
     L_curr_prior, h_curr_prior = make_evidence(mu_current_pose, cov_current_pose)
     L_curr_meas, h_curr_meas = make_evidence(mu_curr_pred, cov_curr_pred)
@@ -177,51 +183,42 @@ def process_loop(backend: "FLBackend", msg: "LoopFactor") -> None:
 
     mu_pose_new, cov_pose_new = mean_cov(L_curr_fused, h_curr_fused)
     mu_anchor_new, cov_anchor_new = mean_cov(L_anchor_fused, h_anchor_fused)
+    cov_trace_curr_after = float(np.trace(cov_pose_new))
+    cov_trace_anchor_after = float(np.trace(cov_anchor_new))
 
-    if backend.state_dim == constants.STATE_DIM_FULL:
-        mu_new = mu_full.copy()
-        mu_new[:6] = mu_pose_new
+    # 15D state update (no 6D path)
+    mu_new = mu_full.copy()
+    mu_new[:6] = mu_pose_new
 
-        cov_new = cov_full.copy()
-        cov_new[:6, :6] = cov_pose_new
-        backend.L, backend.h = make_evidence(mu_new, cov_new)
-    else:
-        backend.L, backend.h = make_evidence(mu_pose_new, cov_pose_new)
+    cov_new = cov_full.copy()
+    cov_new[:6, :6] = cov_pose_new
+    backend.L, backend.h = make_evidence(mu_new, cov_new)
 
     anchor_points = anchor_data[4]
 
-    if backend.state_dim == constants.STATE_DIM_FULL:
-        mu_anchor_full = mu_anchor.copy()
-        mu_anchor_full[:6] = mu_anchor_new
+    # 15D anchor update (no 6D path)
+    mu_anchor_full = mu_anchor.copy()
+    mu_anchor_full[:6] = mu_anchor_new
 
-        cov_anchor_full = cov_anchor.copy()
-        cov_anchor_full[:6, :6] = cov_anchor_new
-        cov_anchor_full[:6, 6:] = 0.0
-        cov_anchor_full[6:, :6] = 0.0
+    cov_anchor_full = cov_anchor.copy()
+    cov_anchor_full[:6, :6] = cov_anchor_new
+    cov_anchor_full[:6, 6:] = 0.0
+    cov_anchor_full[6:, :6] = 0.0
 
-        L_anchor_new, h_anchor_new = make_evidence(mu_anchor_full, cov_anchor_full)
-        backend.anchors[anchor_id] = (
-            mu_anchor_full.copy(),
-            cov_anchor_full.copy(),
-            L_anchor_new.copy(),
-            h_anchor_new.reshape(-1).copy(),
-            anchor_points,
-        )
-    else:
-        L_anchor_new, h_anchor_new = make_evidence(mu_anchor_new, cov_anchor_new)
-        backend.anchors[anchor_id] = (
-            mu_anchor_new,
-            cov_anchor_new,
-            L_anchor_new.copy(),
-            h_anchor_new.reshape(-1).copy(),
-            anchor_points,
-        )
+    L_anchor_new_full, h_anchor_new_full = make_evidence(mu_anchor_full, cov_anchor_full)
+    backend.anchors[anchor_id] = (
+        mu_anchor_full.copy(),
+        cov_anchor_full.copy(),
+        L_anchor_new_full.copy(),
+        h_anchor_new_full.reshape(-1).copy(),
+        anchor_points,
+    )
 
     mu_updated, cov_updated = mean_cov(backend.L, backend.h)
     cov_current = cov_full
 
-    Z_pred = se3_compose(se3_inverse(mu_anchor_pose), mu_current_pose)
-    innovation = se3_relative(rel, Z_pred)
+    Z_pred = se3_compose_np(se3_inverse_np(mu_anchor_pose), mu_current_pose)
+    innovation = se3_relative_np(rel, Z_pred)
 
     from fl_slam_poc.backend.diagnostics import publish_map, publish_report
     publish_map(
@@ -257,6 +254,10 @@ def process_loop(backend: "FLBackend", msg: "LoopFactor") -> None:
                 "trust_divergence_full_anchor": trust_diag_anchor["divergence_full"],
                 "trust_quality_curr": trust_diag_curr["trust_quality"],
                 "trust_quality_anchor": trust_diag_anchor["trust_quality"],
+            "benefit_expected_curr": trust_diag_curr["beta"],
+            "benefit_expected_anchor": trust_diag_anchor["beta"],
+            "benefit_realized_curr": cov_trace_curr_before - cov_trace_curr_after,
+            "benefit_realized_anchor": cov_trace_anchor_before - cov_trace_anchor_after,
             },
             notes="Loop closure via trust-scaled precision fusion (alpha-divergence).",
         ), backend.pub_report)

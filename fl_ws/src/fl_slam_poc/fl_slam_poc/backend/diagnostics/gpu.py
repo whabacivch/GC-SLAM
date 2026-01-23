@@ -39,7 +39,7 @@ def check_gpu_availability(backend: "FLBackend") -> None:
                 f"JAX GPU backend is required for IMU fusion but not available.\n"
                 f"Available JAX devices: {available_devices}\n"
                 f"To fix: Ensure CUDA is installed and JAX can detect GPU devices.\n"
-                f"Alternatively, disable IMU fusion by setting enable_imu_fusion:=false"
+                f"Note: 15D state with IMU fusion is always enabled - GPU is required."
             )
         
         backend.get_logger().info(

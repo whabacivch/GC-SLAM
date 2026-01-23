@@ -109,17 +109,11 @@ python3 "$PROJECT_ROOT/tools/capture_op_reports.py" --topic /cdwm/op_report --ou
 OP_REPORT_PID=$!
 
 # Launch SLAM in background with full logging
+# NOTE: All M3DGR-specific parameters (lidar_base_extrinsic, imu_*, camera_*)
+# are now in config/presets/m3dgr.yaml. The launch file loads them via
+# config_base + config_preset. No inline overrides needed.
 ros2 launch fl_slam_poc poc_m3dgr_rosbag.launch.py \
   bag:="$BAG_PATH" \
-  enable_decompress_cpp:=true \
-  lidar_base_extrinsic:="[-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]" \
-  imu_topic:=/livox/mid360/imu \
-  imu_gyro_noise_density:=1.7e-4 \
-  imu_accel_noise_density:=1.9e-4 \
-  camera_fx:=610.16 \
-  camera_fy:=610.45 \
-  camera_cx:=326.35 \
-  camera_cy:=244.68 \
   > "$LOG_FILE" 2>&1 &
 LAUNCH_PID=$!
 

@@ -46,7 +46,6 @@ from fl_slam_poc.backend import AdaptiveParameter, TimeAlignmentModel, Stochasti
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common.param_models import FrontendParams
-from fl_slam_poc.common.geometry.se3_numpy import rotmat_to_quat, rotvec_to_rotmat, se3_compose, se3_relative
 from fl_slam_poc.common.utils import stamp_to_sec
 from fl_slam_poc.common.validation import (
     ContractViolation,
@@ -68,6 +67,7 @@ class Frontend(Node):
         super().__init__("fl_frontend")
         self._declare_parameters()
         self.params = self._validate_params()
+        self._log_final_parameters()
         self._init_modules()
         self._init_publishers()
         self._init_timer()
@@ -91,6 +91,7 @@ class Frontend(Node):
     
     def _declare_parameters(self):
         """Declare all ROS parameters with defaults."""
+        self.declare_parameter("use_sim_time", False)
         # Topics
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("odom_topic", "/odom")
@@ -120,12 +121,20 @@ class Frontend(Node):
         self.declare_parameter("rgbd_sync_max_dt_sec", 0.1)
         self.declare_parameter("rgbd_min_depth_m", 0.1)
         self.declare_parameter("rgbd_max_depth_m", 10.0)
+        self.declare_parameter("rgbd_spatial_grid_size", constants.RGBD_SPATIAL_GRID_SIZE)
+        self.declare_parameter("rgbd_kappa_normal", constants.RGBD_KAPPA_NORMAL_DEFAULT)
+        self.declare_parameter("rgbd_color_variance", constants.RGBD_COLOR_VARIANCE_DEFAULT)
+        self.declare_parameter("rgbd_alpha_mean", constants.RGBD_ALPHA_MEAN_DEFAULT)
+        self.declare_parameter("rgbd_alpha_var", constants.RGBD_ALPHA_VAR_DEFAULT)
+        self.declare_parameter("rgbd_rng_seed", -1)
         
         # Budgets
         self.declare_parameter("descriptor_bins", 60)
         self.declare_parameter("anchor_budget", 0)
         self.declare_parameter("loop_budget", 0)
         self.declare_parameter("anchor_id_offset", 0)
+        self.declare_parameter("anchor_create_max_points", constants.ANCHOR_CREATE_MAX_POINTS)
+        self.declare_parameter("depth_points_fallback_max_points", constants.DEPTH_POINTS_FALLBACK_MAX)
         
         # ICP
         self.declare_parameter("icp_max_iter_prior", 15)
@@ -149,6 +158,7 @@ class Frontend(Node):
         self.declare_parameter("birth_intensity", float(constants.BIRTH_INTENSITY_DEFAULT))
         self.declare_parameter("scan_period", 0.1)
         self.declare_parameter("base_component_weight", 1.0)
+        self.declare_parameter("birth_rng_seed", -1)
         
         # IMU Integration
         self.declare_parameter("enable_imu", False)
@@ -159,6 +169,9 @@ class Frontend(Node):
         self.declare_parameter("keyframe_translation_threshold", 0.5)
         self.declare_parameter("keyframe_rotation_threshold", 0.26)
         self.declare_parameter("gravity", list(constants.GRAVITY_DEFAULT))
+        self.declare_parameter("imu_min_measurements_publish", constants.IMU_MIN_MEASUREMENTS_PUBLISH)
+        self.declare_parameter("imu_min_measurements_warning", constants.IMU_MIN_MEASUREMENTS_WARNING)
+        self.declare_parameter("imu_buffer_size_warning", constants.IMU_BUFFER_SIZE_WARNING)
         
         # Frames
         self.declare_parameter("odom_frame", "odom")
@@ -166,6 +179,7 @@ class Frontend(Node):
         self.declare_parameter("camera_frame", "camera_link")
         self.declare_parameter("scan_frame", "base_link")
         self.declare_parameter("tf_timeout_sec", 0.05)
+        self.declare_parameter("status_publish_interval_sec", constants.STATUS_PUBLISH_INTERVAL_SEC)
         # No-TF LiDAR extrinsic (T_base_lidar): [x,y,z,rx,ry,rz]. If empty (all zeros), TF is required.
         self.declare_parameter("lidar_base_extrinsic", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         
@@ -202,6 +216,13 @@ class Frontend(Node):
         except ValidationError as exc:
             self.get_logger().error(f"Invalid frontend parameters: {exc}")
             raise
+
+    def _log_final_parameters(self) -> None:
+        """Log resolved parameters after precedence rules are applied."""
+        params_dict = self.params.model_dump()
+        self.get_logger().info(
+            f"Frontend parameters (final): {json.dumps(params_dict, sort_keys=True)}"
+        )
     
     def _init_modules(self):
         """Initialize modular components."""
@@ -285,6 +306,13 @@ class Frontend(Node):
         self.rgbd_sync_max_dt_sec = float(self.get_parameter("rgbd_sync_max_dt_sec").value)
         self.rgbd_min_depth_m = float(self.get_parameter("rgbd_min_depth_m").value)
         self.rgbd_max_depth_m = float(self.get_parameter("rgbd_max_depth_m").value)
+        self.rgbd_spatial_grid_size = float(self.get_parameter("rgbd_spatial_grid_size").value)
+        self.rgbd_kappa_normal = float(self.get_parameter("rgbd_kappa_normal").value)
+        self.rgbd_color_variance = float(self.get_parameter("rgbd_color_variance").value)
+        self.rgbd_alpha_mean = float(self.get_parameter("rgbd_alpha_mean").value)
+        self.rgbd_alpha_var = float(self.get_parameter("rgbd_alpha_var").value)
+        rgbd_seed = int(self.get_parameter("rgbd_rng_seed").value)
+        self.rgbd_rng = np.random.default_rng(rgbd_seed if rgbd_seed >= 0 else None)
         self.descriptor_builder = DescriptorBuilder(
             descriptor_bins,
             depth_range_m=(self.rgbd_min_depth_m, self.rgbd_max_depth_m),
@@ -312,7 +340,12 @@ class Frontend(Node):
         # Initialize AnchorManager (uses models.birth, operators.third_order_correct)
         birth_intensity = float(self.get_parameter("birth_intensity").value)
         scan_period = float(self.get_parameter("scan_period").value)
-        birth_model = StochasticBirthModel(birth_intensity, scan_period)
+        birth_seed = int(self.get_parameter("birth_rng_seed").value)
+        birth_model = StochasticBirthModel(
+            birth_intensity,
+            scan_period,
+            rng_seed=birth_seed if birth_seed >= 0 else None,
+        )
         anchor_id_offset = int(self.get_parameter("anchor_id_offset").value)
         self.anchor_manager = AnchorManager(birth_model, anchor_id_offset)
         
@@ -350,9 +383,18 @@ class Frontend(Node):
         self.keyframe_translation_threshold = float(self.get_parameter("keyframe_translation_threshold").value)
         self.keyframe_rotation_threshold = float(self.get_parameter("keyframe_rotation_threshold").value)
         self.gravity = np.array(self.get_parameter("gravity").value, dtype=float)
+        self.imu_min_measurements_publish = int(self.get_parameter("imu_min_measurements_publish").value)
+        self.imu_min_measurements_warning = int(self.get_parameter("imu_min_measurements_warning").value)
+        self.imu_buffer_size_warning = int(self.get_parameter("imu_buffer_size_warning").value)
         self._last_keyframe_id: Optional[int] = None
         self._last_keyframe_stamp: Optional[float] = None
         self._last_keyframe_pose: Optional[np.ndarray] = None
+
+        self.anchor_create_max_points = int(self.get_parameter("anchor_create_max_points").value)
+        self.depth_points_fallback_max_points = int(self.get_parameter("depth_points_fallback_max_points").value)
+        self.status_publish_interval_sec = float(
+            self.get_parameter("status_publish_interval_sec").value
+        )
         
         # Log GPU status
         if use_gpu:
@@ -513,7 +555,7 @@ class Frontend(Node):
 
     def _init_timer(self):
         """Initialize status publishing timer."""
-        self.create_timer(1.0, self._publish_status)
+        self.create_timer(self.status_publish_interval_sec, self._publish_status)
     
     def _on_scan(self, msg: LaserScan):
         """
@@ -560,6 +602,22 @@ class Frontend(Node):
         pose, pose_dt = self.sensor_io.get_nearest_pose(scan_stamp)
         if pose is None:
             # This shouldn't happen since we check before calling
+            self.get_logger().error(
+                "Scan dropped: missing pose after pre-check",
+                throttle_duration_sec=5.0,
+            )
+            self._publish_report(OpReport(
+                name="ScanDropped",
+                exact=True,
+                family_in="LaserScan",
+                family_out="None",
+                closed_form=True,
+                metrics={
+                    "reason": "pose_missing",
+                    "stamp": float(scan_stamp),
+                },
+                notes="Scan dropped after pose lookup failure.",
+            ))
             return
 
         self.align_pose.update(pose_dt)
@@ -589,7 +647,7 @@ class Frontend(Node):
         points = scan_points
         point_source = "scan"
         if points is None and depth_points is not None:
-            max_pts = 1000
+            max_pts = self.depth_points_fallback_max_points
             if len(depth_points) > max_pts:
                 idx = np.linspace(0, len(depth_points) - 1, max_pts, dtype=int)
                 points = depth_points[idx]
@@ -748,6 +806,22 @@ class Frontend(Node):
         pose, pose_dt = self.sensor_io.get_nearest_pose(pc_stamp)
         if pose is None:
             # This shouldn't happen since we check before calling
+            self.get_logger().error(
+                "PointCloud dropped: missing pose after pre-check",
+                throttle_duration_sec=5.0,
+            )
+            self._publish_report(OpReport(
+                name="PointCloudDropped",
+                exact=True,
+                family_in="PointCloud2",
+                family_out="None",
+                closed_form=True,
+                metrics={
+                    "reason": "pose_missing",
+                    "stamp": float(pc_stamp),
+                },
+                notes="PointCloud dropped after pose lookup failure.",
+            ))
             return
 
         self.align_pose.update(pose_dt)
@@ -851,6 +925,25 @@ class Frontend(Node):
         Uses operators.icp, operators.transport_covariance_to_frame, operators.gaussian_frobenius_correction.
         """
         if points is None or len(self.anchor_manager.get_all_anchors()) == 0:
+            anchor_count = len(self.anchor_manager.get_all_anchors())
+            self.get_logger().error(
+                f"Loop factors dropped: points={points is not None}, anchors={anchor_count}",
+                throttle_duration_sec=5.0,
+            )
+            self._publish_report(OpReport(
+                name="LoopFactorsDropped",
+                exact=True,
+                family_in="PointCloud",
+                family_out="None",
+                closed_form=True,
+                metrics={
+                    "reason": "missing_points_or_anchors",
+                    "has_points": points is not None,
+                    "anchor_count": anchor_count,
+                    "point_source": point_source,
+                },
+                notes="Loop factors dropped due to missing points or anchors.",
+            ))
             return
         
         # Apply loop budget if needed (uses operators.third_order_correct)
@@ -910,7 +1003,9 @@ class Frontend(Node):
                         )
 
                 except ContractViolation as e:
-                    self.get_logger().error(f"Frontend ICP result contract violation: {e}")
+                    self.get_logger().error(
+                        f"Frontend ICP result contract violation (anchor={anchor.anchor_id}): {e}"
+                    )
                     self._publish_report(OpReport(
                         name="FrontendICPContractViolation",
                         exact=False,
@@ -959,7 +1054,7 @@ class Frontend(Node):
             convergence_quality = float(np.clip(convergence_quality, 1e-6, 1.0))
             
             # Compute loop factor (uses operators exact formulas)
-            rel_pose, cov_transported, final_weight = self.loop_processor.compute_loop_factor(
+            rel_pose, cov_transported, final_weight, info_weight = self.loop_processor.compute_loop_factor(
                 icp_result, anchor.pose, obs_weight * convergence_quality, weight)
 
             # =====================================================================
@@ -993,7 +1088,9 @@ class Frontend(Node):
                         )
 
                 except ContractViolation as e:
-                    self.get_logger().error(f"Frontend loop factor contract violation: {e}")
+                    self.get_logger().error(
+                        f"Frontend loop factor contract violation (anchor={anchor.anchor_id}): {e}"
+                    )
                     self._publish_report(OpReport(
                         name="FrontendLoopFactorContractViolation",
                         exact=False,
@@ -1037,9 +1134,17 @@ class Frontend(Node):
             self.loop_processor.update_adaptive_params(icp_result)
             
             # Publish loop factor
-            self._publish_loop(rel_pose, cov_transported, msg.header.stamp,
-                              anchor.anchor_id, final_weight, icp_result,
-                              truncation_applied, point_source)
+            self._publish_loop(
+                rel_pose,
+                cov_transported,
+                msg.header.stamp,
+                anchor.anchor_id,
+                final_weight,
+                info_weight,
+                icp_result,
+                truncation_applied,
+                point_source,
+            )
             
             if not hasattr(self, '_loop_published_count'):
                 self._loop_published_count = 0
@@ -1067,6 +1172,7 @@ class Frontend(Node):
                 metrics={
                     "anchor_id": anchor.anchor_id,
                     "weight": final_weight,
+                    "information_weight": float(info_weight),
                     "mse": icp_result.mse,
                     "iterations": icp_result.iterations,
                     "converged": icp_result.converged,
@@ -1076,7 +1182,8 @@ class Frontend(Node):
             ))
     
     def _publish_loop(self, rel_pose: np.ndarray, cov: np.ndarray, stamp,
-                     anchor_id: int, weight: float, icp_result, truncation_applied: bool, point_source: str):
+                     anchor_id: int, weight: float, info_weight: float, icp_result,
+                     truncation_applied: bool, point_source: str):
         """Publish LoopFactor message."""
         loop = LoopFactor()
         loop.header.stamp = stamp
@@ -1087,9 +1194,8 @@ class Frontend(Node):
         loop.rel_pose.position.y = float(rel_pose[1])
         loop.rel_pose.position.z = float(rel_pose[2])
         
-        # Convert rotation vector to quaternion
-        R = rotvec_to_rotmat(rel_pose[3:6])
-        qx, qy, qz, qw = rotmat_to_quat(R)
+        # Convert rotation vector to quaternion via loop processor helper
+        qx, qy, qz, qw = self.loop_processor.rotvec_to_quaternion(rel_pose[3:6])
         loop.rel_pose.orientation.x = qx
         loop.rel_pose.orientation.y = qy
         loop.rel_pose.orientation.z = qz
@@ -1102,7 +1208,7 @@ class Frontend(Node):
         loop.solver_tolerance = icp_result.tolerance
         loop.solver_iterations = icp_result.iterations
         loop.solver_max_iterations = icp_result.max_iterations
-        loop.information_weight = icp_result.final_objective  # Placeholder
+        loop.information_weight = float(info_weight)
         
         self.pub_loop.publish(loop)
     
@@ -1117,7 +1223,7 @@ class Frontend(Node):
         
         # Publish point cloud (subsample for message size)
         # Limit to 1000 points to keep message size reasonable
-        max_points = 1000
+        max_points = self.anchor_create_max_points
         if len(points) > max_points:
             indices = np.linspace(0, len(points)-1, max_points, dtype=int)
             points_sub = points[indices]
@@ -1148,13 +1254,32 @@ class Frontend(Node):
         start_sec = float(self._last_keyframe_stamp)
         end_sec = float(stamp_sec)
         if end_sec <= start_sec:
+            self.get_logger().debug(
+                f"IMU factor skipped: invalid time range (end={end_sec:.3f} <= start={start_sec:.3f})",
+                throttle_duration_sec=5.0,
+            )
+            self._publish_report(OpReport(
+                name="IMUSegmentDropped",
+                exact=True,
+                family_in="IMU",
+                family_out="None",
+                closed_form=True,
+                metrics={
+                    "reason": "invalid_time_range",
+                    "keyframe_i": int(self._last_keyframe_id),
+                    "keyframe_j": int(keyframe_j),
+                    "start_sec": float(start_sec),
+                    "end_sec": float(end_sec),
+                },
+                notes="IMU segment dropped due to invalid timestamp ordering.",
+            ))
             return
 
         buffer_size = self.sensor_io.get_imu_buffer_size()
         imu_measurements = self.sensor_io.get_imu_measurements(start_sec, end_sec)
         
         # Debug: log IMU query parameters
-        if len(imu_measurements) < 10 or buffer_size > 100:
+        if len(imu_measurements) < self.imu_min_measurements_warning or buffer_size > self.imu_buffer_size_warning:
             # Get buffer time range for debugging
             buf_times = [t for t, _, _ in self.sensor_io.imu_buffer] if hasattr(self.sensor_io, 'imu_buffer') and self.sensor_io.imu_buffer else []
             buf_range = f"[{min(buf_times):.3f}, {max(buf_times):.3f}]" if buf_times else "empty"
@@ -1188,7 +1313,7 @@ class Frontend(Node):
         imu_msg.accel = accel
         imu_msg.gyro = gyro
 
-        if len(imu_measurements) < 2:
+        if len(imu_measurements) < self.imu_min_measurements_publish:
             self.get_logger().warn(
                 f"IMU segment skipped: insufficient samples ({len(imu_measurements)}) "
                 f"between kf_{self._last_keyframe_id} [{start_sec:.3f}] and kf_{keyframe_j} [{end_sec:.3f}], "
@@ -1204,7 +1329,8 @@ class Frontend(Node):
                     "reason": "insufficient_samples",
                     "keyframe_i": int(self._last_keyframe_id),
                     "keyframe_j": int(keyframe_j),
-                    "n_samples": len(imu_measurements),
+                "n_samples": len(imu_measurements),
+                "min_samples": int(self.imu_min_measurements_publish),
                 },
                 notes="IMU segment skipped due to insufficient samples.",
             ))
@@ -1223,7 +1349,7 @@ class Frontend(Node):
         cleared = self.sensor_io.clear_imu_buffer(end_sec)
 
         # Motion diagnostics between keyframes
-        rel = se3_relative(pose, self._last_keyframe_pose)
+        rel = self.sensor_io.relative_pose(pose, self._last_keyframe_pose)
         trans_norm = float(np.linalg.norm(rel[:3]))
         rot_norm = float(np.linalg.norm(rel[3:]))
 
@@ -1245,7 +1371,7 @@ class Frontend(Node):
             },
             notes="IMU raw segment published between anchor keyframes (Contract B).",
         ))
-        if len(imu_measurements) <= 2:
+        if len(imu_measurements) <= self.imu_min_measurements_warning:
             self.get_logger().warn(
                 f"IMU segment {imu_msg.keyframe_i}->{imu_msg.keyframe_j}: "
                 f"insufficient measurements (n={len(imu_measurements)}, cleared={cleared})"
@@ -1278,6 +1404,10 @@ class Frontend(Node):
         """
         # AUD-001 fix: Check if publisher was initialized
         if self.pub_rgbd is None:
+            self.get_logger().debug(
+                "RGBD evidence skipped: publisher not initialized",
+                throttle_duration_sec=10.0,
+            )
             return
         
         try:
@@ -1291,6 +1421,22 @@ class Frontend(Node):
             
             # Get camera intrinsics
             if self.sensor_io.depth_intrinsics is None:
+                self.get_logger().error(
+                    "RGBD evidence dropped: missing camera intrinsics",
+                    throttle_duration_sec=10.0,
+                )
+                self._publish_report(OpReport(
+                    name="RGBDEvidenceDropped",
+                    exact=True,
+                    family_in="RGBD",
+                    family_out="None",
+                    closed_form=True,
+                    metrics={
+                        "reason": "missing_intrinsics",
+                        "camera_frame": str(camera_frame),
+                    },
+                    notes="RGBD evidence dropped due to missing camera intrinsics.",
+                ))
                 return
             fx, fy, cx, cy = self.sensor_io.depth_intrinsics
             K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
@@ -1301,20 +1447,37 @@ class Frontend(Node):
                 K,
                 rgb=rgb,
                 subsample=10,
-                min_depth=constants.DEPTH_MIN_VALID,
-                max_depth=constants.DEPTH_MAX_VALID,
+                min_depth=self.rgbd_min_depth_m,
+                max_depth=self.rgbd_max_depth_m,
             )
             
             if len(points_cam) == 0:
+                self.get_logger().error(
+                    "RGBD evidence dropped: no valid 3D points from depth",
+                    throttle_duration_sec=5.0,
+                )
+                self._publish_report(OpReport(
+                    name="RGBDEvidenceDropped",
+                    exact=True,
+                    family_in="RGBD",
+                    family_out="None",
+                    closed_form=True,
+                    metrics={
+                        "reason": "no_valid_points",
+                        "min_depth_m": float(self.rgbd_min_depth_m),
+                        "max_depth_m": float(self.rgbd_max_depth_m),
+                    },
+                    notes="RGBD evidence dropped due to empty point cloud after depth filtering.",
+                ))
                 return
             
             # Convert to evidence (camera frame)
             evidence_cam = rgbd_to_evidence(
                 points_cam, colors, normals, covs,
-                kappa_normal=10.0,  # High confidence in normals
-                color_var=0.01,     # Low color noise
-                alpha_mean=1.0,
-                alpha_var=0.1
+                kappa_normal=self.rgbd_kappa_normal,
+                color_var=self.rgbd_color_variance,
+                alpha_mean=self.rgbd_alpha_mean,
+                alpha_var=self.rgbd_alpha_var,
             )
             
             # Transform evidence to odom frame
@@ -1334,17 +1497,57 @@ class Frontend(Node):
                     Time(),  # latest
                 )
             if T_base_camera is None:
+                self.get_logger().error(
+                    f"RGBD evidence dropped: transform lookup failed "
+                    f"({self.sensor_io.config['base_frame']} <- {camera_frame})",
+                    throttle_duration_sec=5.0,
+                )
+                self._publish_report(OpReport(
+                    name="RGBDEvidenceDropped",
+                    exact=True,
+                    family_in="RGBD",
+                    family_out="None",
+                    closed_form=True,
+                    metrics={
+                        "reason": "transform_unavailable",
+                        "base_frame": str(self.sensor_io.config["base_frame"]),
+                        "camera_frame": str(camera_frame),
+                    },
+                    notes="RGBD evidence dropped due to missing TF transform.",
+                ))
                 return
 
-            T_odom_camera = se3_compose(pose_odom_base, T_base_camera)
+            T_odom_camera = self.sensor_io.compose_pose(pose_odom_base, T_base_camera)
             
             evidence_odom = transform_evidence_to_global(evidence_cam, T_odom_camera)
             
             # Spatial subsampling to reduce message size
             max_pts = int(self.get_parameter("rgbd_max_points_per_msg").value)
-            evidence_subsampled = subsample_evidence_spatially(evidence_odom, grid_size=0.1, max_points=max_pts)
+            evidence_subsampled = subsample_evidence_spatially(
+                evidence_odom,
+                grid_size=self.rgbd_spatial_grid_size,
+                max_points=max_pts,
+                rng=self.rgbd_rng,
+            )
             
             if len(evidence_subsampled) == 0:
+                self.get_logger().error(
+                    "RGBD evidence dropped: empty after spatial subsampling",
+                    throttle_duration_sec=5.0,
+                )
+                self._publish_report(OpReport(
+                    name="RGBDEvidenceDropped",
+                    exact=True,
+                    family_in="RGBD",
+                    family_out="None",
+                    closed_form=True,
+                    metrics={
+                        "reason": "empty_after_subsample",
+                        "grid_size_m": float(self.rgbd_spatial_grid_size),
+                        "max_points": int(max_pts),
+                    },
+                    notes="RGBD evidence dropped after spatial subsampling.",
+                ))
                 return
             
             # Serialize to JSON
@@ -1371,7 +1574,9 @@ class Frontend(Node):
             )
         except Exception as e:
             self.get_logger().warn(
-                f"RGB-D evidence publish failed: {e}",
+                f"RGB-D evidence publish failed (camera_frame={camera_frame}, "
+                f"rgb_shape={None if rgb is None else rgb.shape}, "
+                f"depth_shape={None if depth is None else depth.shape}): {e}",
                 throttle_duration_sec=5.0,
             )
     
@@ -1393,6 +1598,29 @@ class Frontend(Node):
         msg = String()
         msg.data = json.dumps(status)
         self.pub_status.publish(msg)
+
+    def get_frontend_summary(self) -> dict:
+        """Return a structured summary of frontend state for inspection."""
+        return {
+            "anchors": int(self.anchor_manager.get_anchor_count()),
+            "last_keyframe_id": int(self._last_keyframe_id) if self._last_keyframe_id is not None else None,
+            "last_keyframe_stamp": float(self._last_keyframe_stamp) if self._last_keyframe_stamp is not None else None,
+            "enable_imu": bool(self.enable_imu),
+            "use_3d_pointcloud": bool(self.sensor_io.use_3d_pointcloud),
+            "publish_rgbd_evidence": bool(self.get_parameter("publish_rgbd_evidence").value),
+            "flow_counters": {
+                "imu_callback_count": int(self.sensor_io.imu_callback_count),
+                "imu_segment_published_count": int(self.sensor_io.imu_segment_published_count),
+            },
+            "rgbd_config": {
+                "min_depth_m": float(self.rgbd_min_depth_m),
+                "max_depth_m": float(self.rgbd_max_depth_m),
+                "grid_size_m": float(self.rgbd_spatial_grid_size),
+                "kappa_normal": float(self.rgbd_kappa_normal),
+                "color_variance": float(self.rgbd_color_variance),
+            },
+            "sensor_status": self.status_monitor.get_status_dict(),
+        }
 
 
 def main():

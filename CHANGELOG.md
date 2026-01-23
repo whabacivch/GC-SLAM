@@ -4,6 +4,35 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-23: Strict Failures, JAX SE(3), Determinism + Observability ✅
+
+### Summary
+
+Removed numerical fallbacks in core Gaussian/SE(3) paths, moved backend SE(3) ops to JAX wrappers, and improved determinism, configuration observability, and benefit tracking.
+
+### Changes
+
+- Strict Cholesky-only Gaussian ops (no pinv fallbacks) in backend fusion and factors.
+- Backend SE(3) operations now use JAX wrappers via `common/jax_utils.py`.
+- Deterministic RNG support added for birth and RGB-D subsampling (seeded).
+- Frontend drop paths now emit OpReports with explicit reasons.
+- Implemented information_weight in LoopFactor and added benefit tracking for loop, IMU, and module culling.
+- Added backend/frontend state summary helpers and startup parameter logging.
+- Launch file parameter overrides removed; config files now carry final values.
+
+## 2026-01-23: No Fallbacks / No Multi-Paths Policy ✅
+
+### Summary
+
+Added an explicit engineering invariant to prevent silent coexistence of multiple math/operator backends and environment-dependent fallbacks that make runtime behavior ambiguous.
+
+### Changes
+
+- `AGENTS.md`
+  - Added "No Fallbacks / No Multi-Paths (Required)" section with fail-fast + runtime-manifest requirements.
+  - Shortened and hardened the document to reduce ambiguity and enforce first-principles invariants in review.
+  - Fixed spec reference path for `Project_Implimentation_Guide.sty`.
+
 
 ## 2026-01-23: Prospector Lint Cleanup (Phases 1-4) ✅
 

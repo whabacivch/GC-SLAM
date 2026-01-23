@@ -32,7 +32,12 @@ from fl_slam_poc.frontend.scan.pointcloud_gpu import GPUPointCloudProcessor, is_
 from fl_slam_poc.backend.fusion.gaussian_geom import gaussian_frobenius_correction
 from fl_slam_poc.common.dirichlet_geom import third_order_correct
 from fl_slam_poc.common.op_report import OpReport
-from fl_slam_poc.common.geometry.se3_numpy import se3_compose, se3_inverse
+from fl_slam_poc.common.geometry.se3_numpy import (
+    rotmat_to_quat,
+    rotvec_to_rotmat,
+    se3_compose,
+    se3_inverse,
+)
 from fl_slam_poc.common.utils import vec_stats
 from fl_slam_poc.common import constants
 
@@ -357,7 +362,7 @@ class LoopProcessor:
             responsibility: Association responsibility
         
         Returns:
-            (rel_pose, cov_transported, final_weight)
+            (rel_pose, cov_transported, final_weight, info_weight)
         """
         # Compute information weight (exact formula)
         info_weight = icp_information_weight(
@@ -376,7 +381,7 @@ class LoopProcessor:
         # Transport covariance via Adjoint (exact SE(3) operation)
         cov_transported = transport_covariance_to_frame(cov, anchor_pose)
         
-        return icp_result.transform, cov_transported, final_weight
+        return icp_result.transform, cov_transported, final_weight, info_weight
     
     def apply_frobenius_correction(self, transform: np.ndarray) -> Tuple[np.ndarray, dict]:
         """
@@ -403,3 +408,12 @@ class LoopProcessor:
         Uses geometry.se3 (exact composition).
         """
         return se3_compose(se3_inverse(T_anchor), T_current)
+
+    @staticmethod
+    def rotvec_to_quaternion(rotvec: np.ndarray) -> tuple[float, float, float, float]:
+        """Convert rotation vector to quaternion (x, y, z, w)."""
+        rotvec = np.asarray(rotvec, dtype=float).reshape(-1)
+        if rotvec.shape[0] != 3:
+            raise ValueError(f"rotvec_to_quaternion: expected (3,), got {rotvec.shape}")
+        R = rotvec_to_rotmat(rotvec)
+        return rotmat_to_quat(R)

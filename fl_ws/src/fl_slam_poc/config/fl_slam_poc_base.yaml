@@ -1,5 +1,6 @@
 fl_frontend:
   ros__parameters:
+    use_sim_time: false
     scan_topic: "/scan"
     odom_topic: "/odom"
     odom_is_delta: false
@@ -20,10 +21,18 @@ fl_frontend:
     rgbd_sync_max_dt_sec: 0.1
     rgbd_min_depth_m: 0.1
     rgbd_max_depth_m: 10.0
+    rgbd_spatial_grid_size: 0.1
+    rgbd_kappa_normal: 10.0
+    rgbd_color_variance: 0.01
+    rgbd_alpha_mean: 1.0
+    rgbd_alpha_var: 0.1
+    rgbd_rng_seed: -1
     descriptor_bins: 60
     anchor_budget: 0
     loop_budget: 0
     anchor_id_offset: 0
+    anchor_create_max_points: 1000
+    depth_points_fallback_max_points: 1000
     icp_max_iter_prior: 15
     icp_tol_prior: 0.0001
     icp_prior_strength: 10.0
@@ -39,6 +48,7 @@ fl_frontend:
     birth_intensity: 10.0
     scan_period: 0.1
     base_component_weight: 1.0
+    birth_rng_seed: -1
     enable_imu: false
     imu_topic: "/livox/mid360/imu"
     imu_gyro_noise_density: 0.00017
@@ -47,11 +57,15 @@ fl_frontend:
     keyframe_translation_threshold: 0.5
     keyframe_rotation_threshold: 0.26
     gravity: [0.0, 0.0, -9.81]
+    imu_min_measurements_publish: 2
+    imu_min_measurements_warning: 10
+    imu_buffer_size_warning: 100
     odom_frame: "odom"
     base_frame: "base_link"
     camera_frame: "camera_link"
     scan_frame: "base_link"
     tf_timeout_sec: 0.05
+    status_publish_interval_sec: 1.0
     lidar_base_extrinsic: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     fr_distance_scale_prior: 1.0
     fr_scale_prior_strength: 5.0
@@ -72,6 +86,7 @@ fl_frontend:
 
 fl_backend:
   ros__parameters:
+    use_sim_time: false
     odom_frame: "odom"
     rgbd_evidence_topic: "/sim/rgbd_evidence"
     alignment_sigma_prior: 0.1
@@ -80,13 +95,15 @@ fl_backend:
     process_noise_trans_prior: 0.03
     process_noise_rot_prior: 0.015
     process_noise_prior_strength: 10.0
-    enable_imu_fusion: true
+    # NOTE: enable_imu_fusion removed - 15D state is always enabled
     imu_gyro_noise_density: 0.00017
     imu_accel_noise_density: 0.00019
     imu_gyro_random_walk: 1.0e-05
     imu_accel_random_walk: 1.0e-04
     gravity: [0.0, 0.0, -9.81]
     trajectory_export_path: "/tmp/fl_slam_trajectory.tum"
+    trajectory_path_max_length: 1000
+    status_check_period_sec: 5.0
     dense_association_radius: 0.5
     max_dense_modules: 10000
     dense_module_keep_fraction: 0.8
@@ -96,6 +113,7 @@ fl_backend:
 
 livox_converter:
   ros__parameters:
+    use_sim_time: false
     input_topic: "/livox/mid360/lidar"
     input_msg_type: "auto"
     output_topic: "/lidar/points"
@@ -103,6 +121,7 @@ livox_converter:
 
 image_decompress_cpp:
   ros__parameters:
+    use_sim_time: false
     rgb_compressed_topic: "/camera/color/image_raw/compressed"
     depth_compressed_topic: "/camera/aligned_depth_to_color/image_raw/compressedDepth"
     rgb_output_topic: "/camera/image_raw"
@@ -112,6 +131,7 @@ image_decompress_cpp:
 
 odom_bridge:
   ros__parameters:
+    use_sim_time: false
     input_topic: "/odom"
     output_topic: "/sim/odom"
     output_frame: "odom"

@@ -202,7 +202,7 @@ def add_dense_module(backend: "FLBackend", evidence: dict, weight: float = 1.0) 
 
 def cull_dense_modules(
     backend: "FLBackend",
-    keep_fraction: float = constants.DENSE_MODULE_KEEP_FRACTION,
+    keep_fraction: float,
 ) -> None:
     """
     Budgeted recomposition for dense module atlas by posterior mass.
@@ -217,7 +217,7 @@ def cull_dense_modules(
     if keep_fraction <= 0.0 or keep_fraction >= 1.0:
         from fl_slam_poc.backend.diagnostics import publish_report
         publish_report(backend, OpReport(
-            name="DenseModuleKeepFractionProjection",
+            name="DenseModuleKeepFractionInvalid",
             exact=True,
             family_in="DenseModuleAtlas",
             family_out="DenseModuleAtlas",
@@ -225,11 +225,13 @@ def cull_dense_modules(
             domain_projection=True,
             metrics={
                 "keep_fraction_in": float(keep_fraction),
-                "keep_fraction_proj": float(constants.DENSE_MODULE_KEEP_FRACTION),
+                "expected_range": "(0, 1)",
             },
-            notes="Keep fraction projected to declared prior.",
+            notes="Invalid keep_fraction for dense module culling; aborting.",
         ), backend.pub_report)
-        keep_fraction = float(constants.DENSE_MODULE_KEEP_FRACTION)
+        raise ValueError(
+            f"Dense module cull: keep_fraction must be in (0, 1), got {keep_fraction}"
+        )
 
     # Sort by posterior mass (model-intrinsic objective)
     sorted_mods = sorted(
@@ -278,6 +280,10 @@ def cull_dense_modules(
         del backend.dense_modules[mod_id]
 
     from fl_slam_poc.backend.diagnostics import publish_report
+    total_before = float(np.sum(alpha_before))
+    total_after = float(np.sum(alpha_corr))
+    expected_drop_fraction = 1.0 - float(keep_fraction)
+    realized_drop_fraction = float(len(remove_ids)) / float(len(sorted_mods))
     publish_report(backend, OpReport(
         name="DenseModuleBudgetedRecomposition",
         exact=False,
@@ -295,6 +301,10 @@ def cull_dense_modules(
             "dropped": len(remove_ids),
             "keep_fraction": keep_fraction,
             "dropped_mass": float(np.sum(alpha[keep_count:])),
+            "benefit_expected_drop_fraction": expected_drop_fraction,
+            "benefit_realized_drop_fraction": realized_drop_fraction,
+            "mass_total_before": total_before,
+            "mass_total_after": total_after,
         },
         notes="Budgeted recomposition by posterior mass (approximation with Frobenius correction).",
     ), backend.pub_report)

@@ -346,7 +346,9 @@ def transform_evidence_to_global(
 def subsample_evidence_spatially(
     evidence_list: List[Dict],
     grid_size: float = 0.1,
-    max_points: int = 5000
+    max_points: int = 5000,
+    rng: Optional[np.random.Generator] = None,
+    seed: Optional[int] = None,
 ) -> List[Dict]:
     """
     Spatially subsample evidence to reduce density.
@@ -382,7 +384,9 @@ def subsample_evidence_spatially(
     # Limit to max_points
     if len(unique_indices) > max_points:
         # Random sample
-        np.random.shuffle(unique_indices)
+        if rng is None:
+            rng = np.random.default_rng(seed)
+        rng.shuffle(unique_indices)
         unique_indices = unique_indices[:max_points]
     
     return [evidence_list[i] for i in unique_indices]

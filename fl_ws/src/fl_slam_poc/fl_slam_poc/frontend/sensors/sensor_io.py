@@ -27,7 +27,13 @@ from fl_slam_poc.common.constants import (
     QOS_DEPTH_SENSOR_HIGH_FREQ,
     QOS_DEPTH_SENSOR_MED_FREQ,
 )
-from fl_slam_poc.common.geometry.se3_numpy import quat_to_rotmat, se3_compose, rotmat_to_rotvec, rotvec_to_rotmat
+from fl_slam_poc.common.geometry.se3_numpy import (
+    quat_to_rotmat,
+    se3_compose,
+    se3_relative,
+    rotmat_to_rotvec,
+    rotvec_to_rotmat,
+)
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common.utils import stamp_to_sec
 
@@ -289,6 +295,14 @@ class SensorIO:
     def set_imu_callback(self, callback):
         """Set external callback for IMU processing."""
         self._imu_callback = callback
+
+    def compose_pose(self, pose_a: np.ndarray, pose_b: np.ndarray) -> np.ndarray:
+        """Compose two SE(3) poses using internal geometry utilities."""
+        return se3_compose(pose_a, pose_b)
+
+    def relative_pose(self, pose_a: np.ndarray, pose_b: np.ndarray) -> np.ndarray:
+        """Compute relative SE(3) pose using internal geometry utilities."""
+        return se3_relative(pose_a, pose_b)
     
     def _on_scan_internal(self, msg: LaserScan):
         """Internal scan handler - calls external callback if set."""
@@ -321,6 +335,10 @@ class SensorIO:
             points = pointcloud2_to_array(msg)
             
             if points.shape[0] == 0:
+                self.node.get_logger().debug(
+                    "PointCloud2: empty after conversion (no valid points)",
+                    throttle_duration_sec=5.0,
+                )
                 return
             
             # Debug: Log first point cloud received
@@ -720,6 +738,10 @@ class SensorIO:
     def _depth_to_points(self, depth: np.ndarray, header) -> Optional[np.ndarray]:
         """Convert depth image to 3D points in base_frame."""
         if self.depth_intrinsics is None:
+            self.node.get_logger().debug(
+                "Depth to points: depth_intrinsics not set, cannot convert depth to 3D points",
+                throttle_duration_sec=5.0,
+            )
             return None
         
         fx, fy, cx, cy = self.depth_intrinsics
@@ -732,6 +754,10 @@ class SensorIO:
         
         valid = np.isfinite(zs) & (zs > 0.0)
         if not np.any(valid):
+            self.node.get_logger().debug(
+                "Depth to points: no valid depth values (all NaN/Inf or zero)",
+                throttle_duration_sec=5.0,
+            )
             return None
         
         z = zs[valid]
@@ -743,6 +769,10 @@ class SensorIO:
         frame_id = header.frame_id or self.config.get("camera_frame", "camera_link")
         transform = self._lookup_transform(self.config["base_frame"], frame_id, header.stamp)
         if transform is None:
+            self.node.get_logger().debug(
+                f"Depth to points: transform lookup failed ({self.config['base_frame']} <- {frame_id})",
+                throttle_duration_sec=5.0,
+            )
             return None
         
         return self._transform_points(points_cam, transform)
@@ -751,6 +781,10 @@ class SensorIO:
         """Convert LaserScan to 3D points in base_frame."""
         ranges = np.asarray(msg.ranges, dtype=float).reshape(-1)
         if ranges.size == 0:
+            self.node.get_logger().debug(
+                "Scan to points: empty ranges array",
+                throttle_duration_sec=5.0,
+            )
             return None
         
         angles = msg.angle_min + np.arange(ranges.size, dtype=float) * msg.angle_increment
@@ -759,6 +793,10 @@ class SensorIO:
         valid &= (ranges <= float(msg.range_max))
         
         if not np.any(valid):
+            self.node.get_logger().debug(
+                "Scan to points: no valid ranges (all out of range or NaN/Inf)",
+                throttle_duration_sec=5.0,
+            )
             return None
         
         r = ranges[valid]
@@ -872,6 +910,10 @@ class SensorIO:
     def get_nearest_pose(self, stamp_sec: float) -> Tuple[Optional[np.ndarray], Optional[float]]:
         """Get pose nearest to timestamp. Returns (pose, dt)."""
         if not self.odom_buffer:
+            self.node.get_logger().debug(
+                "get_nearest_pose: odom_buffer empty",
+                throttle_duration_sec=10.0,
+            )
             return None, None
         closest = min(self.odom_buffer, key=lambda x: abs(x[0] - stamp_sec))
         return closest[1], float(stamp_sec - closest[0])
@@ -879,6 +921,10 @@ class SensorIO:
     def get_nearest_image(self, stamp_sec: float) -> Tuple[Optional[np.ndarray], Optional[float]]:
         """Get RGB image array nearest to timestamp. Returns (rgb_array, dt)."""
         if not self.image_buffer:
+            self.node.get_logger().debug(
+                "get_nearest_image: image_buffer empty",
+                throttle_duration_sec=10.0,
+            )
             return None, None
         closest = min(self.image_buffer, key=lambda x: abs(x[0] - stamp_sec))
         return closest[1], float(stamp_sec - closest[0])
@@ -886,6 +932,10 @@ class SensorIO:
     def get_nearest_depth(self, stamp_sec: float) -> Optional[Tuple[float, Optional[np.ndarray], Optional[np.ndarray], str]]:
         """Get depth data nearest to timestamp. Returns (timestamp, depth_array, points, frame_id)."""
         if not self.depth_buffer:
+            self.node.get_logger().debug(
+                "get_nearest_depth: depth_buffer empty",
+                throttle_duration_sec=10.0,
+            )
             return None
         return min(self.depth_buffer, key=lambda x: abs(x[0] - stamp_sec))
     
@@ -901,6 +951,10 @@ class SensorIO:
             (rgb_array, depth_array, dt) or (None, None, None) if no sync found
         """
         if not self.image_buffer or not self.depth_buffer:
+            self.node.get_logger().debug(
+                f"get_synchronized_rgbd: buffers empty (image={len(self.image_buffer)}, depth={len(self.depth_buffer)})",
+                throttle_duration_sec=10.0,
+            )
             return None, None, None, None
         
         # Find closest depth
@@ -914,6 +968,10 @@ class SensorIO:
         # Check sync quality
         dt_rgb_depth = abs(rgb_stamp - depth_stamp)
         if dt_rgb_depth > max_dt:
+            self.node.get_logger().debug(
+                f"get_synchronized_rgbd: sync failed (dt={dt_rgb_depth:.3f}s > max_dt={max_dt:.3f}s)",
+                throttle_duration_sec=10.0,
+            )
             return None, None, None, None
         
         dt = float(stamp_sec - depth_stamp)
@@ -930,6 +988,10 @@ class SensorIO:
             (points_array, dt, frame_id) or (None, None, None) if no data
         """
         if not self.pointcloud_buffer:
+            self.node.get_logger().debug(
+                "get_nearest_pointcloud: pointcloud_buffer empty",
+                throttle_duration_sec=10.0,
+            )
             return None, None, None
         closest = min(self.pointcloud_buffer, key=lambda x: abs(x[0] - stamp_sec))
         stamp, points, frame_id = closest
@@ -943,6 +1005,10 @@ class SensorIO:
             (points_array, timestamp, frame_id) or (None, None, None) if no data
         """
         if not self.pointcloud_buffer:
+            self.node.get_logger().debug(
+                "get_latest_pointcloud: pointcloud_buffer empty",
+                throttle_duration_sec=10.0,
+            )
             return None, None, None
         stamp, points, frame_id = self.pointcloud_buffer[-1]
         return points, stamp, frame_id

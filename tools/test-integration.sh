@@ -104,11 +104,12 @@ echo "=========================================="
 echo "Log: ${RUN_LOG}"
 echo ""
 # MVP integration test targets the M3DGR rosbag launch only.
+# NOTE: use_sim_time is now set in config/presets/m3dgr.yaml (true for rosbag playback).
+# All M3DGR-specific parameters are in the preset config; only bag path is needed.
 LAUNCH_FILE="poc_m3dgr_rosbag.launch.py"
 setsid timeout "${TIMEOUT_SEC}" ros2 launch fl_slam_poc "${LAUNCH_FILE}" \
   play_bag:=true \
   bag:="${BAG_PATH}" \
-  use_sim_time:=true \
   > >(tee "${RUN_LOG}") 2>&1 &
 LAUNCH_PID=$!
 echo "Waiting ${STARTUP_SEC}s for system startup..."

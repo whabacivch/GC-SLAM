@@ -33,6 +33,28 @@ def _as_vector(x: np.ndarray) -> np.ndarray:
     return x.reshape(-1)
 
 
+def _spd_solve(A: np.ndarray, b: np.ndarray, name: str) -> np.ndarray:
+    """Strict SPD solve via Cholesky (raises on failure)."""
+    A = np.asarray(A, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"{name}: expected square matrix, got {A.shape}")
+    if b.shape[0] != A.shape[0]:
+        raise ValueError(f"{name}: rhs shape {b.shape} incompatible with {A.shape}")
+    L_chol = np.linalg.cholesky(A)
+    y = np.linalg.solve(L_chol, b)
+    return np.linalg.solve(L_chol.T, y)
+
+
+def _spd_inv(A: np.ndarray, name: str) -> np.ndarray:
+    """Strict SPD inverse via Cholesky (raises on failure)."""
+    A = np.asarray(A, dtype=float)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"{name}: expected square matrix, got {A.shape}")
+    eye = np.eye(A.shape[0], dtype=A.dtype)
+    return _spd_solve(A, eye, name)
+
+
 def make_evidence(mean: np.ndarray, cov: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     Convert (mean, covariance) to information form (Lambda, eta).
@@ -53,17 +75,11 @@ def make_evidence(mean: np.ndarray, cov: np.ndarray) -> Tuple[np.ndarray, np.nda
     reg = np.eye(cov.shape[0], dtype=cov.dtype) * constants.COV_REGULARIZATION_MIN
     cov_reg = cov + reg
     
-    # Use Cholesky solve for stability
-    try:
-        L_chol = np.linalg.cholesky(cov_reg)
-        L = np.linalg.solve(L_chol, np.eye(cov.shape[0], dtype=cov.dtype))
-        L = L @ L.T  # Reconstruct precision matrix
-        h = np.linalg.solve(L_chol, mean.reshape(-1, 1)).reshape(-1)
-    except np.linalg.LinAlgError:
-        # Fallback to regularized pseudo-inverse
-        cov_reg = cov + np.eye(cov.shape[0], dtype=cov.dtype) * 1e-6
-        L = np.linalg.pinv(cov_reg)
-        h = (L @ mean.reshape(-1, 1)).reshape(-1)
+    # Use Cholesky solve for stability (strict)
+    L_chol = np.linalg.cholesky(cov_reg)
+    L = np.linalg.solve(L_chol, np.eye(cov.shape[0], dtype=cov.dtype))
+    L = L @ L.T  # Reconstruct precision matrix
+    h = np.linalg.solve(L_chol, mean.reshape(-1, 1)).reshape(-1)
     
     return L, h
 
@@ -114,18 +130,11 @@ def mean_cov(L: np.ndarray, h: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     reg = np.eye(L.shape[0], dtype=L.dtype) * constants.COV_REGULARIZATION_MIN
     L_reg = L + reg
     
-    # Use Cholesky solve for stability (more robust than direct inversion)
-    try:
-        # Try Cholesky decomposition
-        L_chol = np.linalg.cholesky(L_reg)
-        cov = np.linalg.solve(L_chol, np.eye(L.shape[0], dtype=L.dtype))
-        cov = cov @ cov.T  # Reconstruct from Cholesky factor
-        mean = np.linalg.solve(L_chol, h.reshape(-1, 1)).reshape(-1)
-    except np.linalg.LinAlgError:
-        # Fallback to regularized pseudo-inverse if Cholesky fails
-        L_reg = L + np.eye(L.shape[0], dtype=L.dtype) * 1e-6
-        cov = np.linalg.pinv(L_reg)
-        mean = (cov @ h.reshape(-1, 1)).reshape(-1)
+    # Use Cholesky solve for stability (strict)
+    L_chol = np.linalg.cholesky(L_reg)
+    cov = np.linalg.solve(L_chol, np.eye(L.shape[0], dtype=L.dtype))
+    cov = cov @ cov.T  # Reconstruct from Cholesky factor
+    mean = np.linalg.solve(L_chol, h.reshape(-1, 1)).reshape(-1)
     
     return mean, cov
 
@@ -191,7 +200,7 @@ def hellinger_distance(L1: np.ndarray, h1: np.ndarray,
     log_bc = 0.25 * logdet1 + 0.25 * logdet2 - 0.5 * logdet_avg
     
     diff = mu1 - mu2
-    cov_avg_inv = np.linalg.inv(cov_avg)
+    cov_avg_inv = _spd_inv(cov_avg, "hellinger_distance.cov_avg")
     log_bc -= 0.125 * float(diff @ cov_avg_inv @ diff)
     
     bc = np.exp(log_bc)
@@ -217,7 +226,7 @@ def bhattacharyya_coefficient(L1: np.ndarray, h1: np.ndarray,
     db = 0.5 * logdet_avg - 0.25 * (logdet1 + logdet2)
     
     diff = mu1 - mu2
-    cov_avg_inv = np.linalg.inv(cov_avg)
+    cov_avg_inv = _spd_inv(cov_avg, "bhattacharyya_coefficient.cov_avg")
     db += 0.125 * float(diff @ cov_avg_inv @ diff)
     
     return float(np.exp(-db))
@@ -300,31 +309,7 @@ def condition(L: np.ndarray, h: np.ndarray,
     return make_evidence(mu_cond, cov_cond)
 
 
-def product_of_experts(experts: list[Tuple[np.ndarray, np.ndarray]],
-                      weights: list[float] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Fuse multiple Gaussian experts (product-of-experts).
-    
-    In information form, PoE is simply additive:
-        θ_fused = Σᵢ wᵢ θᵢ
-    
-    This is EXACT and order-invariant.
-    """
-    if len(experts) == 0:
-        raise ValueError("Need at least one expert")
-    
-    if weights is None:
-        weights = [1.0] * len(experts)
-    
-    L_sum = np.zeros_like(experts[0][0])
-    h_sum = np.zeros_like(_as_vector(experts[0][1]))
-    
-    for (L, h), w in zip(experts, weights):
-        h = _as_vector(h)
-        L_sum += w * L
-        h_sum += w * h
-    
-    return L_sum, h_sum
+# NOTE: product_of_experts() removed - unused function
 
 
 def mixture_moment_match(
@@ -455,13 +440,8 @@ def hellinger_squared_from_moments(
     log_bc = 0.25 * logdet1 + 0.25 * logdet2 - 0.5 * logdet_avg
     
     diff = mu1 - mu2
-    try:
-        cov_avg_inv = np.linalg.inv(cov_avg)
-        mahal_sq = float(diff @ cov_avg_inv @ diff)
-    except np.linalg.LinAlgError:
-        # Fallback: use pseudoinverse
-        cov_avg_inv = np.linalg.pinv(cov_avg)
-        mahal_sq = float(diff @ cov_avg_inv @ diff)
+    cov_avg_inv = _spd_inv(cov_avg, "hellinger_squared_from_moments.cov_avg")
+    mahal_sq = float(diff @ cov_avg_inv @ diff)
     
     log_bc -= 0.125 * mahal_sq
     
@@ -541,12 +521,8 @@ def alpha_divergence(
     
     # Mahalanobis term
     diff = mu1 - mu2
-    try:
-        cov_alpha_inv = np.linalg.inv(cov_alpha)
-        mahal_sq = float(diff @ cov_alpha_inv @ diff)
-    except np.linalg.LinAlgError:
-        cov_alpha_inv = np.linalg.pinv(cov_alpha)
-        mahal_sq = float(diff @ cov_alpha_inv @ diff)
+    cov_alpha_inv = _spd_inv(cov_alpha, "alpha_divergence.cov_alpha")
+    mahal_sq = float(diff @ cov_alpha_inv @ diff)
     
     # α-divergence formula for Gaussians:
     # D_α = (1/(2α(1-α))) * (α(1-α)*mahal² + log_det_term)
@@ -703,12 +679,9 @@ def compute_odom_precision_from_covariance(
     if eigvals.min() < 1e-10:
         cov_clamped += np.eye(6) * (1e-10 - eigvals.min())
     
-    # Invert to get precision
-    try:
-        L_chol = np.linalg.cholesky(cov_clamped)
-        precision = np.linalg.solve(L_chol, np.eye(6))
-        precision = precision @ precision.T
-    except np.linalg.LinAlgError:
-        precision = np.linalg.pinv(cov_clamped)
+    # Invert to get precision (strict)
+    L_chol = np.linalg.cholesky(cov_clamped)
+    precision = np.linalg.solve(L_chol, np.eye(6))
+    precision = precision @ precision.T
     
     return precision

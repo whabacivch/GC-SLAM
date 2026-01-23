@@ -15,7 +15,7 @@ from fl_slam_poc.common.geometry.se3_jax import se3_compose as se3_compose_jax
 from fl_slam_poc.common.geometry.se3_jax import se3_exp as se3_exp_jax
 from fl_slam_poc.backend.math.imu_kernel import imu_batched_projection_kernel
 from fl_slam_poc.common import constants
-from fl_slam_poc.common.jax_init import jnp as jnp_core
+from fl_slam_poc.common.jax_utils import to_jax, to_numpy
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common.validation import (
     ContractViolation,
@@ -30,20 +30,12 @@ if TYPE_CHECKING:
     from fl_slam_poc.msg import IMUSegment
 
 
-def _to_jnp(x: np.ndarray) -> jnp_core.ndarray:
-    return jnp_core.asarray(x, dtype=jnp_core.float64)
-
-
-def _to_np(x: jnp_core.ndarray) -> np.ndarray:
-    return np.asarray(x, dtype=float)
-
-
 def _se3_compose(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    return _to_np(se3_compose_jax(_to_jnp(a), _to_jnp(b)))
+    return to_numpy(se3_compose_jax(to_jax(a), to_jax(b)))
 
 
 def _se3_exp(xi: np.ndarray) -> np.ndarray:
-    return _to_np(se3_exp_jax(_to_jnp(xi)))
+    return to_numpy(se3_exp_jax(to_jax(xi)))
 
 
 def estimate_preint_covariance(
@@ -75,9 +67,6 @@ def process_imu_segment(backend: "FLBackend", msg: "IMUSegment") -> None:
 
     This is the core of the Hellinger-Dirichlet IMU integration (Phase 2).
     """
-    if not backend.enable_imu_fusion:
-        return
-
     backend.imu_factor_count += 1
     backend.last_imu_time = time.time()
 
@@ -173,7 +162,9 @@ def process_imu_segment(backend: "FLBackend", msg: "IMUSegment") -> None:
             )
 
     except ContractViolation as e:
-        backend.get_logger().error(f"IMU segment contract violation: {e}")
+        backend.get_logger().error(
+            f"IMU segment contract violation (kf_i={keyframe_i}, kf_j={keyframe_j}): {e}"
+        )
         from fl_slam_poc.backend.diagnostics import publish_report
         publish_report(backend, OpReport(
             name="IMUSegmentContractViolation",
@@ -219,10 +210,10 @@ def process_imu_segment(backend: "FLBackend", msg: "IMUSegment") -> None:
                 notes="IMU segment buffer exceeded configured compute budget; segment retained.",
             ), backend.pub_report)
         backend.pending_imu_factors[keyframe_i].append(msg)
-        if backend.imu_factor_count <= 3:
-            backend.get_logger().info(
-                f"IMU segment buffered: kf_{keyframe_i} (anchors={len(backend.anchors)})"
-            )
+        backend.get_logger().info(
+            f"IMU segment buffered: kf_{keyframe_i} (anchors={len(backend.anchors)})",
+            throttle_duration_sec=10.0,
+        )
         from fl_slam_poc.backend.diagnostics import publish_report
         publish_report(backend, OpReport(
             name="IMUSegmentBuffered",
@@ -236,14 +227,11 @@ def process_imu_segment(backend: "FLBackend", msg: "IMUSegment") -> None:
         ), backend.pub_report)
         return
 
-    if backend.state_dim != constants.STATE_DIM_FULL:
-        # 6D state cannot use IMU segments (no velocity/bias)
-        return
-
     # =====================================================================
     # Get current state (15D)
     # =====================================================================
     mu_current, cov_current = mean_cov(backend.L, backend.h)
+    cov_trace_before = float(np.trace(cov_current))
 
     # =====================================================================
     # Build anchor data for batched processing
@@ -384,17 +372,11 @@ def process_imu_segment(backend: "FLBackend", msg: "IMUSegment") -> None:
     h_j = h_joint[15:]
 
     L_ii_reg = L_ii + np.eye(15, dtype=L_ii.dtype) * constants.COV_REGULARIZATION_MIN
-    try:
-        L_ii_chol = np.linalg.cholesky(L_ii_reg)
-        L_ii_inv_L_ij = np.linalg.solve(L_ii_chol, L_ij)
-        L_ii_inv_h_i = np.linalg.solve(L_ii_chol, h_i)
-        L_j = L_jj - L_ji @ L_ii_inv_L_ij
-        h_j = h_j - L_ji @ L_ii_inv_h_i
-    except np.linalg.LinAlgError:
-        L_ii_reg = L_ii + np.eye(15, dtype=L_ii.dtype) * 1e-6
-        L_ii_inv = np.linalg.pinv(L_ii_reg)
-        L_j = L_jj - L_ji @ L_ii_inv @ L_ij
-        h_j = h_j - L_ji @ L_ii_inv @ h_i
+    L_ii_chol = np.linalg.cholesky(L_ii_reg)
+    L_ii_inv_L_ij = np.linalg.solve(L_ii_chol, L_ij)
+    L_ii_inv_h_i = np.linalg.solve(L_ii_chol, h_i)
+    L_j = L_jj - L_ji @ L_ii_inv_L_ij
+    h_j = h_j - L_ji @ L_ii_inv_h_i
 
     delta_mu, delta_cov = mean_cov(L_j, h_j)
 
@@ -413,6 +395,7 @@ def process_imu_segment(backend: "FLBackend", msg: "IMUSegment") -> None:
     Q_bias[:3, :3] = np.eye(3) * (backend.imu_gyro_random_walk**2) * dt
     Q_bias[3:6, 3:6] = np.eye(3) * (backend.imu_accel_random_walk**2) * dt
     cov_new[9:15, 9:15] += Q_bias
+    cov_trace_after = float(np.trace(cov_new))
 
     # =====================================================================
     # Update state
@@ -490,6 +473,8 @@ def process_imu_segment(backend: "FLBackend", msg: "IMUSegment") -> None:
                 "routing_retention": routing_diag["retention"],
                 "routing_hellinger_shift": routing_diag["hellinger_shift"],
                 "routing_max_resp": max_resp,
+            "benefit_expected": float(diagnostics.get("ess") or 0.0),
+            "benefit_realized": cov_trace_before - cov_trace_after,
                 "bias_rw_cov_adaptive": False,
                 "bias_rw_cov_trace_gyro": 0.0,
                 "bias_rw_cov_trace_accel": 0.0,

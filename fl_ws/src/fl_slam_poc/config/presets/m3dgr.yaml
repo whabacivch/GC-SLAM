@@ -1,5 +1,6 @@
 fl_frontend:
   ros__parameters:
+    use_sim_time: true
     odom_is_delta: true
     odom_topic: "/sim/odom"
     odom_frame: "odom_combined"
@@ -27,13 +28,15 @@ fl_frontend:
 
 fl_backend:
   ros__parameters:
+    use_sim_time: true
     odom_frame: "odom_combined"
     rgbd_evidence_topic: "/sim/rgbd_evidence"
-    enable_imu_fusion: true
+    # NOTE: enable_imu_fusion removed - 15D state is always enabled
     gravity: [0.0, 0.0, -9.81]
 
 livox_converter:
   ros__parameters:
+    use_sim_time: true
     input_topic: "/livox/mid360/lidar"
     input_msg_type: "auto"
     output_topic: "/lidar/points"
@@ -41,6 +44,7 @@ livox_converter:
 
 image_decompress_cpp:
   ros__parameters:
+    use_sim_time: true
     rgb_compressed_topic: "/camera/color/image_raw/compressed"
     depth_compressed_topic: "/camera/aligned_depth_to_color/image_raw/compressedDepth"
     rgb_output_topic: "/camera/image_raw"
@@ -50,6 +54,7 @@ image_decompress_cpp:
 
 odom_bridge:
   ros__parameters:
+    use_sim_time: true
     input_topic: "/odom"
     output_topic: "/sim/odom"
     output_frame: "odom_combined"

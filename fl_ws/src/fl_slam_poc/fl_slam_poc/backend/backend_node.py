@@ -32,6 +32,7 @@ Observability:
 Reference: Barfoot (2017), Miyamoto et al. (2024), Combe (2022-2025)
 """
 
+import json
 import time
 from collections import deque
 from typing import Optional, Dict
@@ -48,7 +49,7 @@ from std_msgs.msg import String
 from visualization_msgs.msg import MarkerArray
 
 from fl_slam_poc.backend import TimeAlignmentModel, AdaptiveProcessNoise
-from fl_slam_poc.backend.fusion.gaussian_info import make_evidence
+from fl_slam_poc.backend.fusion.gaussian_info import make_evidence, mean_cov
 from fl_slam_poc.backend.factors.imu import process_imu_segment
 from fl_slam_poc.backend.factors.odom import process_odom
 from fl_slam_poc.backend.factors.loop import process_loop
@@ -77,9 +78,11 @@ class FLBackend(Node):
         super().__init__("fl_backend")
         self._declare_parameters()
         self.params = self._validate_params()
+        self._log_final_parameters()
         self._init_from_params()
 
     def _declare_parameters(self):
+        self.declare_parameter("use_sim_time", False)
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("rgbd_evidence_topic", "/sim/rgbd_evidence")
         
@@ -96,14 +99,16 @@ class FLBackend(Node):
         self.declare_parameter("process_noise_rot_prior", 0.015)
         self.declare_parameter("process_noise_prior_strength", 10.0)
         
-        # IMU Integration (15D state extension)
-        self.declare_parameter("enable_imu_fusion", True)
+        # IMU Integration (always 15D state)
+        # NOTE: enable_imu_fusion removed — 15D is the only path
         self.declare_parameter("imu_gyro_noise_density", constants.IMU_GYRO_NOISE_DENSITY_DEFAULT)
         self.declare_parameter("imu_accel_noise_density", constants.IMU_ACCEL_NOISE_DENSITY_DEFAULT)
         self.declare_parameter("imu_gyro_random_walk", constants.IMU_GYRO_RANDOM_WALK_DEFAULT)
         self.declare_parameter("imu_accel_random_walk", constants.IMU_ACCEL_RANDOM_WALK_DEFAULT)
         self.declare_parameter("gravity", list(constants.GRAVITY_DEFAULT))
         self.declare_parameter("trajectory_export_path", "/tmp/fl_slam_trajectory.tum")
+        self.declare_parameter("trajectory_path_max_length", constants.TRAJECTORY_PATH_MAX_LENGTH)
+        self.declare_parameter("status_check_period_sec", constants.STATUS_CHECK_PERIOD)
         self.declare_parameter("dense_association_radius", constants.DENSE_ASSOCIATION_RADIUS_DEFAULT)
         self.declare_parameter("max_dense_modules", constants.DENSE_MODULE_COMPUTE_BUDGET)
         self.declare_parameter("dense_module_keep_fraction", constants.DENSE_MODULE_KEEP_FRACTION)
@@ -114,18 +119,23 @@ class FLBackend(Node):
     def _validate_params(self) -> BackendParams:
         return validate_backend_params(self)
 
+    def _log_final_parameters(self) -> None:
+        """Log resolved parameters after precedence rules are applied."""
+        params_dict = self.params.model_dump()
+        self.get_logger().info(
+            f"Backend parameters (final): {json.dumps(params_dict, sort_keys=True)}"
+        )
+
     def _init_from_params(self):
         self.odom_frame = str(self.get_parameter("odom_frame").value)
         self.rgbd_evidence_topic = str(self.get_parameter("rgbd_evidence_topic").value)
 
-        # IMU fusion configuration (must be read before subscriptions)
-        enable_imu_param = self.get_parameter("enable_imu_fusion")
+        # IMU noise parameters (15D state is always enabled - no 6D path)
         gyro_noise_param = self.get_parameter("imu_gyro_noise_density")
         accel_noise_param = self.get_parameter("imu_accel_noise_density")
         gyro_walk_param = self.get_parameter("imu_gyro_random_walk")
         accel_walk_param = self.get_parameter("imu_accel_random_walk")
 
-        self.enable_imu_fusion = bool(enable_imu_param.value if enable_imu_param.value is not None else True)
         self.imu_gyro_noise_density = float(
             gyro_noise_param.value if gyro_noise_param.value is not None else constants.IMU_GYRO_NOISE_DENSITY_DEFAULT
         )
@@ -162,11 +172,10 @@ class FLBackend(Node):
         self.sub_anchor = self.create_subscription(AnchorCreate, anchor_topic, self.on_anchor_create, qos)
         self.sub_rgbd = self.create_subscription(String, self.rgbd_evidence_topic, self.on_rgbd_evidence, qos)
         
-        # IMU segment subscription (Phase 2: 15D state extension)
-        if self.enable_imu_fusion:
-            self.sub_imu_segment = self.create_subscription(
-                IMUSegment, imu_segment_topic, self.on_imu_segment, qos
-            )
+        # IMU segment subscription (15D state - always enabled)
+        self.sub_imu_segment = self.create_subscription(
+            IMUSegment, imu_segment_topic, self.on_imu_segment, qos
+        )
         
         # Store topic names for wiring banner
         self._topics = {
@@ -200,48 +209,39 @@ class FLBackend(Node):
             self.trajectory_file = open(self.trajectory_export_path, "w")
             self.trajectory_file.write("# timestamp x y z qx qy qz qw\n")
             self.get_logger().info(f"Exporting trajectory to: {self.trajectory_export_path}")
-        self.max_path_length = constants.TRAJECTORY_PATH_MAX_LENGTH
+        self.max_path_length = int(self.get_parameter("trajectory_path_max_length").value)
         
-        # State dimension: 15D when IMU enabled, 6D otherwise
-        self.state_dim = constants.STATE_DIM_FULL if self.enable_imu_fusion else constants.STATE_DIM_POSE
+        # State dimension: always 15D (no 6D pose-only path)
+        self.state_dim = constants.STATE_DIM_FULL
         
         # State belief in information form
         # 15D state: [p(3), R(3), v(3), b_g(3), b_a(3)]
-        if self.enable_imu_fusion:
-            mu0 = np.zeros(constants.STATE_DIM_FULL)
-            cov0_diag = np.concatenate([
-                np.array([constants.STATE_PRIOR_POSE_TRANS_STD**2] * 3),   # Position [0:3]
-                np.array([constants.STATE_PRIOR_POSE_ROT_STD**2] * 3),     # Rotation [3:6]
-                np.array([constants.STATE_PRIOR_VELOCITY_STD**2] * 3),     # Velocity [6:9]
-                np.array([constants.STATE_PRIOR_GYRO_BIAS_STD**2] * 3),    # Gyro bias [9:12]
-                np.array([constants.STATE_PRIOR_ACCEL_BIAS_STD**2] * 3),   # Accel bias [12:15]
-            ])
-            cov0 = np.diag(cov0_diag)
-            self.get_logger().info("Backend: 15D state enabled (pose + velocity + biases)")
-        else:
-            mu0 = np.zeros(6)
-            cov0 = np.diag([0.2**2, 0.2**2, 0.2**2, 0.1**2, 0.1**2, 0.1**2])
-            self.get_logger().info("Backend: 6D state (pose only, IMU fusion disabled)")
+        mu0 = np.zeros(constants.STATE_DIM_FULL)
+        cov0_diag = np.concatenate([
+            np.array([constants.STATE_PRIOR_POSE_TRANS_STD**2] * 3),   # Position [0:3]
+            np.array([constants.STATE_PRIOR_POSE_ROT_STD**2] * 3),     # Rotation [3:6]
+            np.array([constants.STATE_PRIOR_VELOCITY_STD**2] * 3),     # Velocity [6:9]
+            np.array([constants.STATE_PRIOR_GYRO_BIAS_STD**2] * 3),    # Gyro bias [9:12]
+            np.array([constants.STATE_PRIOR_ACCEL_BIAS_STD**2] * 3),   # Accel bias [12:15]
+        ])
+        cov0 = np.diag(cov0_diag)
+        self.get_logger().info("Backend: 15D state (pose + velocity + biases)")
         self.L, self.h = make_evidence(mu0, cov0)
 
-        # Adaptive process noise (matches state dimension)
+        # Adaptive process noise (15D state - no 6D path)
         trans_prior = float(self.get_parameter("process_noise_trans_prior").value)
         rot_prior = float(self.get_parameter("process_noise_rot_prior").value)
         noise_strength = float(self.get_parameter("process_noise_prior_strength").value)
         
-        if self.enable_imu_fusion:
-            # 15D process noise: pose + velocity + bias random walks
-            prior_diag = np.concatenate([
-                np.array([trans_prior**2] * 3),                            # Position
-                np.array([rot_prior**2] * 3),                              # Rotation
-                np.array([constants.PROCESS_NOISE_VELOCITY_STD**2] * 3),   # Velocity
-                np.array([constants.PROCESS_NOISE_GYRO_BIAS_STD**2] * 3),  # Gyro bias
-                np.array([constants.PROCESS_NOISE_ACCEL_BIAS_STD**2] * 3), # Accel bias
-            ])
-            self.process_noise = AdaptiveProcessNoise.create(constants.STATE_DIM_FULL, prior_diag, noise_strength)
-        else:
-            prior_diag = np.array([trans_prior**2] * 3 + [rot_prior**2] * 3)
-            self.process_noise = AdaptiveProcessNoise.create(6, prior_diag, noise_strength)
+        # 15D process noise: pose + velocity + bias random walks
+        prior_diag = np.concatenate([
+            np.array([trans_prior**2] * 3),                            # Position
+            np.array([rot_prior**2] * 3),                              # Rotation
+            np.array([constants.PROCESS_NOISE_VELOCITY_STD**2] * 3),   # Velocity
+            np.array([constants.PROCESS_NOISE_GYRO_BIAS_STD**2] * 3),  # Gyro bias
+            np.array([constants.PROCESS_NOISE_ACCEL_BIAS_STD**2] * 3), # Accel bias
+        ])
+        self.process_noise = AdaptiveProcessNoise.create(constants.STATE_DIM_FULL, prior_diag, noise_strength)
 
         # Timestamp alignment
         align_sigma = float(self.get_parameter("alignment_sigma_prior").value)
@@ -291,7 +291,7 @@ class FLBackend(Node):
         self.last_odom_stamp: Optional[float] = None  # Odometry message timestamp for trajectory export
         self._last_odom_key: Optional[tuple] = None  # For duplicate detection
         self.node_start_time = time.time()
-        self.status_period = 5.0
+        self.status_period = float(self.get_parameter("status_check_period_sec").value)
         self.warned_no_loops = False
         
         # Keyframe to anchor mapping (for IMU segment fusion)
@@ -314,15 +314,13 @@ class FLBackend(Node):
         logger.info("=" * 60)
         logger.info("BACKEND WIRING BANNER")
         logger.info("=" * 60)
-        logger.info(f"State dimension: {self.state_dim}D")
-        logger.info(f"IMU fusion: {'ENABLED' if self.enable_imu_fusion else 'DISABLED'}")
+        logger.info(f"State dimension: {self.state_dim}D (15D state - pose + velocity + biases)")
         logger.info("")
         logger.info("Subscriptions:")
         logger.info(f"  {self._topics['odom']} (nav_msgs/Odometry) QoS: RELIABLE")
         logger.info(f"  {self._topics['loop_factor']} (fl_slam_poc/LoopFactor) QoS: RELIABLE")
         logger.info(f"  {self._topics['anchor_create']} (fl_slam_poc/AnchorCreate) QoS: RELIABLE")
-        if self.enable_imu_fusion:
-            logger.info(f"  {self._topics['imu_segment']} (fl_slam_poc/IMUSegment) QoS: RELIABLE")
+        logger.info(f"  {self._topics['imu_segment']} (fl_slam_poc/IMUSegment) QoS: RELIABLE")
         logger.info(f"  {self._topics['rgbd_evidence']} (std_msgs/String) QoS: RELIABLE")
         logger.info("")
         logger.info("Publications:")
@@ -334,18 +332,13 @@ class FLBackend(Node):
         logger.info("  /cdwm/markers (visualization_msgs/MarkerArray)")
         logger.info("  /cdwm/loop_markers (visualization_msgs/MarkerArray)")
         logger.info("")
-        logger.info("Features Enabled:")
-        logger.info(f"  enable_imu_fusion: {self.enable_imu_fusion}")
-        logger.info(f"  state_dim: {self.state_dim}")
-        logger.info("")
         logger.info("Status monitoring: Will report DEAD_RECKONING if no loop factors")
         logger.info("  Check /cdwm/backend_status for real-time status")
         logger.info("=" * 60)
 
-        if self.enable_imu_fusion:
-            # Early GPU availability check - fail fast at startup
-            check_gpu_availability(self)
-            warmup_imu_kernel(self, self.gravity.tolist())
+        # Early GPU availability check - fail fast at startup
+        check_gpu_availability(self)
+        warmup_imu_kernel(self, self.gravity.tolist())
 
     def on_odom(self, msg: Odometry):
         process_odom(self, msg)
@@ -361,16 +354,10 @@ class FLBackend(Node):
         Payload schema:
           {"evidence": [ {position_L, position_h, color_L, color_h, normal_theta, alpha_mean, alpha_var}, ... ]}
         """
-        try:
-            evidence_list = parse_rgbd_evidence(msg.data)
-            if len(evidence_list) == 0:
-                return
-            process_rgbd_evidence(self, evidence_list)
-        except Exception as e:
-            self.get_logger().warn(
-                f"RGB-D evidence parse/update failed: {e}",
-                throttle_duration_sec=5.0,
-            )
+        evidence_list = parse_rgbd_evidence(msg.data)
+        if len(evidence_list) == 0:
+            return
+        process_rgbd_evidence(self, evidence_list)
 
     def on_loop(self, msg: LoopFactor):
         process_loop(self, msg)
@@ -404,6 +391,26 @@ class FLBackend(Node):
             self.trajectory_file, self.last_odom_stamp,
         )
 
+    def get_state_summary(self) -> dict:
+        """Return a structured summary of backend state for inspection."""
+        mu, cov = mean_cov(self.L, self.h)
+        return {
+            "state_dim": int(self.state_dim),
+            "odom_count": int(self.odom_count),
+            "loop_factor_count": int(self.loop_factor_count),
+            "imu_factor_count": int(self.imu_factor_count),
+            "anchor_count": int(len(self.anchors)),
+            "dense_module_count": int(len(self.dense_modules)),
+            "sparse_anchor_count": int(len(self.sparse_anchors)),
+            "pending_loop_factors": int(sum(len(v) for v in self.pending_loop_factors.values())),
+            "pending_imu_factors": int(sum(len(v) for v in self.pending_imu_factors.values())),
+            "last_odom_time": float(self.last_odom_time) if self.last_odom_time is not None else None,
+            "last_loop_time": float(self.last_loop_time) if self.last_loop_time is not None else None,
+            "last_imu_time": float(self.last_imu_time) if self.last_imu_time is not None else None,
+            "last_odom_stamp": float(self.last_odom_stamp) if self.last_odom_stamp is not None else None,
+            "mean_head": mu[:6].tolist(),
+            "cov_trace": float(np.trace(cov)),
+        }
     
     def destroy_node(self):
         """Clean up trajectory file and process post-rosbag queue on shutdown."""
@@ -413,20 +420,14 @@ class FLBackend(Node):
                 f"Processing {len(self.post_rosbag_odom_queue)} queued odom messages on shutdown"
             )
             for odom_msg in self.post_rosbag_odom_queue:
-                try:
-                    self.on_odom(odom_msg)
-                except Exception as e:
-                    self.get_logger().warn(f"Error processing queued odom: {e}")
+                self.on_odom(odom_msg)
         
         if hasattr(self, 'post_rosbag_imu_queue') and len(self.post_rosbag_imu_queue) > 0:
             self.get_logger().info(
                 f"Processing {len(self.post_rosbag_imu_queue)} queued IMU segments on shutdown"
             )
             for imu_msg in self.post_rosbag_imu_queue:
-                try:
-                    self.on_imu_segment(imu_msg)
-                except Exception as e:
-                    self.get_logger().warn(f"Error processing queued IMU segment: {e}")
+                self.on_imu_segment(imu_msg)
         
         # Flush and close trajectory file
         if self.trajectory_file:

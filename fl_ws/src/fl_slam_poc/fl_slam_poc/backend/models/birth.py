@@ -23,7 +23,7 @@ This makes anchor creation probabilistic, avoiding hard thresholds.
 """
 
 import math
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -48,15 +48,17 @@ class StochasticBirthModel:
     - If entropy is too low (over-confident) → decrease scale → fewer births
     - This replaces fixed birth_intensity with uncertainty-driven behavior
     """
-    def __init__(self, base_intensity: float, time_step: float):
+    def __init__(self, base_intensity: float, time_step: float, rng_seed: Optional[int] = None):
         """
         Args:
             base_intensity: λ₀, base birth rate prior (higher = more anchors)
             time_step: dt, time between observations (e.g., scan period)
+            rng_seed: Optional RNG seed for deterministic behavior
         """
         self.base_intensity = float(base_intensity)
         self.time_step = float(time_step)
-        self.rng = np.random.default_rng()
+        self.rng_seed = rng_seed
+        self.rng = np.random.default_rng(rng_seed)
         
         # Adaptive concentration state
         self.concentration_scale = 1.0  # Start at neutral scale
@@ -151,5 +153,6 @@ class StochasticBirthModel:
             "effective_intensity": self.effective_intensity,
             "recent_entropy": self._entropy_history[-1] if self._entropy_history else 0.0,
             "avg_entropy": float(np.mean(self._entropy_history)) if self._entropy_history else 0.0,
+            "rng_seed": self.rng_seed,
         }
 
