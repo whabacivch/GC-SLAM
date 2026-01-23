@@ -4,6 +4,70 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-22: α-Divergence Trust-Scaled Fusion for Loop Closures ✅
+
+### Summary
+
+Implemented information-geometric trust region for loop closure fusion using α-divergence and power posteriors. This replaces the naive product-of-experts approach with a principled method that prevents catastrophic jumps from high-divergence updates while preserving conjugacy and associativity.
+
+### Key Insight
+
+Loop closures can propose large state changes when drift has accumulated. Naive product-of-experts fusion (`L_post = L_prior + L_factor`) applies the full update regardless of how much it disagrees with the prior. This can cause trajectory oscillation and instability.
+
+**Solution: Power Posterior / Tempered Likelihood**
+
+Instead of full fusion, we compute:
+```
+L_post = L_prior + β × L_factor
+h_post = h_prior + β × h_factor
+```
+
+Where β ∈ [0, 1] is computed from the α-divergence:
+```
+β = exp(-D_α(full_posterior || prior) / max_divergence)
+```
+
+This gives smooth scaling:
+- High divergence (factor disagrees strongly with prior) → β → 0 (minimal update)
+- Low divergence (factor agrees with prior) → β → 1 (full update)
+
+### Why α-Divergence (not KL)?
+
+- **α = 0.5** gives symmetric divergence: penalizes both over-updating and under-updating equally
+- Closed-form for Gaussians (no sampling needed)
+- Generalizes KL (α→1 is forward KL, α→0 is reverse KL)
+- Related to Hellinger distance (√2 × H² at α=0.5)
+
+### Properties Preserved
+
+- **Stays in Gaussian family**: Power posterior is still Gaussian (no mixture reduction)
+- **Conjugacy**: Prior × tempered_likelihood = posterior in same family
+- **Associativity**: Scaling is linear in information parameters
+- **No heuristic gating**: β is continuous, not accept/reject
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/gaussian_info.py`
+  - Added `alpha_divergence()`: Closed-form α-divergence for Gaussians
+  - Added `trust_scaled_fusion()`: Power posterior fusion with trust region
+  - Added `compute_odom_precision_from_covariance()`: Precision from odom covariance
+  - Added constants: `ALPHA_DIVERGENCE_DEFAULT = 0.5`, `MAX_ALPHA_DIVERGENCE_PRIOR = 1.0`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
+  - Loop closure fusion now uses `trust_scaled_fusion()` instead of `_gaussian_product()`
+  - OpReport includes trust diagnostics: `trust_beta_*`, `trust_divergence_full_*`, `trust_quality_*`
+  - Fixed OpReport metrics: added missing adaptive bias keys, use 0.0 instead of None for fallbacks
+
+### Design Rationale
+
+From the Self-Adaptive Systems Guide: "Approximate operators must return (result, certificate, expected_effect). Downstream may scale influence by certificate quality, but may not branch (no accept/reject)."
+
+The trust-scaled fusion satisfies this:
+- **result**: The tempered posterior (L_post, h_post)
+- **certificate**: β (the tempering coefficient)
+- **expected_effect**: divergence_actual (how much the state changed)
+
+No branching occurs—just continuous scaling by certificate quality.
+
 ## 2026-01-22: IMU Diagnostics + Adaptive Bias Noise ✅
 
 ### Summary
