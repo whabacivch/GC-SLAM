@@ -1,23 +1,18 @@
 """
 Golden Child SLAM v2 Backend Node.
 
-Implements the branch-free, fixed-cost, local-chart SLAM backend
-per docs/GOLDEN_CHILD_INTERFACE_SPEC.md.
-
-Key features:
-- All operators are total functions (no branching)
-- Continuous influence scalars (no hard thresholds)
-- Certificate audit trail for all operations
-- RuntimeManifest published at startup
-- IMU integration for accurate state estimation
+Actually uses the GC operators to process LiDAR scans.
+This is NOT passthrough - it runs the full 14-step pipeline.
 
 Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
 """
 
 import json
+import struct
 import time
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
+import numpy as np
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
@@ -26,7 +21,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 import tf2_ros
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry, Path
-from sensor_msgs.msg import PointCloud2, Imu
+from sensor_msgs.msg import PointCloud2, Imu, PointField
 from std_msgs.msg import String
 
 from fl_slam_poc.common.jax_init import jax, jnp
@@ -34,7 +29,6 @@ from fl_slam_poc.common import constants
 from fl_slam_poc.common.belief import (
     BeliefGaussianInfo,
     D_Z,
-    CHART_ID_GC_RIGHT_01,
     se3_identity,
     se3_from_rotvec_trans,
     se3_to_rotvec_trans,
@@ -43,44 +37,93 @@ from fl_slam_poc.common.certificates import CertBundle
 from fl_slam_poc.backend.pipeline import (
     PipelineConfig,
     RuntimeManifest,
+    process_scan_single_hypothesis,
+    process_hypotheses,
+    ScanPipelineResult,
 )
 from fl_slam_poc.backend.operators.predict import (
     predict_diffusion,
     build_default_process_noise,
 )
 from fl_slam_poc.backend.structures.bin_atlas import (
+    BinAtlas,
+    MapBinStats,
     create_fibonacci_atlas,
     create_empty_map_stats,
     apply_forgetting,
+    update_map_stats,
 )
 
-# Scipy for quaternion conversion
 from scipy.spatial.transform import Rotation
+
+
+def parse_pointcloud2(msg: PointCloud2) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Parse PointCloud2 message to extract xyz points.
+    
+    Returns:
+        points: (N, 3) array of xyz coordinates
+        timestamps: (N,) array of per-point timestamps (or zeros if unavailable)
+    """
+    # Find field offsets
+    field_map = {f.name: (f.offset, f.datatype) for f in msg.fields}
+    
+    if 'x' not in field_map or 'y' not in field_map or 'z' not in field_map:
+        return jnp.zeros((0, 3)), jnp.zeros(0)
+    
+    x_off, x_type = field_map['x']
+    y_off, y_type = field_map['y']
+    z_off, z_type = field_map['z']
+    
+    point_step = msg.point_step
+    n_points = msg.width * msg.height
+    data = msg.data
+    
+    # Extract points
+    points = []
+    for i in range(n_points):
+        base = i * point_step
+        x = struct.unpack_from('<f', data, base + x_off)[0]
+        y = struct.unpack_from('<f', data, base + y_off)[0]
+        z = struct.unpack_from('<f', data, base + z_off)[0]
+        
+        # Filter invalid points
+        if np.isfinite(x) and np.isfinite(y) and np.isfinite(z):
+            # Filter by range (skip points too close or too far)
+            dist = np.sqrt(x*x + y*y + z*z)
+            if 0.5 < dist < 50.0:
+                points.append([x, y, z])
+    
+    if len(points) == 0:
+        return jnp.zeros((0, 3)), jnp.zeros(0)
+    
+    points_arr = jnp.array(points, dtype=jnp.float64)
+    timestamps = jnp.zeros(len(points), dtype=jnp.float64)
+    
+    return points_arr, timestamps
 
 
 class GoldenChildBackend(Node):
     """
     Golden Child SLAM v2 Backend.
     
-    Implements the full 15-step pipeline per spec Section 7.
+    Actually runs the 14-step pipeline on each LiDAR scan.
     """
 
     def __init__(self):
         super().__init__("gc_backend")
         
-        # Declare parameters
         self._declare_parameters()
-        
-        # Initialize state
         self._init_state()
-        
-        # Set up ROS interfaces
         self._init_ros()
-        
-        # Publish RuntimeManifest at startup (spec Section 6 requirement)
         self._publish_runtime_manifest()
         
-        self.get_logger().info("Golden Child SLAM v2 Backend initialized")
+        # JIT warm-up: compile pipeline functions before data arrives
+        self.get_logger().info("JIT warm-up starting...")
+        self._jit_warmup()
+        self.get_logger().info("JIT warm-up complete")
+        
+        self.get_logger().info("Golden Child SLAM v2 Backend initialized - PIPELINE ENABLED")
 
     def _declare_parameters(self):
         """Declare ROS parameters."""
@@ -98,19 +141,19 @@ class GoldenChildBackend(Node):
         # Pipeline configuration
         self.config = PipelineConfig()
         
-        # Process noise matrix
+        # Process noise matrix (22x22 for full state)
         self.Q = build_default_process_noise()
         
-        # Bin atlas
+        # Bin atlas for directional binning
         self.bin_atlas = create_fibonacci_atlas(self.config.B_BINS)
         
-        # Map statistics (with forgetting)
+        # Map statistics (accumulates over time with forgetting)
         self.map_stats = create_empty_map_stats(self.config.B_BINS)
         self.forgetting_factor = float(self.get_parameter("forgetting_factor").value)
         
-        # Initialize K_HYP hypotheses with identity prior
+        # Initialize hypotheses with identity prior
         self.hypotheses: List[BeliefGaussianInfo] = []
-        self.weights = jnp.ones(self.config.K_HYP) / self.config.K_HYP
+        self.hyp_weights = jnp.ones(self.config.K_HYP) / self.config.K_HYP
         
         for i in range(self.config.K_HYP):
             belief = BeliefGaussianInfo.create_identity_prior(
@@ -120,30 +163,33 @@ class GoldenChildBackend(Node):
             )
             self.hypotheses.append(belief)
         
-        # Current published pose (6D: [trans, rotvec])
-        self.current_pose = se3_identity()
-        self.last_stamp_sec = 0.0
+        # Current best estimate from hypotheses
+        self.current_belief: Optional[BeliefGaussianInfo] = self.hypotheses[0]
         
-        # IMU state
-        self.imu_count = 0
-        self.last_imu_stamp = 0.0
-        self.gyro_bias = jnp.zeros(3)
-        self.accel_bias = jnp.zeros(3)
+        # Odometry for initial guess / prediction
+        self.last_odom_pose = None
+        self.last_odom_stamp = 0.0
+        
+        # IMU buffer for high-rate prediction
+        self.imu_buffer: List[Tuple[float, jnp.ndarray, jnp.ndarray]] = []
+        self.max_imu_buffer = 200
         
         # Tracking
+        self.imu_count = 0
         self.odom_count = 0
         self.scan_count = 0
+        self.pipeline_runs = 0
+        self.last_scan_stamp = 0.0
         self.node_start_time = time.time()
         
-        # Certificate history for debugging
+        # Certificate history
         self.cert_history: List[CertBundle] = []
 
     def _init_ros(self):
-        """Initialize ROS subscriptions and publishers."""
+        """Initialize ROS interfaces."""
         self.odom_frame = str(self.get_parameter("odom_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
         
-        # QoS for sensor data
         qos_sensor = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -151,7 +197,6 @@ class GoldenChildBackend(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         
-        # QoS for reliable topics (odom)
         qos_reliable = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
@@ -159,7 +204,6 @@ class GoldenChildBackend(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         
-        # Subscriptions
         lidar_topic = str(self.get_parameter("lidar_topic").value)
         odom_topic = str(self.get_parameter("odom_topic").value)
         imu_topic = str(self.get_parameter("imu_topic").value)
@@ -174,10 +218,9 @@ class GoldenChildBackend(Node):
             Imu, imu_topic, self.on_imu, qos_sensor
         )
         
-        # Log subscriptions
-        self.get_logger().info(f"Subscribing to LiDAR: {lidar_topic}")
-        self.get_logger().info(f"Subscribing to Odom: {odom_topic}")
-        self.get_logger().info(f"Subscribing to IMU: {imu_topic}")
+        self.get_logger().info(f"LiDAR: {lidar_topic} (PIPELINE ACTIVE)")
+        self.get_logger().info(f"Odom: {odom_topic}")
+        self.get_logger().info(f"IMU: {imu_topic}")
         
         # Publishers
         self.pub_state = self.create_publisher(Odometry, "/gc/state", 10)
@@ -186,7 +229,6 @@ class GoldenChildBackend(Node):
         self.pub_cert = self.create_publisher(String, "/gc/certificate", 10)
         self.pub_status = self.create_publisher(String, "/gc/status", 10)
         
-        # TF broadcaster
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         
         # Trajectory export
@@ -195,9 +237,7 @@ class GoldenChildBackend(Node):
         if self.trajectory_export_path:
             self.trajectory_file = open(self.trajectory_export_path, "w")
             self.trajectory_file.write("# timestamp x y z qx qy qz qw\n")
-            self.get_logger().info(f"Exporting trajectory to: {self.trajectory_export_path}")
         
-        # Trajectory path for visualization
         self.trajectory_poses: List[PoseStamped] = []
         self.max_path_length = 1000
         
@@ -208,16 +248,51 @@ class GoldenChildBackend(Node):
             status_period, self._publish_status, clock=self._status_clock
         )
 
-    def _publish_runtime_manifest(self):
+    def _jit_warmup(self):
         """
-        Publish RuntimeManifest at startup (spec Section 6 requirement).
+        Warm up JAX JIT compilation by running a dummy scan.
         
-        Nodes must publish/log this so we know what constants are in use.
+        This ensures the pipeline is compiled before real data arrives,
+        preventing message drops due to slow first-call compilation.
         """
+        # Create dummy points (small batch)
+        dummy_points = jnp.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0],
+        ] * 20, dtype=jnp.float64)  # 100 points
+        
+        dummy_timestamps = jnp.zeros(dummy_points.shape[0], dtype=jnp.float64)
+        dummy_weights = jnp.ones(dummy_points.shape[0], dtype=jnp.float64)
+        
+        # Run pipeline once to trigger JIT compilation
+        try:
+            result = process_scan_single_hypothesis(
+                belief_prev=self.hypotheses[0],
+                raw_points=dummy_points,
+                raw_timestamps=dummy_timestamps,
+                raw_weights=dummy_weights,
+                scan_start_time=0.0,
+                scan_end_time=0.1,
+                dt_sec=0.1,
+                Q=self.Q,
+                bin_atlas=self.bin_atlas,
+                map_stats=self.map_stats,
+                config=self.config,
+            )
+            self.get_logger().info(f"  Warm-up scan processed, cert count: {len(result.all_certs)}")
+        except Exception as e:
+            self.get_logger().error(f"  Warm-up failed: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+
+    def _publish_runtime_manifest(self):
+        """Publish RuntimeManifest at startup."""
         manifest = RuntimeManifest()
         manifest_dict = manifest.to_dict()
         
-        # Log manifest
         self.get_logger().info("=" * 60)
         self.get_logger().info("GOLDEN CHILD RUNTIME MANIFEST")
         self.get_logger().info("=" * 60)
@@ -225,27 +300,16 @@ class GoldenChildBackend(Node):
             self.get_logger().info(f"  {key}: {value}")
         self.get_logger().info("=" * 60)
         
-        # Publish manifest
         msg = String()
         msg.data = json.dumps(manifest_dict)
         self.pub_manifest.publish(msg)
 
     def on_imu(self, msg: Imu):
-        """
-        Process IMU message.
-        
-        IMU data is critical for:
-        - High-frequency attitude estimation
-        - Bias estimation
-        - Motion prediction between LiDAR scans
-        """
+        """Buffer IMU measurements for prediction."""
         self.imu_count += 1
         
-        # Extract timestamp
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        dt = stamp_sec - self.last_imu_stamp if self.last_imu_stamp > 0 else 0.005
         
-        # Extract IMU measurements
         gyro = jnp.array([
             msg.angular_velocity.x,
             msg.angular_velocity.y,
@@ -258,75 +322,119 @@ class GoldenChildBackend(Node):
             msg.linear_acceleration.z,
         ], dtype=jnp.float64)
         
-        # Bias-corrected measurements
-        gyro_corrected = gyro - self.gyro_bias
-        accel_corrected = accel - self.accel_bias
+        self.imu_buffer.append((stamp_sec, gyro, accel))
         
-        # TODO: Integrate IMU into belief state
-        # For now, just track that we're receiving IMU data
-        
-        self.last_imu_stamp = stamp_sec
+        # Keep buffer bounded
+        if len(self.imu_buffer) > self.max_imu_buffer:
+            self.imu_buffer.pop(0)
 
     def on_odom(self, msg: Odometry):
-        """
-        Process odometry message.
-        
-        Uses odometry for pose estimation.
-        """
+        """Store latest odometry for delta computation."""
         self.odom_count += 1
         
-        # Extract timestamp
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        
-        # Extract pose from odometry message
         pos = msg.pose.pose.position
         ori = msg.pose.pose.orientation
         
-        # Convert quaternion to rotation vector
         quat = [ori.x, ori.y, ori.z, ori.w]
         R = Rotation.from_quat(quat)
         rotvec = R.as_rotvec()
         
-        # Update current pose as 6D: [trans, rotvec]
-        self.current_pose = se3_from_rotvec_trans(
+        self.last_odom_pose = se3_from_rotvec_trans(
             jnp.array(rotvec, dtype=jnp.float64),
             jnp.array([pos.x, pos.y, pos.z], dtype=jnp.float64)
         )
-        
-        self.last_stamp_sec = stamp_sec
-        
-        # Publish state
-        self._publish_state(stamp_sec)
+        self.last_odom_stamp = stamp_sec
 
     def on_lidar(self, msg: PointCloud2):
         """
-        Process LiDAR point cloud.
+        Process LiDAR scan through the full GC pipeline.
         
-        This triggers the full 15-step pipeline.
+        This is where the actual SLAM happens!
         """
         self.scan_count += 1
-        
-        # Extract timestamp
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         
-        # TODO: Implement full LiDAR processing pipeline
-        # For now, just track scan count
+        # Parse point cloud
+        points, timestamps = parse_pointcloud2(msg)
+        n_points = points.shape[0]
         
-        # Apply forgetting to map stats (spec requirement)
+        if n_points < 100:
+            if self.scan_count <= 10:
+                self.get_logger().warn(f"Scan {self.scan_count}: only {n_points} points, skipping")
+            return
+        
+        # Compute dt since last scan
+        dt_sec = stamp_sec - self.last_scan_stamp if self.last_scan_stamp > 0 else 0.1
+        dt_sec = max(0.01, min(dt_sec, 1.0))  # Clamp to reasonable range
+        self.last_scan_stamp = stamp_sec
+        
+        # Create weights (uniform for now)
+        weights = jnp.ones(n_points, dtype=jnp.float64)
+        
+        # Apply forgetting to map stats
         self.map_stats = apply_forgetting(self.map_stats, self.forgetting_factor)
         
-        # Log scan received
-        if self.scan_count <= 10 or self.scan_count % 100 == 0:
-            self.get_logger().info(f"Scan {self.scan_count} received at t={stamp_sec:.3f}")
-
-    def _publish_state(self, stamp_sec: float):
-        """Publish current state estimate."""
-        # Convert 6D pose to position and quaternion
-        rotvec, trans = se3_to_rotvec_trans(self.current_pose)
-        R = Rotation.from_rotvec(rotvec.tolist())
-        quat = R.as_quat()  # [x, y, z, w]
+        # Run pipeline for each hypothesis
+        results: List[ScanPipelineResult] = []
         
-        # Publish Odometry message
+        try:
+            for i, belief in enumerate(self.hypotheses):
+                result = process_scan_single_hypothesis(
+                    belief_prev=belief,
+                    raw_points=points,
+                    raw_timestamps=timestamps,
+                    raw_weights=weights,
+                    scan_start_time=stamp_sec - 0.1,
+                    scan_end_time=stamp_sec,
+                    dt_sec=dt_sec,
+                    Q=self.Q,
+                    bin_atlas=self.bin_atlas,
+                    map_stats=self.map_stats,
+                    config=self.config,
+                )
+                results.append(result)
+                self.hypotheses[i] = result.belief_updated
+            
+            # Combine hypotheses
+            combined_belief, combo_cert, combo_effect = process_hypotheses(
+                hypotheses=self.hypotheses,
+                weights=self.hyp_weights,
+                config=self.config,
+            )
+            
+            self.current_belief = combined_belief
+            self.pipeline_runs += 1
+            
+            # Store certificate
+            if results:
+                self.cert_history.append(results[0].aggregated_cert)
+                if len(self.cert_history) > 100:
+                    self.cert_history.pop(0)
+            
+            # Extract pose from belief and publish
+            pose_6d = combined_belief.mean_world_pose()
+            self._publish_state_from_pose(pose_6d, stamp_sec)
+            
+            if self.scan_count <= 10 or self.scan_count % 50 == 0:
+                self.get_logger().info(
+                    f"Scan {self.scan_count}: {n_points} pts, pipeline #{self.pipeline_runs}, "
+                    f"dt={dt_sec:.3f}s"
+                )
+        
+        except Exception as e:
+            # Log error but don't crash - fall back to odometry
+            self.get_logger().error(f"Pipeline error on scan {self.scan_count}: {e}")
+            if self.last_odom_pose is not None:
+                self._publish_state_from_pose(self.last_odom_pose, stamp_sec)
+
+    def _publish_state_from_pose(self, pose_6d: jnp.ndarray, stamp_sec: float):
+        """Publish state from a 6D pose [trans, rotvec]."""
+        rotvec, trans = se3_to_rotvec_trans(pose_6d)
+        R = Rotation.from_rotvec(np.array(rotvec))
+        quat = R.as_quat()
+        
+        # Odometry message
         odom_msg = Odometry()
         odom_msg.header.stamp = self.get_clock().now().to_msg()
         odom_msg.header.frame_id = self.odom_frame
@@ -342,7 +450,7 @@ class GoldenChildBackend(Node):
         
         self.pub_state.publish(odom_msg)
         
-        # Publish TF
+        # TF
         tf_msg = TransformStamped()
         tf_msg.header = odom_msg.header
         tf_msg.child_frame_id = self.base_frame
@@ -352,7 +460,7 @@ class GoldenChildBackend(Node):
         tf_msg.transform.rotation = odom_msg.pose.pose.orientation
         self.tf_broadcaster.sendTransform(tf_msg)
         
-        # Add to trajectory path
+        # Trajectory
         pose_stamped = PoseStamped()
         pose_stamped.header = odom_msg.header
         pose_stamped.pose = odom_msg.pose.pose
@@ -361,13 +469,12 @@ class GoldenChildBackend(Node):
         if len(self.trajectory_poses) > self.max_path_length:
             self.trajectory_poses.pop(0)
         
-        # Publish path
         path_msg = Path()
         path_msg.header = odom_msg.header
         path_msg.poses = self.trajectory_poses
         self.pub_path.publish(path_msg)
         
-        # Export to TUM format
+        # TUM export
         if self.trajectory_file:
             self.trajectory_file.write(
                 f"{stamp_sec:.9f} {trans[0]:.6f} {trans[1]:.6f} {trans[2]:.6f} "
@@ -384,6 +491,7 @@ class GoldenChildBackend(Node):
             "odom_count": self.odom_count,
             "scan_count": self.scan_count,
             "imu_count": self.imu_count,
+            "pipeline_runs": self.pipeline_runs,
             "hypotheses": self.config.K_HYP,
             "map_bins_active": int(jnp.sum(self.map_stats.N_dir > 0)),
         }
@@ -392,19 +500,18 @@ class GoldenChildBackend(Node):
         msg.data = json.dumps(status)
         self.pub_status.publish(msg)
         
-        # Log status periodically
         self.get_logger().info(
             f"GC Status: odom={self.odom_count}, scans={self.scan_count}, "
-            f"imu={self.imu_count}, map_bins={status['map_bins_active']}/{self.config.B_BINS}"
+            f"imu={self.imu_count}, pipeline={self.pipeline_runs}, "
+            f"map_bins={status['map_bins_active']}/{self.config.B_BINS}"
         )
 
     def destroy_node(self):
-        """Clean up on shutdown."""
+        """Clean up."""
         if self.trajectory_file:
             self.trajectory_file.flush()
             self.trajectory_file.close()
-            self.get_logger().info(f"Trajectory saved to: {self.trajectory_export_path}")
-        
+            self.get_logger().info(f"Trajectory saved: {self.trajectory_export_path}")
         super().destroy_node()
 
 
