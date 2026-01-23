@@ -18,14 +18,7 @@ setup(
         (
             "share/" + package_name + "/config",
             [
-                "config/qos_override.yaml",
-                "config/fl_slam_poc_base.yaml",
-            ],
-        ),
-        (
-            "share/" + package_name + "/config/presets",
-            [
-                "config/presets/m3dgr.yaml",
+                "config/gc_backend.yaml",
             ],
         ),
     ],

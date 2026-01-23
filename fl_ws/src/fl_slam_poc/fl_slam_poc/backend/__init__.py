@@ -12,16 +12,18 @@ Structure:
 Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
 """
 
-from fl_slam_poc.backend.pipeline import (
-    PipelineConfig,
-    RuntimeManifest,
-    process_scan,
-    process_hypotheses,
-)
-
+# Lazy imports to avoid circular dependencies
 __all__ = [
     "PipelineConfig",
     "RuntimeManifest",
-    "process_scan",
-    "process_hypotheses",
 ]
+
+
+def __getattr__(name):
+    if name == "PipelineConfig":
+        from fl_slam_poc.backend.pipeline import PipelineConfig
+        return PipelineConfig
+    elif name == "RuntimeManifest":
+        from fl_slam_poc.backend.pipeline import RuntimeManifest
+        return RuntimeManifest
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

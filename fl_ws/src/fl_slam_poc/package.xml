@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>fl_slam_poc</name>
-  <version>0.0.1</version>
-  <description>Frobenius-Legendre compositional inference SLAM POC (ROS 2 Jazzy)</description>
+  <version>0.1.0</version>
+  <description>Golden Child SLAM v2 - Branch-free compositional inference SLAM (ROS 2 Jazzy)</description>
   <maintainer email="whab13@mit.edu">Will Haber</maintainer>
   <license>Apache-2.0</license>
 
@@ -22,17 +22,12 @@
   <exec_depend>rclcpp</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
-  <exec_depend>python3-pydantic</exec_depend>
-  <exec_depend>foxglove_bridge</exec_depend>
-  <exec_depend>turtlebot3_gazebo</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>livox_ros_driver2</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>opencv4</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
 
   <test_depend>pytest</test_depend>
 

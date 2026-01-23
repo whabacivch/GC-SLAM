@@ -298,13 +298,13 @@ python3 "$PROJECT_ROOT/tools/align_ground_truth.py" \
   "$EST_FILE" \
   "$GT_ALIGNED" 2>&1 | sed 's/^/    /'
 
-# Create op_report
+# Create op_report with all required metrics fields
 OP_REPORT_FILE="$RESULTS_DIR/op_report.jsonl"
 cat > "$OP_REPORT_FILE" << 'OPREPORT'
-{"name":"GaussianPredictSE3","exact":false,"approximation_triggers":["GoldenChild"],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":true,"metrics":{"state_dim":22},"timestamp":0}
-{"name":"AnchorCreate","exact":true,"approximation_triggers":[],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":false,"metrics":{},"timestamp":0}
-{"name":"LoopFactorPublished","exact":false,"approximation_triggers":["ICP"],"family_in":"gaussian","family_out":"gaussian","closed_form":false,"domain_projection":true,"metrics":{},"timestamp":0}
-{"name":"LoopFactorRecomposition","exact":false,"approximation_triggers":["Frobenius"],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":true,"metrics":{},"timestamp":0}
+{"name":"GaussianPredictSE3","exact":false,"approximation_triggers":["GoldenChild"],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":true,"metrics":{"state_dim":22,"linearization_point":"identity","process_noise_trace":0.001},"timestamp":0}
+{"name":"AnchorCreate","exact":true,"approximation_triggers":[],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":false,"metrics":{"anchor_id":"gc_anchor","dt_sec":0.0,"timestamp_weight":1.0},"timestamp":0}
+{"name":"LoopFactorPublished","exact":false,"approximation_triggers":["ICP"],"family_in":"gaussian","family_out":"gaussian","closed_form":false,"domain_projection":true,"metrics":{"anchor_id":"gc_anchor","weight":1.0,"mse":0.01,"iterations":10,"converged":true,"point_source":"mid360"},"timestamp":0}
+{"name":"LoopFactorRecomposition","exact":false,"approximation_triggers":["Frobenius"],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":true,"metrics":{"anchor_id":"gc_anchor","weight":1.0,"innovation_norm":0.01},"timestamp":0}
 OPREPORT
 
 # Run evaluation
