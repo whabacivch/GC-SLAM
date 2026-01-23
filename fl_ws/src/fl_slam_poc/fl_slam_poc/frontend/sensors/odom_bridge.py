@@ -1,7 +1,8 @@
 """
-TurtleBot3 Odometry Bridge Node.
+Odometry Bridge Node.
 
 Converts absolute odometry to delta odometry for the FL-SLAM backend.
+Generic implementation - works with any odometry source (M3DGR, TurtleBot3, etc.).
 Uses proper SE(3) operations with rotation vector representation (no RPY).
 
 Frame Handling:
@@ -41,11 +42,14 @@ from fl_slam_poc.common.geometry.se3_numpy import (
 from fl_slam_poc.backend.fusion.gaussian_geom import gaussian_frobenius_correction
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common import constants
+from fl_slam_poc.frontend.diagnostics.op_report_publish import publish_op_report
+from fl_slam_poc.frontend.sensors.qos_utils import resolve_qos_profiles
+from fl_slam_poc.frontend.sensors.dedup import is_duplicate
 
 
-class Tb3OdomBridge(Node):
+class OdomBridge(Node):
     def __init__(self):
-        super().__init__("tb3_odom_bridge")
+        super().__init__("odom_bridge")
         
         # Configurable frames (not hardcoded)
         self.declare_parameter("input_topic", "/odom")
@@ -64,8 +68,11 @@ class Tb3OdomBridge(Node):
         self.tf_timeout = float(self.get_parameter("tf_timeout_sec").value)
         qos_reliability = str(self.get_parameter("qos_reliability").value).lower()
         
-        self._last_msg_stamp = None
-        qos_profiles, qos_names = self._resolve_qos_profiles(qos_reliability)
+        self._last_msg_keys: dict[str, tuple[int, int, str]] = {}
+        qos_profiles, qos_names = resolve_qos_profiles(
+            reliability=qos_reliability,
+            depth=constants.QOS_DEPTH_SENSOR_MED_FREQ,
+        )
         self.sub = []
         for qos in qos_profiles:
             self.sub.append(self.create_subscription(Odometry, input_topic, self.on_odom, qos))
@@ -79,7 +86,7 @@ class Tb3OdomBridge(Node):
         self.pub_report = self.create_publisher(String, "/cdwm/op_report", 10)
         
         self.get_logger().info(
-            f"tb3_odom_bridge subscribing to {input_topic} with QoS reliability: {', '.join(qos_names)}"
+            f"odom_bridge subscribing to {input_topic} with QoS reliability: {', '.join(qos_names)}"
         )
         
         # TF for frame validation
@@ -113,52 +120,6 @@ class Tb3OdomBridge(Node):
         if key not in self._warned_frames:
             self._warned_frames.add(key)
             self.get_logger().warn(msg)
-
-    def _resolve_qos_profiles(self, reliability: str):
-        """
-        Resolve QoS profiles from reliability setting.
-
-        Supported values:
-          - reliable
-          - best_effort
-          - system_default
-          - both (subscribe twice: RELIABLE + BEST_EFFORT)
-        """
-        rel_map = {
-            "reliable": ReliabilityPolicy.RELIABLE,
-            "best_effort": ReliabilityPolicy.BEST_EFFORT,
-            "system_default": ReliabilityPolicy.SYSTEM_DEFAULT,
-        }
-        if reliability == "both":
-            rels = [ReliabilityPolicy.RELIABLE, ReliabilityPolicy.BEST_EFFORT]
-            names = ["reliable", "best_effort"]
-        elif reliability in rel_map:
-            rels = [rel_map[reliability]]
-            names = [reliability]
-        else:
-            rels = [ReliabilityPolicy.RELIABLE]
-            names = ["reliable"]
-        
-        profiles = [
-            QoSProfile(
-                reliability=rel,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=constants.QOS_DEPTH_SENSOR_MED_FREQ,
-            )
-            for rel in rels
-        ]
-        return profiles, names
-
-    def _is_duplicate(self, stamp) -> bool:
-        """Prevent double-processing when subscribing with multiple QoS profiles."""
-        if stamp is None:
-            return False
-        stamp_key = (stamp.sec, stamp.nanosec)
-        if self._last_msg_stamp == stamp_key:
-            return True
-        self._last_msg_stamp = stamp_key
-        return False
 
     def msg_to_se3(self, pose) -> np.ndarray:
         """Convert geometry_msgs/Pose to SE(3) vector (x, y, z, rx, ry, rz)."""
@@ -232,7 +193,7 @@ class Tb3OdomBridge(Node):
 
     def on_odom(self, msg: Odometry):
         """Process odometry message and compute delta."""
-        if self._is_duplicate(msg.header.stamp):
+        if is_duplicate(self._last_msg_keys, "odom", msg.header.stamp, frame_id=msg.header.frame_id):
             return
         input_frame = msg.header.frame_id
         
@@ -328,23 +289,15 @@ class Tb3OdomBridge(Node):
             notes=f"Delta covariance via {approximation_used}. "
                   "First-order valid for small inter-frame motion.",
         )
-        self.publish_report(report)
+        publish_op_report(self, self.pub_report, report)
 
         self.prev_pose = curr_pose.copy()
         self.prev_cov = curr_cov.copy()
         self.prev_frame = input_frame
 
-    def publish_report(self, report: OpReport):
-        """Publish OpReport to audit topic."""
-        report.validate()
-        msg = String()
-        msg.data = report.to_json()
-        self.pub_report.publish(msg)
-
-
 def main():
     rclpy.init()
-    node = Tb3OdomBridge()
+    node = OdomBridge()
     rclpy.spin(node)
 
 

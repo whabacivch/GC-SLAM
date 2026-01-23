@@ -4,6 +4,39 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+
+## 2026-01-23: Rename tb3_odom_bridge → odom_bridge ✅
+
+### Summary
+
+Renamed `tb3_odom_bridge` to `odom_bridge` to remove misleading TurtleBot3 reference. The bridge is a generic absolute→delta odometry converter used with M3DGR dataset (and potentially other datasets like TurtleBot3 or NVIDIA r2b in the future).
+
+### Changes
+
+- **Renamed files:**
+  - `fl_slam_poc/frontend/sensors/tb3_odom_bridge.py` → `odom_bridge.py`
+  - `scripts/tb3_odom_bridge` → `odom_bridge`
+- **Updated class and node names:**
+  - Class `Tb3OdomBridge` → `OdomBridge`
+  - Node name `tb3_odom_bridge` → `odom_bridge`
+  - Executable `tb3_odom_bridge` → `odom_bridge`
+- **Updated references in:**
+  - `setup.py` - entry point
+  - `CMakeLists.txt` - script installation
+  - `launch/poc_m3dgr_rosbag.launch.py` - executable and node name
+  - `config/fl_slam_poc_base.yaml` - parameter namespace
+  - `config/presets/m3dgr.yaml` - parameter namespace
+  - `config/config_manifest.yaml` - feature list and topic documentation
+  - `AGENTS.md` - component summary and package structure
+  - `docs/BAG_TOPICS_AND_USAGE.md` - all table entries and field descriptions
+  - `docs/PIPELINE_AUDIT_2026-01-23.md` - pipeline diagram
+  - `README.md` - mermaid diagram, component summary, file tree
+  - `ROADMAP.md` - MVP nodes list and troubleshooting section
+
+### Rationale
+
+The MVP dataset is M3DGR (not TurtleBot3), and the bridge is dataset-agnostic. The `tb3_` prefix was a legacy naming artifact that caused confusion about what the rosbag actually contains.
+
 ## 2026-01-23: Pipeline “Hidden Behavior” Audit Report ✅
 
 ### Summary
@@ -25,6 +58,33 @@ Added an audit-only report listing exact and near-duplicated functions/helpers a
 
 - `docs/DUPLICATION_AUDIT_2026-01-23.md`
   - New audit document with issue IDs (DUP-001…DUP-006) and candidate fixes for explicit approval.
+
+## 2026-01-23: Duplication Cleanup (Except DUP-005) ✅
+
+### Summary
+
+Eliminated duplicated helper implementations identified by `docs/DUPLICATION_AUDIT_2026-01-23.md`, except the intentional NumPy vs JAX SE(3) dual-backend (DUP-005).
+
+### Changes
+
+- `tools/rosbag_sqlite_utils.py`
+  - Centralized `resolve_db3_path`, `topic_id`, `topic_type`.
+- `tools/estimate_lidar_base_extrinsic.py`
+- `tools/inspect_camera_frames.py`
+- `tools/inspect_odom_source.py`
+- `tools/inspect_rosbag_deep.py`
+- `tools/validate_livox_converter.py`
+  - Updated to import shared rosbag sqlite helpers (no behavior change intended).
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/diagnostics/op_report_publish.py`
+  - Centralized OpReport validation + JSON publishing for frontend-side nodes.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/qos_utils.py`
+  - Centralized QoS profile resolution.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/dedup.py`
+  - Centralized duplicate message suppression (multi-QoS subscriptions).
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/sensor_io.py`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/tb3_odom_bridge.py`
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
+  - Refactored to use the shared helpers (no behavior change intended).
 
 ## 2026-01-23: Canonical Topic/Schema Documentation Hardening ✅
 

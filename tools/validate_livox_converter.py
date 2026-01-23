@@ -27,29 +27,7 @@ import numpy as np
 import rclpy
 from rclpy.serialization import deserialize_message
 
-
-def resolve_db3_path(bag_path: str) -> str:
-    if os.path.isfile(bag_path) and bag_path.endswith(".db3"):
-        return bag_path
-    if not os.path.isdir(bag_path):
-        return ""
-    for name in sorted(os.listdir(bag_path)):
-        if name.endswith(".db3"):
-            return os.path.join(bag_path, name)
-    return ""
-
-
-def topic_id(cur: sqlite3.Cursor, name: str) -> Optional[int]:
-    cur.execute("SELECT id FROM topics WHERE name = ? LIMIT 1", (name,))
-    row = cur.fetchone()
-    return int(row[0]) if row else None
-
-
-def topic_type(cur: sqlite3.Cursor, name: str) -> Optional[str]:
-    cur.execute("SELECT type FROM topics WHERE name = ? LIMIT 1", (name,))
-    row = cur.fetchone()
-    return row[0] if row else None
-
+from rosbag_sqlite_utils import resolve_db3_path, topic_id, topic_type
 
 def count_messages(cur: sqlite3.Cursor, tid: int) -> int:
     cur.execute("SELECT COUNT(*) FROM messages WHERE topic_id = ?", (tid,))
@@ -239,4 +217,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

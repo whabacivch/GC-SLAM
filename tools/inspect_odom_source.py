@@ -13,19 +13,11 @@ import os
 # Add workspace to path if needed
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-def _resolve_db3_path(bag_path: str) -> str:
-    if os.path.isfile(bag_path) and bag_path.endswith(".db3"):
-        return bag_path
-    if not os.path.isdir(bag_path):
-        return ""
-    for name in sorted(os.listdir(bag_path)):
-        if name.endswith(".db3"):
-            return os.path.join(bag_path, name)
-    return ""
+from rosbag_sqlite_utils import resolve_db3_path
 
 
 bag_path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BAG_PATH", "rosbags/m3dgr/Dynamic01_ros2")
-db_path = _resolve_db3_path(bag_path)
+db_path = resolve_db3_path(bag_path)
 
 if not os.path.exists(db_path):
     print(f"Error: Database not found for bag_path='{bag_path}'.")

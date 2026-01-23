@@ -31,6 +31,9 @@ from fl_slam_poc.common.geometry.se3_numpy import quat_to_rotmat, se3_compose, r
 from fl_slam_poc.common.op_report import OpReport
 from fl_slam_poc.common.utils import stamp_to_sec
 
+from fl_slam_poc.frontend.sensors.qos_utils import resolve_qos_profiles
+from fl_slam_poc.frontend.sensors.dedup import is_duplicate
+
 
 def pointcloud2_to_array(msg: PointCloud2) -> np.ndarray:
     """
@@ -157,7 +160,10 @@ class SensorIO:
     
     def _setup_subscriptions(self):
         """Create ROS subscriptions for all enabled sensors."""
-        qos_profiles, qos_names = self._resolve_qos_profiles()
+        qos_profiles, qos_names = resolve_qos_profiles(
+            reliability=str(self.config.get("sensor_qos_reliability", "reliable")).lower(),
+            depth=QOS_DEPTH_SENSOR_MED_FREQ,
+        )
         for qos in qos_profiles:
             # Always subscribe to odometry
             self.node.create_subscription(
@@ -214,44 +220,6 @@ class SensorIO:
             f"with QoS reliability: {', '.join(qos_names)}, depth: {QOS_DEPTH_SENSOR_MED_FREQ}"
         )
 
-    def _resolve_qos_profiles(self):
-        """
-        Resolve sensor QoS profiles from config.
-
-        Supported values:
-          - reliable
-          - best_effort
-          - system_default
-          - both (subscribe twice: RELIABLE + BEST_EFFORT)
-        """
-        reliability = str(self.config.get("sensor_qos_reliability", "reliable")).lower()
-        rel_map = {
-            "reliable": ReliabilityPolicy.RELIABLE,
-            "best_effort": ReliabilityPolicy.BEST_EFFORT,
-            "system_default": ReliabilityPolicy.SYSTEM_DEFAULT,
-        }
-        if reliability == "both":
-            rels = [ReliabilityPolicy.RELIABLE, ReliabilityPolicy.BEST_EFFORT]
-            names = ["reliable", "best_effort"]
-        elif reliability in rel_map:
-            rels = [rel_map[reliability]]
-            names = [reliability]
-        else:
-            rels = [ReliabilityPolicy.RELIABLE]
-            names = ["reliable"]
-        
-        profiles = [
-            QoSProfile(
-                reliability=rel,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=QOS_DEPTH_SENSOR_MED_FREQ,
-            )
-            for rel in rels
-        ]
-        
-        return profiles, names
-
     def _resolve_imu_qos_profiles(self):
         """
         Resolve IMU QoS profiles from config.
@@ -287,16 +255,6 @@ class SensorIO:
 
         return profiles, names
 
-    def _is_duplicate(self, key: str, stamp, frame_id: str) -> bool:
-        """Prevent double-processing when subscribing with multiple QoS profiles."""
-        if stamp is None:
-            return False
-        stamp_key = (stamp.sec, stamp.nanosec, frame_id or "")
-        if self._last_msg_keys.get(key) == stamp_key:
-            return True
-        self._last_msg_keys[key] = stamp_key
-        return False
-    
     def set_scan_callback(self, callback):
         """Set external callback for scan processing."""
         self._scan_callback = callback
@@ -323,7 +281,7 @@ class SensorIO:
     
     def _on_scan_internal(self, msg: LaserScan):
         """Internal scan handler - calls external callback if set."""
-        if self._is_duplicate("scan", msg.header.stamp, msg.header.frame_id):
+        if is_duplicate(self._last_msg_keys, "scan", msg.header.stamp, frame_id=msg.header.frame_id):
             return
         # Debug: Log first scan received
         if not hasattr(self, '_first_scan_logged'):
@@ -338,7 +296,7 @@ class SensorIO:
     
     def _on_pointcloud(self, msg: PointCloud2):
         """Buffer 3D point cloud data."""
-        if self._is_duplicate("pointcloud", msg.header.stamp, msg.header.frame_id):
+        if is_duplicate(self._last_msg_keys, "pointcloud", msg.header.stamp, frame_id=msg.header.frame_id):
             return
         
         # Rate limiting for high-frequency point clouds
@@ -506,7 +464,7 @@ class SensorIO:
     
     def _on_odom(self, msg: Odometry):
         """Buffer odometry (pose only)."""
-        if self._is_duplicate("odom", msg.header.stamp, msg.header.frame_id):
+        if is_duplicate(self._last_msg_keys, "odom", msg.header.stamp, frame_id=msg.header.frame_id):
             return
         stamp = stamp_to_sec(msg.header.stamp)
         
@@ -557,27 +515,64 @@ class SensorIO:
     
     def _on_image(self, msg: Image):
         """Buffer RGB image array for RGB-D evidence extraction."""
-        if self._is_duplicate("image", msg.header.stamp, msg.header.frame_id):
+        if is_duplicate(self._last_msg_keys, "image", msg.header.stamp, frame_id=msg.header.frame_id):
             return
-        if not hasattr(self, "_logged_rgb_disabled"):
-            self._logged_rgb_disabled = True
-            self.node.get_logger().warn(
-                "SensorIO: Python image processing is disabled (cv_bridge removed). "
-                "Use C++ decompression and enable image handling only when a pure-NumPy path exists."
-            )
-        return
-        
+        encoding = str(getattr(msg, "encoding", "") or "").lower()
+        h = int(msg.height)
+        w = int(msg.width)
+        step = int(msg.step)
+
+        def warn_once(text: str):
+            if not hasattr(self, "_logged_rgb_decode"):
+                self._logged_rgb_decode = True
+                self.node.get_logger().info(text)
+
         try:
-            # Convert to numpy array (RGB8 format)
-            rgb = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
-            rgb = np.asarray(rgb, dtype=np.uint8)
+            raw = memoryview(msg.data)
+            row_bytes = w * 3
+            if encoding in ("rgb8", "bgr8"):
+                if step < row_bytes:
+                    raise ValueError(f"rgb step too small: step={step}, expected>={row_bytes}")
+                buf = np.frombuffer(raw, dtype=np.uint8).reshape(h, step)[:, :row_bytes]
+                img = buf.reshape(h, w, 3)
+                if encoding == "bgr8":
+                    img = img[:, :, ::-1]
+                rgb = img
+                warn_once(f"SensorIO: Decoding Image via pure NumPy ({encoding})")
+            elif encoding in ("rgba8", "bgra8"):
+                row_bytes4 = w * 4
+                if step < row_bytes4:
+                    raise ValueError(f"rgba step too small: step={step}, expected>={row_bytes4}")
+                buf = np.frombuffer(raw, dtype=np.uint8).reshape(h, step)[:, :row_bytes4]
+                img = buf.reshape(h, w, 4)
+                if encoding == "bgra8":
+                    img = img[:, :, [2, 1, 0, 3]]
+                rgb = img[:, :, :3]
+                warn_once(f"SensorIO: Decoding Image via pure NumPy ({encoding})")
+            elif encoding in ("mono8",):
+                if step < w:
+                    raise ValueError(f"mono step too small: step={step}, expected>={w}")
+                buf = np.frombuffer(raw, dtype=np.uint8).reshape(h, step)[:, :w]
+                gray = buf.reshape(h, w)
+                rgb = np.repeat(gray[:, :, None], 3, axis=2)
+                warn_once("SensorIO: Decoding Image via pure NumPy (mono8 -> RGB)")
+            else:
+                if not hasattr(self, "_logged_rgb_unsupported"):
+                    self._logged_rgb_unsupported = True
+                    self.node.get_logger().warn(
+                        f"SensorIO: Unsupported Image encoding '{encoding}'. "
+                        "RGB buffering disabled for this encoding.",
+                        throttle_duration_sec=5.0,
+                    )
+                rgb = None
         except Exception as e:
-            self.node.get_logger().warn(f"RGB conversion failed: {e}", throttle_duration_sec=5.0)
-            return
-        
+            self.node.get_logger().warn(f"RGB decode failed: {e}", throttle_duration_sec=5.0)
+            rgb = None
+
         stamp = stamp_to_sec(msg.header.stamp)
         frame_id = msg.header.frame_id or self.config.get("camera_frame", "camera_link")
-        self.image_buffer.append((stamp, rgb, frame_id))
+        if rgb is not None:
+            self.image_buffer.append((stamp, rgb, frame_id))
         
         buffer_len = self.config.get("feature_buffer_len", 10)
         if len(self.image_buffer) > buffer_len:
@@ -588,34 +583,61 @@ class SensorIO:
     
     def _on_depth(self, msg: Image):
         """Buffer depth array (and optionally 3D points) for RGB-D evidence extraction."""
-        if self._is_duplicate("depth", msg.header.stamp, msg.header.frame_id):
+        if is_duplicate(self._last_msg_keys, "depth", msg.header.stamp, frame_id=msg.header.frame_id):
             return
-        if not hasattr(self, "_logged_depth_disabled"):
-            self._logged_depth_disabled = True
-            self.node.get_logger().warn(
-                "SensorIO: Python depth processing is disabled (cv_bridge removed). "
-                "Use C++ decompression and enable depth handling only when a pure-NumPy path exists."
-            )
-        return
-        
+        encoding = str(getattr(msg, "encoding", "") or "").lower()
+        h = int(msg.height)
+        w = int(msg.width)
+        step = int(msg.step)
+
+        def warn_once(text: str):
+            if not hasattr(self, "_logged_depth_decode"):
+                self._logged_depth_decode = True
+                self.node.get_logger().info(text)
+
+        depth: Optional[np.ndarray]
         try:
-            depth = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-            depth = np.asarray(depth, dtype=np.float32)
+            raw = memoryview(msg.data)
+            if encoding in ("32fc1",):
+                row_bytes = w * 4
+                if step < row_bytes:
+                    raise ValueError(f"32FC1 step too small: step={step}, expected>={row_bytes}")
+                buf = np.frombuffer(raw, dtype=np.float32).reshape(h, step // 4)[:, :w]
+                depth = buf.reshape(h, w).astype(np.float32, copy=False)
+                warn_once("SensorIO: Decoding depth via pure NumPy (32FC1 meters)")
+            elif encoding in ("16uc1",):
+                row_bytes = w * 2
+                if step < row_bytes:
+                    raise ValueError(f"16UC1 step too small: step={step}, expected>={row_bytes}")
+                buf = np.frombuffer(raw, dtype=np.uint16).reshape(h, step // 2)[:, :w]
+                depth_u16 = buf.reshape(h, w)
+                depth = (depth_u16.astype(np.float32) * 1e-3)  # mm -> m
+                warn_once("SensorIO: Decoding depth via pure NumPy (16UC1 mm -> meters)")
+            else:
+                if not hasattr(self, "_logged_depth_unsupported"):
+                    self._logged_depth_unsupported = True
+                    self.node.get_logger().warn(
+                        f"SensorIO: Unsupported depth Image encoding '{encoding}'. "
+                        "Depth buffering disabled for this encoding.",
+                        throttle_duration_sec=5.0,
+                    )
+                depth = None
         except Exception as e:
-            self.node.get_logger().warn(f"Depth conversion failed: {e}", throttle_duration_sec=5.0)
-            return
+            self.node.get_logger().warn(f"Depth decode failed: {e}", throttle_duration_sec=5.0)
+            depth = None
         
         # Compute points for descriptor/ICP processing (2D scan mode only).
         # In 3D PointCloud mode, depth points are not required and often cannot be TF-transformed
         # during rosbag playback (missing TF), so we avoid triggering TF warnings.
         points = None
-        if not self.use_3d_pointcloud and self.depth_intrinsics is not None:
+        if depth is not None and (not self.use_3d_pointcloud) and self.depth_intrinsics is not None:
             points = self._depth_to_points(depth, msg.header)
         
         stamp = stamp_to_sec(msg.header.stamp)
         frame_id = msg.header.frame_id or self.config.get("camera_frame", "camera_link")
         # Store depth array AND points (depth for normals, points for descriptors)
-        self.depth_buffer.append((stamp, depth, points, frame_id))
+        if depth is not None:
+            self.depth_buffer.append((stamp, depth, points, frame_id))
         
         buffer_len = self.config.get("feature_buffer_len", 10)
         if len(self.depth_buffer) > buffer_len:
@@ -626,7 +648,7 @@ class SensorIO:
     
     def _on_camera_info(self, msg: CameraInfo):
         """Extract camera intrinsics."""
-        if self._is_duplicate("camera_info", msg.header.stamp, msg.header.frame_id):
+        if is_duplicate(self._last_msg_keys, "camera_info", msg.header.stamp, frame_id=msg.header.frame_id):
             return
         self.depth_intrinsics = (msg.k[0], msg.k[4], msg.k[2], msg.k[5])  # fx, fy, cx, cy
         
@@ -646,7 +668,7 @@ class SensorIO:
         Uses event-driven clearing: measurements accumulate until explicitly
         cleared after preintegration (no automatic sliding window).
         """
-        if self._is_duplicate("imu", msg.header.stamp, msg.header.frame_id):
+        if is_duplicate(self._last_msg_keys, "imu", msg.header.stamp, frame_id=msg.header.frame_id):
             return
 
         # Flow counter for data flow audit

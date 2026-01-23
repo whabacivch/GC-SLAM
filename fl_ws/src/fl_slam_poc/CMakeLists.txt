@@ -40,7 +40,7 @@ install(TARGETS image_decompress_cpp
 install(PROGRAMS
   scripts/frontend_node
   scripts/backend_node
-  scripts/tb3_odom_bridge
+  scripts/odom_bridge
   scripts/livox_converter
   DESTINATION lib/${PROJECT_NAME}
 )

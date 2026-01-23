@@ -23,16 +23,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, CompressedImage, Imu
 from tf2_msgs.msg import TFMessage
 
-def _resolve_db3_path(bag_path: str) -> str:
-    # ROS 2 bags are directories containing one or more *.db3 files.
-    if os.path.isfile(bag_path) and bag_path.endswith(".db3"):
-        return bag_path
-    if not os.path.isdir(bag_path):
-        return ""
-    for name in sorted(os.listdir(bag_path)):
-        if name.endswith(".db3"):
-            return os.path.join(bag_path, name)
-    return ""
+from rosbag_sqlite_utils import resolve_db3_path, topic_type
 
 def _ns_to_sec(ns: int) -> float:
     return float(ns) * 1e-9
@@ -41,12 +32,6 @@ def _ns_to_sec(ns: int) -> float:
 def _topic_exists(cursor: sqlite3.Cursor, name: str) -> bool:
     cursor.execute("SELECT 1 FROM topics WHERE name = ? LIMIT 1", (name,))
     return cursor.fetchone() is not None
-
-
-def _topic_type(cursor: sqlite3.Cursor, name: str) -> Optional[str]:
-    cursor.execute("SELECT type FROM topics WHERE name = ? LIMIT 1", (name,))
-    row = cursor.fetchone()
-    return row[0] if row else None
 
 
 def _topic_count_and_range(cursor: sqlite3.Cursor, topic: str) -> tuple[int, Optional[int], Optional[int]]:
@@ -114,7 +99,7 @@ def _summarize_topic(
         print()
         return
 
-    ttype = _topic_type(cursor, topic)
+    ttype = topic_type(cursor, topic)
     count, tmin, tmax = _topic_count_and_range(cursor, topic)
     _print_kv("topic", topic)
     _print_kv("type", ttype, indent=2)
@@ -181,7 +166,7 @@ def main() -> int:
     args = parser.parse_args()
 
     bag_path = args.bag_path
-    db_path = _resolve_db3_path(bag_path)
+    db_path = resolve_db3_path(bag_path)
 
     if not os.path.exists(db_path):
         print(f"Error: Database not found for bag_path='{bag_path}'.")
@@ -286,7 +271,7 @@ def main() -> int:
     # Livox frame: use type discovery so this script works even if messages aren't sourced.
     livox_topic = "/livox/mid360/lidar"
     if _topic_exists(cursor, livox_topic):
-        livox_type = _topic_type(cursor, livox_topic) or ""
+        livox_type = topic_type(cursor, livox_topic) or ""
         _print_kv("topic", livox_topic)
         _print_kv("type", livox_type, indent=2)
         _print_kv("note", "Frame ID is stored in CustomMsg.header.frame_id; requires livox_ros_driver2 messages to be sourced.", indent=2)

@@ -42,7 +42,7 @@ setup(
             "frontend_node = fl_slam_poc.frontend.frontend_node:main",
             "backend_node = fl_slam_poc.backend.backend_node:main",
             # Utility nodes
-            "tb3_odom_bridge = fl_slam_poc.frontend.sensors.tb3_odom_bridge:main",
+            "odom_bridge = fl_slam_poc.frontend.sensors.odom_bridge:main",
             "livox_converter = fl_slam_poc.frontend.sensors.livox_converter:main",
         ],
     },

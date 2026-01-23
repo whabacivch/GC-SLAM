@@ -35,16 +35,7 @@ from typing import Any, Optional
 import rclpy
 from rclpy.serialization import deserialize_message
 
-
-def resolve_db3_path(bag_path: str) -> str:
-    if os.path.isfile(bag_path) and bag_path.endswith(".db3"):
-        return bag_path
-    if not os.path.isdir(bag_path):
-        return ""
-    for name in sorted(os.listdir(bag_path)):
-        if name.endswith(".db3"):
-            return os.path.join(bag_path, name)
-    return ""
+from rosbag_sqlite_utils import resolve_db3_path
 
 
 def ns_to_sec(ns: int) -> float:
@@ -441,4 +432,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

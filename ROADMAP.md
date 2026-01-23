@@ -62,7 +62,7 @@ These are **observed facts from the bag** and should be treated as the default c
 - Backend: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
 - Utility: `image_decompress_cpp` (C++ node; compressed RGB + compressedDepth → raw `sensor_msgs/Image`)
 - Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/livox_converter.py` (moved from `utility_nodes/` during flattening)
-- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/tb3_odom_bridge.py` (moved from `utility_nodes/` during flattening; generic abs→delta odom bridge, legacy name)
+- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/odom_bridge.py` (moved from `utility_nodes/` during flattening; generic abs→delta odom bridge)
 
 **Evaluation**
 - `tools/align_ground_truth.py`
@@ -399,7 +399,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 **Primary files:**
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/common/se3.py` (flattened from `common/transforms/se3.py`)
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/tb3_odom_bridge.py` (moved from `utility_nodes/` during flattening)
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/odom_bridge.py` (moved from `utility_nodes/` during flattening)
 
 **Checklist:**
 - Verify pose composition conventions and frame semantics (odom/base).

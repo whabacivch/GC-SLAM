@@ -31,6 +31,9 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+# Shared rosbag2 sqlite helpers (deduplicated across tools/)
+from rosbag_sqlite_utils import resolve_db3_path, topic_id, topic_type
+
 # Ensure we can import the package without requiring it to be installed system-wide.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PKG_ROOT = os.path.join(_PROJECT_ROOT, "fl_ws", "src", "fl_slam_poc")
@@ -47,31 +50,8 @@ from fl_slam_poc.common.geometry.se3_numpy import quat_to_rotvec, rotvec_to_rotm
 from fl_slam_poc.frontend.scan.icp import icp_3d
 
 
-def _resolve_db3_path(bag_path: str) -> str:
-    if os.path.isfile(bag_path) and bag_path.endswith(".db3"):
-        return bag_path
-    if not os.path.isdir(bag_path):
-        return ""
-    for name in sorted(os.listdir(bag_path)):
-        if name.endswith(".db3"):
-            return os.path.join(bag_path, name)
-    return ""
-
-
 def _stamp_to_sec(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
-
-
-def _topic_id(cur: sqlite3.Cursor, name: str) -> Optional[int]:
-    cur.execute("SELECT id FROM topics WHERE name = ? LIMIT 1", (name,))
-    row = cur.fetchone()
-    return int(row[0]) if row else None
-
-
-def _topic_type(cur: sqlite3.Cursor, name: str) -> Optional[str]:
-    cur.execute("SELECT type FROM topics WHERE name = ? LIMIT 1", (name,))
-    row = cur.fetchone()
-    return row[0] if row else None
 
 
 def _iter_msgs(cur: sqlite3.Cursor, topic_id: int) -> Iterable[tuple[int, bytes]]:
@@ -196,7 +176,7 @@ def _load_livox_clouds(
     range_max: float,
     seed: int,
 ) -> list[_Cloud]:
-    tid = _topic_id(cur, topic)
+    tid = topic_id(cur, topic)
     if tid is None:
         raise RuntimeError(f"Topic not found: {topic}")
     MsgT = _try_import_livox_custommsg(msg_type)
@@ -231,7 +211,7 @@ def _load_livox_clouds(
 
 
 def _load_pose_stream_vrpn(cur: sqlite3.Cursor, topic: str) -> tuple[list[float], list[np.ndarray]]:
-    tid = _topic_id(cur, topic)
+    tid = topic_id(cur, topic)
     if tid is None:
         return [], []
     times: list[float] = []
@@ -245,7 +225,7 @@ def _load_pose_stream_vrpn(cur: sqlite3.Cursor, topic: str) -> tuple[list[float]
 
 
 def _load_pose_stream_odom(cur: sqlite3.Cursor, topic: str) -> tuple[list[float], list[np.ndarray]]:
-    tid = _topic_id(cur, topic)
+    tid = topic_id(cur, topic)
     if tid is None:
         return [], []
     times: list[float] = []
@@ -359,7 +339,7 @@ def main() -> int:
     ap.add_argument("--json-out", default="", help="Optional JSON output path.")
     args = ap.parse_args()
 
-    db_path = _resolve_db3_path(args.bag_path)
+    db_path = resolve_db3_path(args.bag_path)
     if not db_path or not os.path.exists(db_path):
         raise SystemExit(f"Could not locate *.db3 under '{args.bag_path}'")
 
@@ -373,7 +353,7 @@ def main() -> int:
 
     # Sanity: confirm topics exist
     for tname in [args.lidar_topic, args.odom_topic, args.vrpn_topic]:
-        ttype = _topic_type(cur, tname)
+        ttype = topic_type(cur, tname)
         print(f"- topic {tname}: {'present' if ttype else 'MISSING'}" + (f", type={ttype}" if ttype else ""))
     print()
 
@@ -455,4 +435,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

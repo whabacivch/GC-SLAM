@@ -60,6 +60,7 @@ from fl_slam_poc.common.validation import (
 from fl_slam_poc.msg import AnchorCreate, LoopFactor, IMUSegment
 from pydantic import ValidationError
 
+from fl_slam_poc.frontend.diagnostics.op_report_publish import publish_op_report
 
 class Frontend(Node):
     """
@@ -1381,10 +1382,7 @@ class Frontend(Node):
     
     def _publish_report(self, report: OpReport):
         """Publish OpReport as JSON."""
-        report.validate()
-        msg = String()
-        msg.data = report.to_json()
-        self.pub_report.publish(msg)
+        publish_op_report(self, self.pub_report, report)
     
     def _publish_status(self):
         """Publish frontend status (observability)."""

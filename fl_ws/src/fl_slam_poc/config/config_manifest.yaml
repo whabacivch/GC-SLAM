@@ -21,7 +21,7 @@ m3dgr:
   
   required_features:
     - livox_converter       # Converts CustomMsg → PointCloud2
-    - tb3_odom_bridge       # Converts absolute odom → delta odom
+    - odom_bridge           # Converts absolute odom → delta odom
     - frontend_node         # Processes sensors, creates anchors/loops
     - backend_node          # State estimation and fusion
   
@@ -41,7 +41,7 @@ m3dgr:
     
     internal:
       # Produced by utility nodes, consumed by frontend/backend
-      - /sim/odom            # tb3_odom_bridge output (delta odom)
+      - /sim/odom            # odom_bridge output (delta odom)
       - /lidar/points        # livox_converter output (PointCloud2)
       - /camera/image_raw    # image_decompress_cpp output (optional)
       - /camera/depth/image_raw  # image_decompress_cpp output (optional)

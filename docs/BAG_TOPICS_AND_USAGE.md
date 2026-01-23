@@ -74,7 +74,7 @@ These are the *bag inputs* used by the MVP pipeline (or present but explicitly n
 
 | Topic | Message type | Used now? | How it is used |
 | --- | --- | --- | --- |
-| `/odom` | `nav_msgs/msg/Odometry` | **Yes** | Converted to delta odom by `tb3_odom_bridge` and fused in backend (`/sim/odom`). Frame truth: `odom_combined -> base_footprint`. |
+| `/odom` | `nav_msgs/msg/Odometry` | **Yes** | Converted to delta odom by `odom_bridge` and fused in backend (`/sim/odom`). Frame truth: `odom_combined -> base_footprint`. |
 | `/livox/mid360/lidar` | `livox_ros_driver2/msg/CustomMsg` | **Yes** | Converted to `PointCloud2` by `livox_converter` and consumed by frontend pointcloud path. Preserves `frame_id=livox_frame`. |
 | `/livox/mid360/imu` | `sensor_msgs/msg/Imu` | **Yes** | Frontend buffers IMU and publishes `/sim/imu_segment` (Contract B); backend re-integrates. Frame: `livox_frame`. |
 | `/camera/imu` | `sensor_msgs/msg/Imu` | Not used (MVP) | Present in bag but not used by default in the M3DGR pipeline. |
@@ -92,7 +92,7 @@ This is the *runtime topic graph* the MVP launch creates (bag inputs → utility
 
 | Topic | Message type | Producer | Consumer | Notes |
 | --- | --- | --- | --- | --- |
-| `/sim/odom` | `nav_msgs/msg/Odometry` | `tb3_odom_bridge` | `frontend_node` (SensorIO), `backend_node` | Delta-odom (absolute→delta). `pose.covariance` is propagated/approximated; `twist` is unused. |
+| `/sim/odom` | `nav_msgs/msg/Odometry` | `odom_bridge` | `frontend_node` (SensorIO), `backend_node` | Delta-odom (absolute→delta). `pose.covariance` is propagated/approximated; `twist` is unused. |
 | `/lidar/points` | `sensor_msgs/msg/PointCloud2` | `livox_converter` | `frontend_node` (SensorIO) | XYZ is consumed today; extra fields are preserved in the message but ignored by current frontend math. |
 | `/camera/image_raw` | `sensor_msgs/msg/Image` | `image_decompress_cpp` | `frontend_node` (SensorIO, optional) | Published as `rgb8`. |
 | `/camera/depth/image_raw` | `sensor_msgs/msg/Image` | `image_decompress_cpp` | `frontend_node` (SensorIO, optional) | Published as `32FC1` depth in meters. |
@@ -142,18 +142,18 @@ This section answers: “Which fields are read/written, and are covariances prop
 
 #### `nav_msgs/msg/Odometry` (bag `/odom`, internal `/sim/odom`, output `/cdwm/state`)
 
-- **Fields consumed (tb3_odom_bridge input `/odom`)**
+- **Fields consumed (odom_bridge input `/odom`)**
   - `header.stamp` (duplicate detection, timing)
   - `header.frame_id` (validation/metadata)
   - `child_frame_id` (metadata)
   - `pose.pose` (position + orientation quaternion)
   - `pose.covariance` (6×6, row-major): **used**
   - `twist.*` + `twist.covariance`: **ignored**
-- **Fields produced (tb3_odom_bridge output `/sim/odom`)**
+- **Fields produced (odom_bridge output `/sim/odom`)**
   - `pose.pose`: **delta pose** between successive odom messages
   - `pose.covariance`: **delta covariance** computed by approximation (see below)
   - `twist`: not used by consumers (left default/unchanged)
-- **Delta covariance (tb3_odom_bridge)**
+- **Delta covariance (odom_bridge)**
   - Uses a small-delta approximation: `Σ_delta ≈ Σ_prev + Σ_curr` (logged via `OpReport`).
   - This is explicitly marked as an approximation in the bridge’s OpReport (audit visibility).
 - **Fields consumed (backend input `/sim/odom`)**
@@ -260,7 +260,7 @@ QoS is a common cause of “it runs but nothing arrives”. These are the curren
 - **Frontend SensorIO subscriptions**
   - General sensors (odom/pointcloud/scan/image/depth/camera_info): `depth=QOS_DEPTH_SENSOR_MED_FREQ` (currently 100), reliability from `sensor_qos_reliability`
   - IMU: `depth=QOS_DEPTH_SENSOR_HIGH_FREQ` (currently 500), reliability from `imu_qos_reliability` (default `best_effort`)
-- **`tb3_odom_bridge`**
+- **`odom_bridge`**
   - Subscriptions: `depth=QOS_DEPTH_SENSOR_MED_FREQ` and reliability from `qos_reliability`
   - Publisher `/sim/odom`: `RELIABLE`, `depth=QOS_DEPTH_SENSOR_MED_FREQ`
 - **Backend subscriptions**

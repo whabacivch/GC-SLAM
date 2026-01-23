@@ -48,7 +48,7 @@ image_decompress_cpp:
     depth_scale_mm_to_m: true
     qos_reliability: "reliable"
 
-tb3_odom_bridge:
+odom_bridge:
   ros__parameters:
     input_topic: "/odom"
     output_topic: "/sim/odom"

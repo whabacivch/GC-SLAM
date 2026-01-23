@@ -166,8 +166,8 @@ def launch_setup(context, *args, **kwargs):
             # Odom bridge (absolute -> delta)
             Node(
                 package="fl_slam_poc",
-                executable="tb3_odom_bridge",
-                name="tb3_odom_bridge",
+                executable="odom_bridge",
+                name="odom_bridge",
                 output="screen",
                 parameters=[
                     config_base,

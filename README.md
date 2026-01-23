@@ -65,7 +65,7 @@ graph TB
     end
 
     subgraph "Preprocessors - frontend/"
-        ODOM_BRIDGE["tb3_odom_bridge.py<br/>absolute → delta pose"]
+        ODOM_BRIDGE["odom_bridge.py<br/>absolute → delta pose"]
         LIVOX_CONV["livox_converter.py<br/>Livox → PointCloud2"]
         IMG_DECOMP_CPP["image_decompress_cpp<br/>(C++)"]
     end
@@ -145,7 +145,7 @@ graph TB
 - Camera topics (RGB/Depth) - Present in bag as compressed; decompressed by `image_decompress_cpp` (usage still controlled by frontend flags)
 
 **Preprocessors (`frontend/`):**
-- `tb3_odom_bridge.py` - Converts absolute odometry to delta poses (`/odom` → `/sim/odom`)
+- `odom_bridge.py` - Converts absolute odometry to delta poses (`/odom` → `/sim/odom`)
 - `livox_converter.py` - Converts Livox messages to PointCloud2 (`/livox/mid360/lidar` → `/lidar/points`)
 - `image_decompress_cpp` - Decompresses rosbag images (compressed RGB + compressedDepth → raw Image topics)
 
@@ -191,7 +191,7 @@ fl_ws/src/fl_slam_poc/
 │   │   ├── rgbd_processor.py # RGB-D processing
 │   │   ├── vmf_geometry.py    # von Mises-Fisher geometry
 │   │   ├── status_monitor.py  # Sensor status monitoring
-│   │   ├── tb3_odom_bridge.py # Odom bridge (absolute → delta)
+│   │   ├── odom_bridge.py # Odom bridge (absolute → delta)
 │   │   ├── livox_converter.py # Livox → PointCloud2
 │   │   └── (C++) image_decompress_cpp # Image decompression (installed binary)
 │   │

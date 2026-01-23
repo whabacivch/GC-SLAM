@@ -144,7 +144,7 @@ def validate_op_reports(op_report_path, require_imu=True):
     print(f"  OpReport checks passed: {len(reports)} total reports.")
 
 
-def validate_trajectory(traj, name):
+def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
     """
     Validate trajectory has proper timestamps and coordinates.
     
@@ -200,7 +200,7 @@ def validate_trajectory(traj, name):
     raise ValueError(f"{name} trajectory validation failed.")
 
 
-def compute_ate_full(gt_traj, est_traj):
+def compute_ate_full(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D):
     """
     Compute ATE for both translation and rotation.
     
@@ -227,7 +227,7 @@ def compute_ate_full(gt_traj, est_traj):
     return ate_trans, ate_rot, gt_sync, est_sync
 
 
-def compute_rpe_multi_scale(gt_traj, est_traj):
+def compute_rpe_multi_scale(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D):
     """
     Compute RPE at multiple scales: 1m, 5m, 10m.
     
@@ -268,7 +268,7 @@ def compute_rpe_multi_scale(gt_traj, est_traj):
     return results
 
 
-def plot_trajectories(gt_traj, est_traj, output_path):
+def plot_trajectories(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D, output_path):
     """Plot ground truth vs estimated trajectory (4-view)."""
     fig = plt.figure(figsize=(14, 12))
     
@@ -308,7 +308,7 @@ def plot_trajectories(gt_traj, est_traj, output_path):
     ax3.grid(True, alpha=0.3)
     
     # 3D trajectory
-    ax4 = fig.add_subplot(2, 2, 4, projection='3d')
+    ax4: Axes3D = fig.add_subplot(2, 2, 4, projection='3d')
     ax4.plot(gt_xyz[:, 0], gt_xyz[:, 1], gt_xyz[:, 2], 'b-', label='Ground Truth', linewidth=2)
     ax4.plot(est_xyz[:, 0], est_xyz[:, 1], est_xyz[:, 2], 'r--', label='Estimated', linewidth=1.5)
     ax4.set_xlabel('X (m)')

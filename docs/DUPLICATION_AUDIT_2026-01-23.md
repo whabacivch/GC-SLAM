@@ -12,23 +12,19 @@ Scope: identify duplicated or near-duplicated functions/helpers across the repo 
 ## Status Check (Current Working Tree)
 
 Re-scan results after your recent edits:
-- **DUP-001:** still present (unchanged).
-- **DUP-002:** still present (unchanged).
-- **DUP-003:** still present (unchanged; line numbers shifted).
-- **DUP-004:** still present (near-duplicate; unchanged).
+- **DUP-001:** FIXED — consolidated into `tools/rosbag_sqlite_utils.py`.
+- **DUP-002:** FIXED — consolidated into `tools/rosbag_sqlite_utils.py`.
+- **DUP-003:** FIXED — frontend-side publishing consolidated via `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/diagnostics/op_report_publish.py`.
+- **DUP-004:** FIXED — QoS resolution consolidated via `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/qos_utils.py`.
 - **DUP-005:** still present (intentional dual backend; parity discipline still needed).
-- **DUP-006:** still present (signatures differ; still a duplication risk).
+- **DUP-006:** FIXED — duplicate suppression consolidated via `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/dedup.py`.
 
 ## Exact Duplicates (AST-identical)
 
 ### DUP-001 — `resolve_db3_path` / `_resolve_db3_path` repeated across tools
 
 **Where**
-- `tools/estimate_lidar_base_extrinsic.py:50` (`_resolve_db3_path`)
-- `tools/inspect_camera_frames.py:26` (`_resolve_db3_path`)
-- `tools/inspect_odom_source.py:16` (`_resolve_db3_path`)
-- `tools/inspect_rosbag_deep.py:39` (`resolve_db3_path`)
-- `tools/validate_livox_converter.py:31` (`resolve_db3_path`)
+- Previously duplicated across multiple scripts; now consolidated into `tools/rosbag_sqlite_utils.py`.
 
 **Risk**
 - When a bugfix or behavior change is needed (e.g., rosbag2 layout edge cases), it will likely be applied to only one copy.
@@ -41,10 +37,7 @@ Re-scan results after your recent edits:
 ### DUP-002 — Tiny rosbag topic helpers duplicated in tools
 
 **Where**
-- `tools/estimate_lidar_base_extrinsic.py:65` (`_topic_id`)
-- `tools/validate_livox_converter.py:42` (`topic_id`)
-- `tools/estimate_lidar_base_extrinsic.py:71` (`_topic_type`)
-- `tools/validate_livox_converter.py:48` (`topic_type`)
+- Previously duplicated across scripts; now consolidated into `tools/rosbag_sqlite_utils.py`.
 
 **Candidate Fix (needs approval)**
 - Fold into the same shared helper module as DUP-001.
@@ -54,8 +47,7 @@ Re-scan results after your recent edits:
 ### DUP-003 — “publish OpReport as JSON” helper duplicated
 
 **Where**
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py:1382` (`Frontend._publish_report`)
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/tb3_odom_bridge.py:337` (`Tb3OdomBridge.publish_report`)
+- Frontend uses `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/diagnostics/op_report_publish.py`.
 
 **Risk**
 - Small divergence (topic, validation behavior, throttling, exception handling) can make op-reporting inconsistent across nodes.
@@ -70,8 +62,7 @@ These are not identical, but represent likely copy/paste patterns or API parity 
 ### DUP-004 — QoS “reliability string → QoSProfile list” duplicated
 
 **Where**
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/sensor_io.py:217` (`SensorIO._resolve_qos_profiles`)
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/tb3_odom_bridge.py:117` (`Tb3OdomBridge._resolve_qos_profiles`)
+- Consolidated into `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/qos_utils.py`.
 
 **Risk**
 - If “both/system_default/reliable/best_effort” behavior changes (or QoS depth defaults change), we get mismatch between sensor subscriptions and bridge subscriptions.
@@ -98,11 +89,10 @@ These are not identical, but represent likely copy/paste patterns or API parity 
 ### DUP-006 — `_is_duplicate` helper duplicated
 
 **Where**
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/sensor_io.py:290` (`SensorIO._is_duplicate`)
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/tb3_odom_bridge.py:153` (`Tb3OdomBridge._is_duplicate`)
+- Consolidated into `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/dedup.py`.
 
 **Note**
-- These are not AST-identical (different signatures / semantics), but they are doing the same “duplicate stamp/message suppression” job and are at risk of drifting.
+- Kept semantics identical; only the stamp-keying / last-seen storage was centralized.
 
 **Candidate Fix (needs approval)**
 - Centralize into a shared “stamp key” helper (or unify the logic and naming).

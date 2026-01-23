@@ -30,7 +30,7 @@ This means inline launch dict values can silently override YAML presets even if 
 Rosbag topics (source) → Utility nodes → Frontend → Backend → Outputs:
 
 1. `/livox/mid360/lidar` → `livox_converter` → `/lidar/points`
-2. `/odom` → `tb3_odom_bridge` → `/sim/odom`
+2. `/odom` → `odom_bridge` → `/sim/odom`
 3. `frontend_node` subscribes (via `SensorIO`) to `/sim/odom` and `/lidar/points` (3D mode), optionally IMU
 4. `frontend_node` publishes:
    - `/sim/anchor_create`
