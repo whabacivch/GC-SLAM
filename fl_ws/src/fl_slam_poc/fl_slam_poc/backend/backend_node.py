@@ -1090,7 +1090,7 @@ class FLBackend(Node):
         keyframe_j = int(msg.keyframe_j)  # Current keyframe
         t_i = float(msg.t_i)
         t_j = float(msg.t_j)
-        dt = max(t_j - t_i, 0.0)
+        dt_header = max(t_j - t_i, 0.0)
 
         stamps = np.asarray(msg.stamp, dtype=np.float64).reshape(-1)
         accel_raw = np.asarray(msg.accel, dtype=np.float64).reshape(-1)
@@ -1105,6 +1105,16 @@ class FLBackend(Node):
         if accel.shape[0] != stamps.shape[0] or gyro.shape[0] != stamps.shape[0]:
             self.get_logger().warn("IMU segment malformed: stamps/accel/gyro length mismatch")
             return
+
+        dt_stamps = float(stamps[-1] - stamps[0]) if stamps.size > 0 else 0.0
+        dt = max(dt_stamps, 0.0)
+        stamp_deltas = np.diff(stamps) if stamps.size > 1 else np.array([], dtype=np.float64)
+        non_monotonic_count = int(np.sum(stamp_deltas <= 0)) if stamp_deltas.size > 0 else 0
+        stamp_delta_min = float(np.min(stamp_deltas)) if stamp_deltas.size > 0 else None
+        stamp_delta_mean = float(np.mean(stamp_deltas)) if stamp_deltas.size > 0 else None
+        stamp_delta_max = float(np.max(stamp_deltas)) if stamp_deltas.size > 0 else None
+        dt_gap_start = float(stamps[0] - t_i) if stamps.size > 0 else None
+        dt_gap_end = float(t_j - stamps[-1]) if stamps.size > 0 else None
 
         bias_gyro = np.asarray(msg.bias_ref_bg, dtype=np.float64).reshape(3)
         bias_accel = np.asarray(msg.bias_ref_ba, dtype=np.float64).reshape(3)
@@ -1368,6 +1378,14 @@ class FLBackend(Node):
             metrics={
                 "keyframe_i": keyframe_i,
                 "keyframe_j": keyframe_j,
+                "dt_header": float(dt_header),
+                "dt_stamps": float(dt_stamps),
+                "dt_gap_start": float(dt_gap_start) if dt_gap_start is not None else None,
+                "dt_gap_end": float(dt_gap_end) if dt_gap_end is not None else None,
+                "stamp_delta_min": stamp_delta_min,
+                "stamp_delta_mean": stamp_delta_mean,
+                "stamp_delta_max": stamp_delta_max,
+                "non_monotonic_count": non_monotonic_count,
                 "dt_sec": dt,
                 "n_measurements": n_measurements,
                 "delta_p_norm_m": float(np.linalg.norm(delta_p)),
