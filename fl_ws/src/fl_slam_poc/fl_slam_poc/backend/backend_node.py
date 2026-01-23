@@ -64,7 +64,11 @@ from fl_slam_poc.common.se3 import (
 )
 from fl_slam_poc.backend import TimeAlignmentModel, AdaptiveProcessNoise, AdaptiveIMUNoiseModel, WishartPrior
 from fl_slam_poc.backend.gaussian_info import make_evidence, fuse_info, mean_cov
-from fl_slam_poc.backend.gaussian_geom import gaussian_frobenius_correction
+from fl_slam_poc.backend.gaussian_geom import (
+    gaussian_frobenius_correction, 
+    se3_tangent_frobenius_correction,
+    imu_tangent_frobenius_correction
+)
 from fl_slam_poc.backend.information_distances import hellinger_gaussian
 from fl_slam_poc.frontend.vmf_geometry import vmf_barycenter, vmf_mean_param
 from fl_slam_poc.common.op_report import OpReport
@@ -921,8 +925,10 @@ class FLBackend(Node):
             delta_R = delta_R @ rotvec_to_rotmat(omega)
             accel_corr = accel[idx] - bias_accel
             accel_rot = delta_R @ accel_corr
-            delta_v = delta_v + accel_rot * dt
+            # CRITICAL: Position update uses OLD velocity (tangent-space correct)
+            # This is the Forster preintegration model: predict-then-retract
             delta_p = delta_p + delta_v * dt + 0.5 * accel_rot * dt * dt
+            delta_v = delta_v + accel_rot * dt
 
         delta_rotvec = np.array(rotmat_to_rotvec(delta_R), dtype=float)
         return delta_p, delta_v, delta_rotvec
@@ -1024,6 +1030,13 @@ class FLBackend(Node):
         delta_p, delta_v, delta_rotvec = self._integrate_raw_imu_segment(
             stamps, accel, gyro, bias_gyro, bias_accel
         )
+        
+        # Apply Frobenius (BCH third-order) correction to preintegrated IMU deltas
+        # This corrects for SE(3) manifold curvature before deltas are used in residuals
+        delta_p, delta_v, delta_rotvec, imu_frob_stats = imu_tangent_frobenius_correction(
+            delta_p, delta_v, delta_rotvec, cov_preint=R_imu
+        )
+        
         z_imu = np.concatenate([delta_p, delta_v, delta_rotvec])
         
         # Debug logging
@@ -1204,9 +1217,16 @@ class FLBackend(Node):
             h_j = h_j - L_ji @ L_ii_inv @ h_i
 
         delta_mu, delta_cov = mean_cov(L_j, h_j)
-        delta_mu_corr, frob_stats = gaussian_frobenius_correction(delta_mu)
+        
+        # Apply SE(3) tangent-space Frobenius (BCH third-order) correction
+        # This corrects linearization error from manifold curvature before retraction
+        # Per Self-Adaptive Systems Guide: tangent ops + proper retraction
+        delta_mu_corr, frob_stats = se3_tangent_frobenius_correction(
+            delta_mu,
+            state_uncertainty=np.diag(delta_cov) if delta_cov.ndim == 2 else None
+        )
 
-        # Retract delta onto current state
+        # Retract delta onto current state (after Frobenius correction)
         pose_delta = delta_mu_corr[:6]
         rest_delta = delta_mu_corr[6:]
         pose_new = se3_compose(mu_current[:6], se3_exp(pose_delta))

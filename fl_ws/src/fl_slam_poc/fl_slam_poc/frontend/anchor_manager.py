@@ -81,6 +81,9 @@ class AnchorManager:
         Update anchor beliefs with soft association.
         
         Uses models.nig.update (exact Bayesian update).
+        
+        Also updates birth model concentration_scale based on responsibility entropy
+        (Self-Adaptive Systems compliant: behavior emerges from posterior uncertainty).
         """
         for anchor in self.anchors:
             r = responsibilities.get(anchor.anchor_id, 0.0)
@@ -91,6 +94,19 @@ class AnchorManager:
         # Update base component weight
         r_new_eff = obs_weight * float(r_new)
         self.base_weight += r_new_eff
+        
+        # Update birth model concentration from responsibility entropy
+        # This makes birth intensity adaptive (Self-Adaptive Systems Guide Section 3)
+        if len(self.anchors) > 0:
+            # Build full responsibility array including new component
+            all_responsibilities = np.array(
+                [responsibilities.get(a.anchor_id, 0.0) for a in self.anchors] + [r_new],
+                dtype=float
+            )
+            self.birth_model.update_concentration_from_responsibilities(
+                all_responsibilities, 
+                len(self.anchors)
+            )
         
         return r_new_eff
     

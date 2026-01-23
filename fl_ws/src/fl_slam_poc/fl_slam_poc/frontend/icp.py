@@ -210,18 +210,40 @@ def icp_3d(
 N_MIN_SE3_DOF = 6.0
 K_SIGMOID = 0.5  # Steepness: chosen for smooth transition around n_min
 
+# Information-geometric ICP weighting parameters (declared priors)
+# These are priors/hyperparameters, not "reasonable defaults"
+HELLINGER_LAMBDA_PRIOR = 2.0  # Prior: Hellinger tilt weight (from hierarchical construction)
+EXPECTED_ICP_VARIANCE_PRIOR = 0.1  # Prior: expected MSE for good ICP match (m^2)
+
+
+def _hellinger_squared_scalar(observed_var: float, expected_var: float) -> float:
+    """
+    Squared Hellinger distance between two 1D Gaussians (zero-mean).
+    
+    H²(N(0, σ₁²), N(0, σ₂²)) = 1 - √(2σ₁σ₂/(σ₁² + σ₂²))
+    
+    This is the scalar specialization for efficiency.
+    """
+    if observed_var <= 0 or expected_var <= 0:
+        return 1.0  # Maximum divergence for invalid input
+    
+    s1, s2 = math.sqrt(observed_var), math.sqrt(expected_var)
+    bc = math.sqrt(2.0 * s1 * s2 / (observed_var + expected_var))
+    return max(0.0, 1.0 - bc)
+
 
 def icp_information_weight(
     n_source: int, 
     n_target: int, 
     mse: float,
     n_ref: float = 100.0, 
-    sigma_mse: float = 0.01
+    sigma_mse: float = EXPECTED_ICP_VARIANCE_PRIOR,
+    hellinger_lambda: float = HELLINGER_LAMBDA_PRIOR
 ) -> float:
     """
     Compute probabilistic weight for ICP result based on information content.
     
-    This is a SOFT WEIGHT (no threshold) combining:
+    This is a SOFT WEIGHT (no threshold) using information-geometric principles:
     
     1. DOF observability weight:
        SE(3) requires n ≥ 6 for full observability. We use sigmoid:
@@ -230,13 +252,21 @@ def icp_information_weight(
        Justification: This smoothly transitions from ~0 for n << 6
        to ~1 for n >> 6, avoiding hard cutoffs.
     
-    2. Information content weight:
+    2. Information content weight (Fisher information):
        More points = more Fisher information.
        w_info = min(1, n_eff / n_ref)
     
-    3. Quality weight (Gaussian model):
-       Lower MSE = better fit to generative model.
-       w_qual = exp(-MSE / σ_mse)
+    3. Hellinger-based quality weight (information-geometric):
+       Weight based on Hellinger distance between observed and expected
+       ICP residual distributions:
+       
+       w_qual = exp(-λ · H²(N(0, MSE), N(0, σ²_expected)))
+       
+       where λ is the Hellinger tilt weight (prior: 2.0 from hierarchical construction)
+       and σ²_expected is the expected variance for a good ICP match (prior: 0.1 m²).
+       
+       This replaces the naive exp(-MSE/σ) formulation with proper divergence-based
+       weighting that respects the geometry of probability distributions.
     
     Combined: w = w_dof * w_info * w_qual
     
@@ -244,8 +274,9 @@ def icp_information_weight(
         n_source: Number of source points
         n_target: Number of target points
         mse: Mean squared error from ICP
-        n_ref: Reference point count for saturation
-        sigma_mse: MSE scale for quality weight
+        n_ref: Reference point count for saturation (prior: effective sample size)
+        sigma_mse: Expected MSE variance for good match (prior: 0.1 m²)
+        hellinger_lambda: Hellinger tilt weight (prior: 2.0)
     
     Returns:
         Weight in (0, 1]
@@ -258,8 +289,12 @@ def icp_information_weight(
     # 2. Information content (saturates at n_ref)
     info_weight = min(1.0, n_eff / n_ref)
     
-    # 3. Quality weight (Gaussian model for MSE)
-    quality_weight = math.exp(-mse / (sigma_mse + 1e-12))
+    # 3. Hellinger-based quality weight (information-geometric)
+    # The observed "covariance" is the MSE from ICP
+    # The expected "covariance" is sigma_mse (prior expectation)
+    # H² measures divergence from expected behavior
+    h_squared = _hellinger_squared_scalar(mse, sigma_mse)
+    quality_weight = math.exp(-hellinger_lambda * h_squared)
     
     return dof_weight * info_weight * quality_weight
 

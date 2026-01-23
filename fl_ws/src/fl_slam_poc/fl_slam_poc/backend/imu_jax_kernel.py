@@ -81,8 +81,10 @@ def _integrate_raw_imu(
         delta_R = delta_R @ so3_exp(omega)
         accel_corr = a - bias_a
         accel_rot = delta_R @ accel_corr
-        delta_v = delta_v + accel_rot * dt
+        # CRITICAL: Position update uses OLD velocity (tangent-space correct)
+        # This is the Forster preintegration model: predict-then-retract
         delta_p = delta_p + delta_v * dt + 0.5 * accel_rot * dt * dt
+        delta_v = delta_v + accel_rot * dt
 
         t_prev = jnp.where(valid, t, t_prev)
         prev_valid = valid

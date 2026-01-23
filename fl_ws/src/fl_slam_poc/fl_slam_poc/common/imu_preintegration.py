@@ -164,12 +164,15 @@ class IMUPreintegrator:
             delta_R_inc = rotvec_to_rotmat(omega)
             delta_R = delta_R @ delta_R_inc
             
-            # Update velocity: Δv_{k+1} = Δv_k + ΔR_k * a * dt
+            # CRITICAL: Position update uses OLD velocity (tangent-space correct)
+            # This is the Forster preintegration model: predict-then-retract
             accel_rotated = delta_R @ accel_avg
-            delta_v += accel_rotated * dt
             
             # Update position: Δp_{k+1} = Δp_k + Δv_k * dt + 0.5 * ΔR_k * a * dt²
             delta_p += delta_v * dt + 0.5 * accel_rotated * dt * dt
+            
+            # Update velocity: Δv_{k+1} = Δv_k + ΔR_k * a * dt
+            delta_v += accel_rotated * dt
         
         # Convert rotation to axis-angle
         delta_rotvec = rotmat_to_rotvec(delta_R)
