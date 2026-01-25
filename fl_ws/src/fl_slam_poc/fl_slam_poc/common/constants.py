@@ -41,6 +41,10 @@ GC_ALPHA_MAX = 1.0  # Maximum fusion scale alpha
 GC_KAPPA_SCALE = 1.0  # Scale for trust computation
 GC_C0_COND = 1e6  # Conditioning scale for trust
 
+# vMF κ approximation blending (continuous; no piecewise gates).
+GC_KAPPA_BLEND_R0 = 0.8
+GC_KAPPA_BLEND_TAU = 0.03
+
 # Excitation coupling constants
 GC_C_DT = 1.0  # Time offset coupling constant
 GC_C_EX = 1.0  # Extrinsic coupling constant
@@ -68,6 +72,10 @@ GC_SLICE_EXTRINSIC_END = 22
 
 # Soft assign temperature (for BinSoftAssign)
 GC_TAU_SOFT_ASSIGN = 0.1  # Default temperature (configurable)
+
+# Time-warp / membership kernel width as a fraction of scan duration.
+# Used to avoid hard [t0,t1] boundaries in deskew and time association.
+GC_TIME_WARP_SIGMA_FRAC = 0.1
 
 # =============================================================================
 # END GOLDEN CHILD MANIFEST CONSTANTS

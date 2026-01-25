@@ -25,6 +25,14 @@ from fl_slam_poc.backend.structures.inverse_wishart_jax import (
 
 
 @jax.jit
+def _positive_part_softplus(x: jnp.ndarray, eps: float = 1e-12, beta: float = 50.0) -> jnp.ndarray:
+    """Smooth projection to (0,∞): softplus(x) + eps."""
+    x = jnp.asarray(x, dtype=jnp.float64)
+    b = jnp.array(beta, dtype=jnp.float64)
+    return (jax.nn.softplus(b * x) / b) + jnp.array(eps, dtype=jnp.float64)
+
+
+@jax.jit
 def process_noise_state_to_Q_jax(
     pn_state: ProcessNoiseIWState,
     eps_psd: float = C.GC_EPS_PSD,
@@ -40,8 +48,8 @@ def process_noise_state_to_Q_jax(
         Q_psd: (22,22) PSD matrix (DomainProjectionPSD always applied).
     """
     dims_f = pn_state.block_dims.astype(jnp.float64)
-    denom = pn_state.nu - dims_f - 1.0
-    denom = jnp.maximum(denom, 1e-12)  # domain guard (mean must exist)
+    denom_raw = pn_state.nu - dims_f - 1.0
+    denom = _positive_part_softplus(denom_raw, eps=1e-12)
 
     Q_blocks = pn_state.Psi_blocks / denom[:, None, None]  # (7,6,6)
     Q_blocks = Q_blocks * PROCESS_BLOCK_MASKS
@@ -118,7 +126,7 @@ def process_noise_iw_apply_suffstats_jax(
     dt_sec: float,
     eps_psd: float = C.GC_EPS_PSD,
     nu_max: float = 1000.0,
-) -> ProcessNoiseIWState:
+) -> tuple[ProcessNoiseIWState, jnp.ndarray]:
     """
     Apply aggregated commutative sufficient statistics to update the IW state (once per scan).
 
@@ -148,16 +156,20 @@ def process_noise_iw_apply_suffstats_jax(
 
     # Project each padded block to PSD for numerical stability (always applied).
     def proj_block(P):
-        P_psd, _cert = domain_projection_psd_core(P, eps_psd)
-        return P_psd
+        P_psd, cert_vec = domain_projection_psd_core(P, eps_psd)
+        return P_psd, cert_vec
 
-    Psi_psd = jax.vmap(proj_block)(Psi_raw)
+    Psi_psd, Psi_cert = jax.vmap(proj_block)(Psi_raw)
+    psd_proj_delta = jnp.sum(Psi_cert[:, 0])
 
     # Update nu with retention and clipping
     nu_raw = rho * pn_state.nu + dnu
     dims_f = pn_state.block_dims.astype(jnp.float64)
     nu_min = dims_f + 1.0 + C.GC_IW_NU_WEAK_ADD  # enforce mean existence baseline
-    nu = jnp.clip(jnp.maximum(nu_raw, nu_min), nu_min, nu_max)
+    # Smooth projection of ν to [nu_min, nu_max] (no hard clip kink).
+    nu_floor = nu_min + jax.nn.softplus(nu_raw - nu_min)
+    nu = jnp.array(nu_max, dtype=jnp.float64) - jax.nn.softplus(jnp.array(nu_max, dtype=jnp.float64) - nu_floor)
+    nu_proj_delta = jnp.sum(jnp.abs(nu - nu_raw))
 
-    return ProcessNoiseIWState(nu=nu, Psi_blocks=Psi_psd, block_dims=pn_state.block_dims)
-
+    cert_vec = jnp.array([psd_proj_delta, nu_proj_delta], dtype=jnp.float64)
+    return ProcessNoiseIWState(nu=nu, Psi_blocks=Psi_psd, block_dims=pn_state.block_dims), cert_vec

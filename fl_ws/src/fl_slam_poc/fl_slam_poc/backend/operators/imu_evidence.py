@@ -156,7 +156,14 @@ def imu_vmf_gravity_evidence(
         eps_mass=eps_mass,
     )
 
-    kappa = float(kappa_from_resultant_v2(float(Rbar), eps_r=constants.GC_EPS_R, eps_den=constants.GC_EPS_DEN).kappa)
+    kappa_result, kappa_cert, _kappa_effect = kappa_from_resultant_v2(
+        R_bar=float(Rbar),
+        eps_r=constants.GC_EPS_R,
+        eps_den=constants.GC_EPS_DEN,
+        chart_id=chart_id,
+        anchor_id=anchor_id,
+    )
+    kappa = float(kappa_result.kappa)
 
     # Predicted mean direction in body frame at the linearization point.
     # mu0 = R0^T (-g_hat)
@@ -177,7 +184,7 @@ def imu_vmf_gravity_evidence(
     I3 = jnp.eye(3, dtype=jnp.float64)
     H_rot = kappa_f * (x_dot_mu * I3 - 0.5 * (jnp.outer(xbar, mu0) + jnp.outer(mu0, xbar)))
     H_rot = 0.5 * (H_rot + H_rot.T)
-    H_rot_psd, _ = domain_projection_psd_core(H_rot, eps_psd)
+    H_rot_psd, H_cert_vec = domain_projection_psd_core(H_rot, eps_psd)
 
     L = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
     L = L.at[0:3, 0:3].set(H_rot_psd)
@@ -185,26 +192,28 @@ def imu_vmf_gravity_evidence(
     h = h.at[0:3].set(-g_rot)
 
     nll_proxy = float(-kappa_f * (mu0 @ xbar))
-    eigvals = jnp.linalg.eigvalsh(H_rot_psd)
-    eig_min = float(jnp.min(eigvals))
-    eig_max = float(jnp.max(eigvals))
-    cond = eig_max / max(eig_min, 1e-18)
+    # Conditioning comes from the PSD projection certificate (already clamped).
+    proj_delta = float(H_cert_vec[0])
+    eig_min = float(H_cert_vec[2])
+    eig_max = float(H_cert_vec[3])
+    cond = float(H_cert_vec[4])
+    near_null = int(H_cert_vec[5])
 
     cert = CertBundle.create_approx(
         chart_id=chart_id,
         anchor_id=anchor_id,
-        triggers=["ImuAccelDirectionClosedFormLaplace"],
+        triggers=["ImuAccelDirectionClosedFormLaplace"] + list(kappa_cert.approximation_triggers),
         conditioning=ConditioningCert(
             eig_min=eig_min,
             eig_max=eig_max,
             cond=cond,
-            near_null_count=int(jnp.sum(eigvals < eps_psd)),
+            near_null_count=near_null,
         ),
         support=SupportCert(ess_total=float(ess), support_frac=1.0),
         mismatch=MismatchCert(nll_per_ess=nll_proxy / (float(ess) + eps_mass), directional_score=float(Rbar)),
         influence=InfluenceCert(
             lift_strength=0.0,
-            psd_projection_delta=0.0,
+            psd_projection_delta=proj_delta,
             mass_epsilon_ratio=0.0,
             anchor_drift_rho=0.0,
             dt_scale=1.0,
@@ -220,4 +229,3 @@ def imu_vmf_gravity_evidence(
     )
 
     return ImuEvidenceResult(L_imu=L, h_imu=h, kappa=kappa, ess=float(ess)), cert, effect
-

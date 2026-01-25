@@ -17,6 +17,7 @@ from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.certificates import CertBundle, ExpectedEffect, InfluenceCert, SupportCert
 from fl_slam_poc.common.geometry import se3_jax
+from fl_slam_poc.backend.operators.imu_preintegration import smooth_window_weights
 
 
 @dataclass
@@ -35,7 +36,7 @@ def _deskew_points_constant_twist_jax(
     scan_start_time: float,
     scan_end_time: float,
     xi_body: jnp.ndarray,       # (6,) [trans, rotvec] over full interval
-) -> jnp.ndarray:
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     points = jnp.asarray(points, dtype=jnp.float64)
     timestamps = jnp.asarray(timestamps, dtype=jnp.float64).reshape(-1)
     weights = jnp.asarray(weights, dtype=jnp.float64).reshape(-1)
@@ -44,8 +45,7 @@ def _deskew_points_constant_twist_jax(
     t0 = jnp.array(scan_start_time, dtype=jnp.float64)
     t1 = jnp.array(scan_end_time, dtype=jnp.float64)
     denom = jnp.maximum(t1 - t0, 1e-12)
-    alpha = (timestamps - t0) / denom
-    alpha = jnp.clip(alpha, 0.0, 1.0)
+    alpha = (timestamps - t0) / denom  # no hard [0,1] clipping; weights handle membership
 
     def one_point(p, a):
         T_a = se3_jax.se3_exp(a * xi_body)  # (6,) [t, rotvec]
@@ -55,7 +55,18 @@ def _deskew_points_constant_twist_jax(
         # Apply inverse: p0 = R^T (p - t)
         return R.T @ (p - t)
 
-    return jax.vmap(one_point)(points, alpha)
+    points_out = jax.vmap(one_point)(points, alpha)
+
+    # Soft membership kernel in time (no hard window boundaries).
+    sigma = jnp.array(constants.GC_TIME_WARP_SIGMA_FRAC, dtype=jnp.float64) * denom
+    w_time = smooth_window_weights(
+        imu_stamps=timestamps,  # same functional form for points
+        scan_start_time=scan_start_time,
+        scan_end_time=scan_end_time,
+        sigma=sigma,
+    )
+    weights_out = jnp.asarray(weights, dtype=jnp.float64).reshape(-1) * w_time
+    return points_out, weights_out
 
 
 def deskew_constant_twist(
@@ -72,7 +83,7 @@ def deskew_constant_twist(
     """
     Deskew points with a constant body twist model (fixed cost).
     """
-    points_out = _deskew_points_constant_twist_jax(
+    points_out, weights_out = _deskew_points_constant_twist_jax(
         points=points,
         timestamps=timestamps,
         weights=weights,
@@ -84,14 +95,16 @@ def deskew_constant_twist(
     result = DeskewConstantTwistResult(
         points=points_out,
         timestamps=jnp.asarray(timestamps, dtype=jnp.float64),
-        weights=jnp.asarray(weights, dtype=jnp.float64),
+        weights=weights_out,
         ess_imu=float(ess_imu),
     )
 
+    w_in = jnp.asarray(weights, dtype=jnp.float64).reshape(-1)
+    retained = float(jnp.sum(weights_out) / (jnp.sum(w_in) + constants.GC_EPS_MASS))
     cert = CertBundle.create_exact(
         chart_id=chart_id,
         anchor_id=anchor_id,
-        support=SupportCert(ess_total=float(ess_imu), support_frac=1.0),
+        support=SupportCert(ess_total=float(ess_imu), support_frac=retained),
         influence=InfluenceCert(
             lift_strength=0.0,
             psd_projection_delta=0.0,
@@ -110,4 +123,3 @@ def deskew_constant_twist(
     )
 
     return result, cert, effect
-

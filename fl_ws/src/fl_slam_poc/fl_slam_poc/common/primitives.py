@@ -181,14 +181,17 @@ def inv_mass_core(m: jnp.ndarray, eps_mass: float = 1e-12) -> Tuple[jnp.ndarray,
     """
     Arrays-only InvMass core (JIT-safe).
 
-    Matches the project convention: denom = max(m, eps_mass).
+    Matches the GC v2 spec: denom = m + eps_mass.
 
     Returns:
-        inv_m: 1 / denom
-        mass_epsilon_ratio: eps_mass / denom
+        inv_m: 1 / (m + eps_mass)
+        mass_epsilon_ratio: eps_mass / (m + eps_mass)
     """
     m = jnp.asarray(m, dtype=jnp.float64)
-    denom = jnp.maximum(m, eps_mass)
+    # eps_guard keeps the function total even under contract violations (e.g., negative mass),
+    # without reintroducing a max-kink.
+    eps_guard = jnp.array(jnp.finfo(jnp.float64).eps, dtype=jnp.float64)
+    denom = m + jnp.array(eps_mass, dtype=jnp.float64) + eps_guard
     inv_m = 1.0 / denom
     eps_ratio = eps_mass / denom
     return inv_m, eps_ratio
@@ -393,7 +396,7 @@ def inv_mass(m: float, eps_mass: float = 1e-12) -> InvMassResult:
     """
     Compute inverse mass with epsilon regularization (always applied).
     
-    inv_mass = 1 / max(m, eps_mass)
+    inv_mass = 1 / (m + eps_mass)
     
     This removes all division-by-zero gating.
     

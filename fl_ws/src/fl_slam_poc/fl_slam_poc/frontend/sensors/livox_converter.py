@@ -189,12 +189,29 @@ class LivoxConverterNode(Node):
         ring = np.array([int(getattr(p, "line", 0)) for p in points_valid], dtype=np.uint8)
         tag = np.array([int(getattr(p, "tag", 0)) for p in points_valid], dtype=np.uint8)
 
-        # Per-point time offset is not present in livox_ros_driver2; try to detect for other drivers.
-        has_time_offset = hasattr(points_valid[0], "offset_time") if points_valid else False
-        if has_time_offset:
+        # Per-point time offset: ALWAYS include (required by GC v2 backend)
+        # For livox_ros_driver2, offset_time is not in CustomPoint, so we compute synthetic offsets
+        # assuming uniform time spacing within the scan (typical for non-repetitive scanning)
+        has_time_offset_field = hasattr(points_valid[0], "offset_time") if points_valid else False
+        if has_time_offset_field:
+            # Use actual offset_time from message (e.g., livox_ros_driver)
             time_offset = np.array([int(getattr(p, "offset_time", 0)) for p in points_valid], dtype=np.uint32)
         else:
-            time_offset = None
+            # For livox_ros_driver2: compute synthetic time_offset from point index
+            # Assuming uniform time spacing: offset = point_index * (scan_duration_ns / num_points)
+            # For MID-360, typical scan duration is ~100ms = 100e6 ns
+            # This allows per-point timestamp reconstruction in the backend
+            n_points = len(points_valid)
+            if n_points > 0:
+                # Estimate: 100ms scan duration distributed uniformly across points
+                scan_duration_ns = 100_000_000  # 100ms in nanoseconds
+                point_indices = np.arange(n_points, dtype=np.uint32)
+                time_offset = (point_indices * scan_duration_ns // n_points).astype(np.uint32)
+            else:
+                time_offset = np.array([], dtype=np.uint32)
+        
+        # Always include time_offset field (required by GC v2)
+        has_time_offset = True
 
         # timebase is present in livox_ros_driver2 CustomMsg (uint64). Preserve if available.
         timebase = int(getattr(msg, "timebase", 0))
@@ -274,10 +291,10 @@ class LivoxConverterNode(Node):
                 + ", ".join([f"{f.name}@{f.offset}" for f in cloud_msg.fields])
                 + f" (point_step={cloud_msg.point_step})"
             )
-            if not has_time_offset:
+            if not has_time_offset_field:
                 self.get_logger().info(
-                    "Livox converter: per-point time offset not available in this message type; "
-                    "publishing message-level timebase only."
+                    "Livox converter: per-point time offset computed synthetically from point index "
+                    "(uniform spacing assumption for livox_ros_driver2)."
                 )
 
         self.publisher.publish(cloud_msg)

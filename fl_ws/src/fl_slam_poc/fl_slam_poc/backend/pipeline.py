@@ -14,6 +14,7 @@ from typing import Tuple, List, Optional, Dict
 
 from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
+from fl_slam_poc.common.geometry import se3_jax
 from fl_slam_poc.common.belief import BeliefGaussianInfo, D_Z, HypothesisSet
 from fl_slam_poc.common.certificates import (
     CertBundle,
@@ -295,6 +296,11 @@ def process_scan_single_hypothesis(
     xi_body = se3_jax.se3_log(delta_pose)  # (6,) twist over interval
 
     # IMU measurement-noise IW sufficient stats (Σg, Σa) from commutative residuals
+    # Average IMU sampling period for PSD mapping (Var * dt -> PSD).
+    m_imu = imu_stamps.shape[0]
+    dt_imu = (imu_stamps[-1] - imu_stamps[0]) / jnp.maximum(jnp.array(m_imu - 1, dtype=jnp.float64), 1.0)
+    dt_imu = jnp.maximum(dt_imu, 1e-12)
+
     dt_scan = jnp.maximum(jnp.array(scan_end_time - scan_start_time, dtype=jnp.float64), 1e-12)
     omega_avg = delta_pose[3:6] / dt_scan
     iw_meas_gyro_dPsi, iw_meas_gyro_dnu = imu_gyro_meas_iw_suffstats_from_avg_rate_jax(
@@ -302,6 +308,7 @@ def process_scan_single_hypothesis(
         weights=w_imu,
         gyro_bias=gyro_bias,
         omega_avg=omega_avg,
+        dt_imu_sec=dt_imu,
         eps_mass=config.eps_mass,
     )
     iw_meas_accel_dPsi, iw_meas_accel_dnu = imu_accel_meas_iw_suffstats_from_gravity_dir_jax(
@@ -310,6 +317,7 @@ def process_scan_single_hypothesis(
         weights=w_imu,
         accel_bias=accel_bias,
         gravity_W=gravity_W,
+        dt_imu_sec=dt_imu,
         eps_mass=config.eps_mass,
     )
 
@@ -733,6 +741,7 @@ class RuntimeManifest:
                 "so3_right_jacobian": "fl_slam_poc.common.geometry.se3_jax.so3_right_jacobian",
                 "domain_projection_psd": "fl_slam_poc.common.primitives.domain_projection_psd_core",
                 "lifted_spd_solve": "fl_slam_poc.common.primitives.spd_cholesky_solve_lifted_core",
+                "lifted_spd_inverse": "fl_slam_poc.common.primitives.spd_cholesky_inverse_lifted_core",
                 "process_noise_model": "fl_slam_poc.backend.operators.inverse_wishart_jax (IW, commutative per-scan)",
                 "measurement_noise_model": "fl_slam_poc.backend.operators.measurement_noise_iw_jax (IW per-sensor; lidar enabled)",
                 "deskew": "fl_slam_poc.backend.operators.deskew_constant_twist (constant twist; IMU preintegration)",
@@ -740,6 +749,9 @@ class RuntimeManifest:
                 "imu_evidence": "fl_slam_poc.backend.operators.imu_evidence (Laplace over intrinsic ops)",
                 "odom_evidence": "fl_slam_poc.backend.operators.odom_evidence (Gaussian SE(3) pose factor)",
                 "lidar_evidence": "fl_slam_poc.backend.operators.lidar_evidence (closed-form pose info; no sigma-point regression)",
+                "translation_wls": "fl_slam_poc.backend.operators.translation (vectorized over bins; Cholesky inverse)",
+                "hypothesis_barycenter": "fl_slam_poc.backend.operators.hypothesis (vectorized over hypotheses)",
+                "map_update": "fl_slam_poc.backend.operators.map_update (vectorized over bins)",
                 "lidar_converter": "fl_slam_poc.frontend.sensors.livox_converter",
                 "pointcloud_parser": "fl_slam_poc.backend.backend_node.parse_pointcloud2",
             }

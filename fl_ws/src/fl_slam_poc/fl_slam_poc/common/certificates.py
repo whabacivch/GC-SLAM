@@ -79,6 +79,7 @@ class InfluenceCert:
     """Influence/scaling information."""
     lift_strength: float = 0.0  # Total lift applied
     psd_projection_delta: float = 0.0  # Total PSD projection magnitude
+    nu_projection_delta: float = 0.0  # Total ν / dof projection magnitude (domain projection)
     mass_epsilon_ratio: float = 0.0  # eps_mass / (mass + eps_mass)
     anchor_drift_rho: float = 0.0  # Anchor drift blend factor
     dt_scale: float = 1.0  # Time scaling factor
@@ -89,6 +90,7 @@ class InfluenceCert:
         return {
             "lift_strength": self.lift_strength,
             "psd_projection_delta": self.psd_projection_delta,
+            "nu_projection_delta": self.nu_projection_delta,
             "mass_epsilon_ratio": self.mass_epsilon_ratio,
             "anchor_drift_rho": self.anchor_drift_rho,
             "dt_scale": self.dt_scale,
@@ -181,6 +183,7 @@ class CertBundle:
         return (
             self.influence.lift_strength
             + self.influence.psd_projection_delta
+            + self.influence.nu_projection_delta
             + self.influence.mass_epsilon_ratio
             + self.influence.anchor_drift_rho
             + abs(1.0 - self.influence.dt_scale)
@@ -296,6 +299,7 @@ def aggregate_certificates(certs: List[CertBundle]) -> CertBundle:
     agg_influence = InfluenceCert(
         lift_strength=sum(c.influence.lift_strength for c in certs),
         psd_projection_delta=sum(c.influence.psd_projection_delta for c in certs),
+        nu_projection_delta=sum(c.influence.nu_projection_delta for c in certs),
         mass_epsilon_ratio=max(c.influence.mass_epsilon_ratio for c in certs),
         anchor_drift_rho=max(c.influence.anchor_drift_rho for c in certs),
         dt_scale=min(c.influence.dt_scale for c in certs),

@@ -15,8 +15,13 @@ estimator for the von Mises-Fisher concentration parameter κ.
 where A_d(κ) = I_{d/2}(κ) / I_{d/2-1}(κ) is the ratio of modified Bessel
 functions of the first kind, and R̄ is the mean resultant length.
 
-**Approximation Used:**
-    κ ≈ R̄ * (d - R̄²) / (1 - R̄²)
+**Approximation Used (Continuous Blend):**
+We use a single smooth closed-form mapping that remains well-behaved as R̄ → 1:
+
+    κ_low  = R̄ * (d - R̄²) / (1 - R̄² + eps)         (low-R Taylor-style)
+    κ_high = -log(1 - R̄² + eps)                      (log barrier; conservative at high R̄)
+    s      = sigmoid((R̄ - R0) / tau)
+    κ      = (1 - s) * κ_low + s * κ_high
 
 This is derived from a Taylor expansion of A_d^{-1}(R̄) around R̄ = 0.
 
@@ -27,11 +32,10 @@ This is derived from a Taylor expansion of A_d^{-1}(R̄) around R̄ = 0.
 - For R̄ → 1: Asymptotically underestimates by factor ~2
 
 **Justification for Use:**
-1. The approximation is continuous and branch-free (required by spec)
-2. For direction evidence from LiDAR bins, typical R̄ < 0.7
-3. Overestimating κ would over-weight noisy direction evidence
-4. Under-estimation is conservative (safer for sensor fusion)
-5. JAX-compatible (no special function calls needed)
+1. The mapping is continuous and branch-free (required by spec)
+2. It avoids pathological curvature explosions as R̄ approaches 1
+3. Under-estimation at high R̄ is conservative for sensor fusion
+4. Closed-form and JAX-friendly (no solvers / no special Bessel inverses)
 
 **Alternative (Not Implemented):**
 For higher accuracy at large R̄, a Bessel-based estimator using
@@ -46,6 +50,7 @@ Spec Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5.6
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -76,11 +81,18 @@ class KappaResult:
 # =============================================================================
 
 
-def _kappa_continuous_formula(R: float, d: int = 3) -> float:
+def _kappa_continuous_formula(
+    R: float,
+    d: int = 3,
+    eps_r: float = constants.GC_EPS_R,
+    r0: float = constants.GC_KAPPA_BLEND_R0,
+    tau: float = constants.GC_KAPPA_BLEND_TAU,
+) -> float:
     """
     Single continuous formula for kappa from resultant length R.
 
-    Uses the approximation: kappa ≈ R * (d - R^2) / (1 - R^2)
+    Uses a single smooth blend between a low-R rational approximation and a
+    conservative high-R log barrier to remain well-behaved near R→1.
 
     NOTE: This is a low-R approximation to the exact ML estimator which
     requires A_d^{-1}(R) = inverse of Bessel function ratio.
@@ -106,13 +118,11 @@ def _kappa_continuous_formula(R: float, d: int = 3) -> float:
     R = float(R)
     d = float(d)
 
-    # Numerator: R * (d - R^2)
-    numerator = R * (d - R * R)
-
-    # Denominator: 1 - R^2 + eps for numerical stability
-    denominator = 1.0 - R * R + constants.GC_EPS_R
-
-    kappa = numerator / denominator
+    R2 = R * R
+    k_low = (R * (d - R2)) / (1.0 - R2 + eps_r)
+    k_high = -math.log(max(1.0 - R2, eps_r))
+    s = 1.0 / (1.0 + math.exp(-(R - r0) / max(tau, 1e-6)))
+    kappa = (1.0 - s) * k_low + s * k_high
 
     return kappa
 
@@ -122,6 +132,8 @@ def kappa_from_resultant_batch(
     R_bar: jnp.ndarray,
     eps_r: float = constants.GC_EPS_R,
     d: int = 3,
+    r0: float = constants.GC_KAPPA_BLEND_R0,
+    tau: float = constants.GC_KAPPA_BLEND_TAU,
 ) -> jnp.ndarray:
     """
     Batched kappa computation for arrays of resultant lengths.
@@ -143,12 +155,16 @@ def kappa_from_resultant_batch(
     # Clamp R to valid range (continuous, always applied)
     R_clamped = jnp.clip(R_bar, 0.0, 1.0 - eps_r)
 
-    # Vectorized kappa formula: kappa = R * (d - R^2) / (1 - R^2 + eps)
-    # This is a low-R approximation to A_d^{-1}(R), see module docstring
+    # Vectorized smooth blend:
+    #   k_low  = R*(d-R^2)/(1-R^2+eps)
+    #   k_high = -log(1-R^2+eps)
+    #   k      = (1-s)*k_low + s*k_high, s=sigmoid((R-r0)/tau)
     R2 = R_clamped * R_clamped
-    numerator = R_clamped * (d - R2)
-    denominator = 1.0 - R2 + eps_r
-    kappa = numerator / denominator
+    k_low = (R_clamped * (d - R2)) / (1.0 - R2 + eps_r)
+    k_high = -jnp.log(jnp.maximum(1.0 - R2, eps_r))
+    tau_safe = jnp.maximum(jnp.array(tau, dtype=jnp.float64), 1e-6)
+    s = jax.nn.sigmoid((R_clamped - jnp.array(r0, dtype=jnp.float64)) / tau_safe)
+    kappa = (1.0 - s) * k_low + s * k_high
 
     return kappa
 
@@ -186,8 +202,13 @@ def kappa_from_resultant_v2(
     R_clamped = R_clamp_result.value
     clamp_delta = R_clamp_result.clamp_delta
 
-    # Apply continuous formula (low-R approximation to ML estimator)
-    kappa = _kappa_continuous_formula(R_clamped)
+    # Apply continuous formula (smooth blend approximation)
+    kappa = _kappa_continuous_formula(
+        R_clamped,
+        eps_r=eps_r,
+        r0=constants.GC_KAPPA_BLEND_R0,
+        tau=constants.GC_KAPPA_BLEND_TAU,
+    )
 
     # Build result
     result = KappaResult(

@@ -34,6 +34,7 @@ from fl_slam_poc.common.belief import (
     se3_to_rotvec_trans,
 )
 from fl_slam_poc.common.certificates import CertBundle
+from fl_slam_poc.common.certificates import InfluenceCert, aggregate_certificates
 from fl_slam_poc.backend.pipeline import (
     PipelineConfig,
     RuntimeManifest,
@@ -422,15 +423,30 @@ class GoldenChildBackend(Node):
     def on_lidar(self, msg: PointCloud2):
         """
         Process LiDAR scan through the full GC pipeline.
-        
+
         This is where the actual SLAM happens!
         """
         self.scan_count += 1
         self.get_logger().info(f"on_lidar callback #{self.scan_count} received")
-        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        
+
         use_imu = bool(self.get_parameter("use_imu").value)
         use_odom = bool(self.get_parameter("use_odom").value)
+
+        # Sensor warmup check: skip scans until required sensors have data
+        # This allows the system to warm up without crashing on startup race conditions
+        # Check BEFORE parsing pointcloud to avoid wasted computation
+        if use_odom and (self.last_odom_pose is None or self.last_odom_cov_se3 is None):
+            self.get_logger().warn(
+                f"Scan #{self.scan_count} skipped: waiting for odometry (use_odom=True)"
+            )
+            return
+        if use_imu and (len(self.imu_buffer) == 0):
+            self.get_logger().warn(
+                f"Scan #{self.scan_count} skipped: waiting for IMU (use_imu=True)"
+            )
+            return
+
+        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
         # Parse point cloud (vectorized; preserves Livox metadata)
         points, timestamps, weights, ring, tag = parse_pointcloud2_vectorized(msg)
@@ -442,7 +458,7 @@ class GoldenChildBackend(Node):
             timestamps = jnp.zeros(1, dtype=jnp.float64)
             weights = jnp.zeros(1, dtype=jnp.float64)
             n_points = 1
-        
+
         # Compute dt since last scan
         # Derive scan bounds from per-point timestamps when available; always include header stamp.
         stamp_j = jnp.array(stamp_sec, dtype=jnp.float64)
@@ -457,15 +473,9 @@ class GoldenChildBackend(Node):
         eps_dt = np.finfo(np.float64).eps
         dt_sec = float(jnp.sqrt(jnp.array(dt_raw, dtype=jnp.float64) ** 2 + eps_dt))
         self.last_scan_stamp = scan_end_time
-        
+
         # Apply forgetting to map stats
         self.map_stats = apply_forgetting(self.map_stats, self.forgetting_factor)
-
-        # Fail-fast single-path enforcement
-        if use_odom and (self.last_odom_pose is None or self.last_odom_cov_se3 is None):
-            raise RuntimeError("use_odom=True but no odometry received yet (no fallback path).")
-        if use_imu and (len(self.imu_buffer) == 0):
-            raise RuntimeError("use_imu=True but no IMU received yet (no fallback path).")
 
         # Build fixed-size IMU arrays (pads with zeros; contributions are controlled by continuous weights only)
         M = self.max_imu_buffer
@@ -545,7 +555,7 @@ class GoldenChildBackend(Node):
             self.pipeline_runs += 1
 
             # Apply process-noise IW update ONCE per scan (after hypothesis combine)
-            self.process_noise_state = process_noise_iw_apply_suffstats_jax(
+            self.process_noise_state, proc_iw_cert_vec = process_noise_iw_apply_suffstats_jax(
                 pn_state=self.process_noise_state,
                 dPsi=accum_dPsi,
                 dnu=accum_dnu,
@@ -555,7 +565,7 @@ class GoldenChildBackend(Node):
             self.Q = process_noise_state_to_Q_jax(self.process_noise_state)
 
             # Apply measurement-noise IW update ONCE per scan (after hypothesis combine)
-            self.measurement_noise_state = measurement_noise_apply_suffstats_jax(
+            self.measurement_noise_state, meas_iw_cert_vec = measurement_noise_apply_suffstats_jax(
                 mn_state=self.measurement_noise_state,
                 dPsi_blocks=accum_meas_dPsi,
                 dnu=accum_meas_dnu,
@@ -594,7 +604,37 @@ class GoldenChildBackend(Node):
 
             # Store certificate
             if results:
-                self.cert_history.append(results[0].aggregated_cert)
+                iw_process_cert = CertBundle.create_approx(
+                    chart_id=combined_belief.chart_id,
+                    anchor_id=combined_belief.anchor_id,
+                    triggers=["ProcessNoiseIWUpdate"],
+                    influence=InfluenceCert(
+                        lift_strength=0.0,
+                        psd_projection_delta=float(proc_iw_cert_vec[0]),
+                        nu_projection_delta=float(proc_iw_cert_vec[1]),
+                        mass_epsilon_ratio=0.0,
+                        anchor_drift_rho=0.0,
+                        dt_scale=1.0,
+                        extrinsic_scale=1.0,
+                        trust_alpha=1.0,
+                    ),
+                )
+                iw_meas_cert = CertBundle.create_approx(
+                    chart_id=combined_belief.chart_id,
+                    anchor_id=combined_belief.anchor_id,
+                    triggers=["MeasurementNoiseIWUpdate"],
+                    influence=InfluenceCert(
+                        lift_strength=0.0,
+                        psd_projection_delta=float(meas_iw_cert_vec[0]),
+                        nu_projection_delta=float(meas_iw_cert_vec[1]),
+                        mass_epsilon_ratio=0.0,
+                        anchor_drift_rho=0.0,
+                        dt_scale=1.0,
+                        extrinsic_scale=1.0,
+                        trust_alpha=1.0,
+                    ),
+                )
+                self.cert_history.append(aggregate_certificates([results[0].aggregated_cert, iw_process_cert, iw_meas_cert]))
                 if len(self.cert_history) > 100:
                     self.cert_history.pop(0)
             

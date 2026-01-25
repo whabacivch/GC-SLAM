@@ -20,8 +20,8 @@ from fl_slam_poc.common.certificates import (
     InfluenceCert,
 )
 from fl_slam_poc.common.primitives import (
-    domain_projection_psd,
-    inv_mass,
+    domain_projection_psd_core,
+    inv_mass_core,
 )
 from fl_slam_poc.backend.operators.kappa import kappa_from_resultant_batch
 
@@ -219,8 +219,8 @@ def scan_bin_moment_match(
     sum_cov = jnp.einsum("nb,nij->bij", w_r, point_covariances)  # (B,3,3)
     
     # Compute derived quantities using batched operations (no per-bin Python loop)
-    # InvMass - batched: inv_N = 1 / max(N, eps_mass)
-    inv_N = 1.0 / jnp.maximum(N, eps_mass)  # (B,)
+    # InvMass - batched (Contract: InvMass is always 1/(m+eps), spec Section 3.4)
+    inv_N, eps_ratio_N = inv_mass_core(N, eps_mass)  # (B,), (B,)
     
     # Centroids: p_bar = sum_p * inv_N
     p_bar = sum_p * inv_N[:, None]  # (B, 3)
@@ -234,11 +234,13 @@ def scan_bin_moment_match(
     # Total covariance
     Sigma_raw = scatter + meas_cov  # (B, 3, 3)
     
-    # Project to PSD (batched) - symmetrize and eigen-clamp
-    Sigma_sym = 0.5 * (Sigma_raw + jnp.swapaxes(Sigma_raw, -1, -2))
-    eigvals, eigvecs = jax.vmap(jnp.linalg.eigh)(Sigma_sym)
-    vals_clamped = jnp.maximum(eigvals, eps_psd)
-    Sigma_p = jnp.einsum("bij,bj,bkj->bik", eigvecs, vals_clamped, eigvecs)  # (B, 3, 3)
+    # Project to PSD (batched; declared projection op).
+    def proj_one(S):
+        S_psd, cert_vec = domain_projection_psd_core(S, eps_psd)
+        return S_psd, cert_vec
+
+    Sigma_p, Sigma_cert = jax.vmap(proj_one)(Sigma_raw)  # (B,3,3), (B,6)
+    psd_projection_delta_total = jnp.sum(Sigma_cert[:, 0])
     
     # Kappa from resultant length (batched)
     S_norms = jnp.linalg.norm(s_dir, axis=1)  # (B,)
@@ -259,18 +261,20 @@ def scan_bin_moment_match(
     ess = total_mass ** 2 / (jnp.sum(N ** 2) + eps_mass)
     
     # Build certificate
+    # Continuous support fraction proxy in [0,1]: bins with mass contribute smoothly.
+    support_frac = float(jnp.mean(N / (N + eps_mass)))
     cert = CertBundle.create_approx(
         chart_id=chart_id,
         anchor_id=anchor_id,
         triggers=["ScanBinMomentMatch"],
         support=SupportCert(
             ess_total=float(ess),
-            support_frac=float(jnp.sum(N > eps_mass) / n_bins),
+            support_frac=support_frac,
         ),
         influence=InfluenceCert(
             lift_strength=0.0,
-            psd_projection_delta=0.0,  # Would need to track
-            mass_epsilon_ratio=eps_mass / (total_mass + eps_mass),
+            psd_projection_delta=float(psd_projection_delta_total),
+            mass_epsilon_ratio=float(jnp.max(eps_ratio_N)),
             anchor_drift_rho=0.0,
             dt_scale=1.0,
             extrinsic_scale=1.0,

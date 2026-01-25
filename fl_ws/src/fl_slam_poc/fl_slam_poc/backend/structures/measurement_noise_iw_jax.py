@@ -1,8 +1,14 @@
 """
 Measurement-noise inverse-Wishart state containers (arrays-only) for GC v2.
 
-These IW states represent sensor measurement covariances Σ as random variables:
+These IW states represent per-sensor noise scale matrices as random variables:
   Σ ~ InvWishart(Psi, nu)
+
+Units convention (GC v2):
+- Gyro and accel blocks are treated as continuous-time PSD proxies in their natural units
+  (gyro: rad^2/s, accel: m^2/s^3) and are discretized exactly once when forming
+  a covariance over a window (e.g., Σ_window ≈ PSD * dt).
+- LiDAR translation block is treated as a discrete covariance in meters^2.
 
 This module is arrays-only and safe for @jax.jit codepaths.
 """
@@ -40,18 +46,17 @@ def create_datasheet_measurement_noise_state() -> MeasurementNoiseIWState:
     nu_extra = jnp.array(C.GC_IW_NU_WEAK_ADD, dtype=jnp.float64)
     nu = p + 1.0 + nu_extra  # (3,)
 
-    Sigma_gyro = C.GC_IMU_GYRO_NOISE_DENSITY * jnp.eye(3, dtype=jnp.float64)
-    Sigma_accel = C.GC_IMU_ACCEL_NOISE_DENSITY * jnp.eye(3, dtype=jnp.float64)
-    Sigma_lidar = C.GC_LIDAR_SIGMA_MEAS * jnp.eye(3, dtype=jnp.float64)
+    Sigma_gyro_psd = C.GC_IMU_GYRO_NOISE_DENSITY * jnp.eye(3, dtype=jnp.float64)
+    Sigma_accel_psd = C.GC_IMU_ACCEL_NOISE_DENSITY * jnp.eye(3, dtype=jnp.float64)
+    Sigma_lidar_cov = C.GC_LIDAR_SIGMA_MEAS * jnp.eye(3, dtype=jnp.float64)
 
     Psi_blocks = jnp.stack(
         [
-            Sigma_gyro * nu_extra,
-            Sigma_accel * nu_extra,
-            Sigma_lidar * nu_extra,
+            Sigma_gyro_psd * nu_extra,
+            Sigma_accel_psd * nu_extra,
+            Sigma_lidar_cov * nu_extra,
         ],
         axis=0,
     )
 
     return MeasurementNoiseIWState(nu=nu, Psi_blocks=Psi_blocks, block_dims=block_dims)
-

@@ -340,10 +340,17 @@ def so3_log(R: jnp.ndarray) -> jnp.ndarray:
     # Near-π case: extract axis from diagonal
     diag_R = jnp.diag(R)
     diag_plus_1 = diag_R + 1.0
-    idx = jnp.argmax(diag_plus_1)
-    
-    # Build axis from column
-    axis_col = R[:, idx] + jnp.eye(3)[:, idx]
+    # Avoid discrete argmax selection: softmax-mixture of the 3 candidate axes.
+    # This removes a hard branch point while preserving the standard diagonal heuristic.
+    k = jnp.array(50.0, dtype=jnp.float64)  # sharpness; larger -> closer to argmax
+    w = jax.nn.softmax(k * diag_plus_1)  # (3,)
+
+    I = jnp.eye(3, dtype=jnp.float64)
+    axis_cols = jnp.stack(
+        [R[:, 0] + I[:, 0], R[:, 1] + I[:, 1], R[:, 2] + I[:, 2]],
+        axis=0,
+    )  # (3,3)
+    axis_col = w[0] * axis_cols[0] + w[1] * axis_cols[1] + w[2] * axis_cols[2]
     axis_norm = jnp.linalg.norm(axis_col)
     safe_axis_norm = jnp.where(axis_norm < SMALL_ANGLE_THRESHOLD, 1.0, axis_norm)
     axis = axis_col / safe_axis_norm

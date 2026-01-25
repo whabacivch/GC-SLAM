@@ -19,11 +19,9 @@ import os
 # Configure JAX environment variables BEFORE importing JAX.
 # This must happen at module import time, before any JAX operations.
 #
-# IMPORTANT: Force "cuda" (not "gpu") to avoid JAX attempting ROCm first.
-# We intentionally override any existing value here because the project assumes
-# NVIDIA CUDA (per current hardware + deployment target) and ROCm probing has
-# caused crashes on some systems.
-os.environ["JAX_PLATFORMS"] = "cuda"
+# IMPORTANT: Default to "cuda" (not "gpu") to avoid JAX attempting ROCm first.
+# Do NOT override an explicit user choice (e.g., "cpu" for CI/tests).
+os.environ.setdefault("JAX_PLATFORMS", "cuda")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 # Import JAX (this will initialize PJRT with the environment variables set above)
