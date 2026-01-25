@@ -115,6 +115,60 @@ flowchart LR
 
 **Current status:** LiDAR-only (IMU/odom subscribed but not fused into belief). See `docs/Fusion_issues.md` for details.
 
+### Runtime Flow Diagram (File Structure)
+
+The diagram below mirrors the current file/process layout: the Rosbag feeds the sensor hub, evidence extractors, and backend pipeline before the outputs and diagnostics are published.
+
+```mermaid
+flowchart TB
+    subgraph BAG[Rosbag: M3DGR]
+        bag([Dynamic01_ros2])
+    end
+
+    subgraph HUB[gc_sensor_hub (single process)]
+        livox[livox_converter]
+        imu_norm[imu_normalizer]
+        odom_norm[odom_normalizer]
+        audit[dead_end_audit]
+    end
+
+    subgraph EXTRACT[Evidence Extractors]
+        lidarE(LidarEvidenceExtractor)
+        imuE(ImuEvidenceExtractor)
+        odomE(OdomEvidenceExtractor)
+    end
+
+    subgraph CORE[gc_backend_node → Inference Core (15 steps)]
+        state[State Mgmt: BeliefGaussianInfo / MapStats / Hypotheses]
+        pipeline[Pipeline (1. PointBudgetResample → … → 15. HypothesisBarycenterProjection)]
+    end
+
+    subgraph OUT[Output Interface]
+        pose[/gc/state + TF/]
+        traj[/gc/trajectory/]
+        status[/gc/status + /gc/runtime_manifest/]
+        cert[/gc/certificate/]
+    end
+
+    bag --> livox
+    bag --> imu_norm
+    bag --> odom_norm
+    bag --> audit
+
+    livox --> lidarE
+    imu_norm --> imuE
+    odom_norm --> odomE
+
+    lidarE --> CORE
+    imuE --> CORE
+    odomE --> CORE
+
+    CORE --> pose
+    CORE --> traj
+    CORE --> status
+    CORE --> cert
+```
+
 ### Legacy Architecture (Archived)
 
 The legacy frontend/backend architecture is preserved under `archive/` for reference but is not used by the GC v2 evaluation pipeline.
