@@ -73,6 +73,7 @@ from fl_slam_poc.backend.structures.bin_atlas import (
     apply_forgetting,
     update_map_stats,
 )
+from fl_slam_poc.backend.diagnostics import ScanDiagnostics, DiagnosticsLog
 
 from scipy.spatial.transform import Rotation
 
@@ -234,6 +235,7 @@ class GoldenChildBackend(Node):
         self.declare_parameter("odom_topic", "/gc/sensors/odom")
         self.declare_parameter("imu_topic", "/gc/sensors/imu")
         self.declare_parameter("trajectory_export_path", "/tmp/gc_slam_trajectory.tum")
+        self.declare_parameter("diagnostics_export_path", "/tmp/gc_slam_diagnostics.npz")
         self.declare_parameter("status_check_period_sec", 5.0)
         self.declare_parameter("forgetting_factor", 0.99)
         # Hard single-path enforcement: if enabled, missing topics are hard errors.
@@ -297,6 +299,12 @@ class GoldenChildBackend(Node):
         
         # Certificate history
         self.cert_history: List[CertBundle] = []
+
+        # Diagnostics log for dashboard
+        self.diagnostics_log = DiagnosticsLog(
+            run_id=f"gc_slam_{int(self.node_start_time)}",
+            start_time=self.node_start_time,
+        )
 
     def _init_ros(self):
         """Initialize ROS interfaces."""
@@ -637,7 +645,18 @@ class GoldenChildBackend(Node):
                 self.cert_history.append(aggregate_certificates([results[0].aggregated_cert, iw_process_cert, iw_meas_cert]))
                 if len(self.cert_history) > 100:
                     self.cert_history.pop(0)
-            
+
+            # Collect diagnostics for dashboard (from first hypothesis)
+            if results and results[0].diagnostics is not None:
+                diag = results[0].diagnostics
+                # Update scan number and add noise trace info
+                diag.scan_number = self.scan_count
+                diag.trace_Q_mode = float(jnp.trace(self.Q))
+                diag.trace_Sigma_lidar_mode = float(jnp.trace(self.config.Sigma_meas))
+                diag.trace_Sigma_g_mode = float(jnp.trace(self.config.Sigma_g))
+                diag.trace_Sigma_a_mode = float(jnp.trace(self.config.Sigma_a))
+                self.diagnostics_log.append(diag)
+
             # Extract pose from belief and publish
             pose_6d = combined_belief.mean_world_pose()
             self._publish_state_from_pose(pose_6d, stamp_sec)
@@ -739,6 +758,19 @@ class GoldenChildBackend(Node):
             self.trajectory_file.flush()
             self.trajectory_file.close()
             self.get_logger().info(f"Trajectory saved: {self.trajectory_export_path}")
+
+        # Save diagnostics log for dashboard
+        diagnostics_path = str(self.get_parameter("diagnostics_export_path").value)
+        if diagnostics_path and self.diagnostics_log.total_scans > 0:
+            self.diagnostics_log.end_time = time.time()
+            try:
+                self.diagnostics_log.save_npz(diagnostics_path)
+                self.get_logger().info(
+                    f"Diagnostics saved: {diagnostics_path} ({self.diagnostics_log.total_scans} scans)"
+                )
+            except Exception as e:
+                self.get_logger().warn(f"Failed to save diagnostics: {e}")
+
         super().destroy_node()
 
 

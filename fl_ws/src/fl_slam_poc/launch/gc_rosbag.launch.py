@@ -66,6 +66,12 @@ def generate_launch_description():
         description="Path to write wiring summary JSON at end of run.",
     )
 
+    diagnostics_path_arg = DeclareLaunchArgument(
+        "diagnostics_export_path",
+        default_value="/tmp/gc_slam_diagnostics.npz",
+        description="Path to export per-scan diagnostics for dashboard.",
+    )
+
     # =========================================================================
     # Sensor Hub (single process)
     # =========================================================================
@@ -120,6 +126,7 @@ def generate_launch_description():
                 "imu_topic": "/gc/sensors/imu",
                 # Other params
                 "trajectory_export_path": LaunchConfiguration("trajectory_export_path"),
+                "diagnostics_export_path": LaunchConfiguration("diagnostics_export_path"),
                 "odom_frame": "odom",
                 "base_frame": "base_link",
                 "status_check_period_sec": 5.0,
@@ -152,6 +159,7 @@ def generate_launch_description():
         trajectory_path_arg,
         livox_input_msg_type_arg,
         wiring_summary_path_arg,
+        diagnostics_path_arg,
         # Sensor Hub (single process)
         gc_sensor_hub,
         # Audit / observability

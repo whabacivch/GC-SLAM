@@ -87,6 +87,7 @@ from fl_slam_poc.backend.operators.map_update import (
 )
 from fl_slam_poc.backend.operators.anchor_drift import anchor_drift_update
 from fl_slam_poc.backend.operators.hypothesis import hypothesis_barycenter_projection
+from fl_slam_poc.backend.diagnostics import ScanDiagnostics
 
 
 # =============================================================================
@@ -160,6 +161,8 @@ class ScanPipelineResult:
     iw_lidar_bucket_dnu: jnp.ndarray   # (K,)
     all_certs: List[CertBundle]
     aggregated_cert: CertBundle
+    # Per-scan diagnostics for dashboard (Stage-0 schema)
+    diagnostics: Optional[ScanDiagnostics] = None
 
 
 # =============================================================================
@@ -644,7 +647,81 @@ def process_scan_single_hypothesis(
     # Aggregate certificates
     # =========================================================================
     aggregated_cert = aggregate_certificates(all_certs)
-    
+
+    # =========================================================================
+    # Build diagnostics (Stage-0 schema for dashboard)
+    # =========================================================================
+    import numpy as np
+
+    # Extract pose from final belief
+    pose_final = belief_final.mean_world_pose(eps_lift=config.eps_lift)
+    trans_final = np.array(pose_final[:3])
+    rotvec_final = np.array(pose_final[3:6])
+
+    # Convert rotvec to rotation matrix
+    from scipy.spatial.transform import Rotation as R_scipy
+    R_final = R_scipy.from_rotvec(rotvec_final).as_matrix()
+
+    # Compute evidence diagnostics
+    L_total_np = np.array(L_evidence)
+    h_total_np = np.array(h_evidence)
+
+    # Safe logdet computation (handle near-singular matrices)
+    eigvals = np.linalg.eigvalsh(L_total_np)
+    eigvals_pos = np.maximum(eigvals, 1e-12)
+    logdet_L = float(np.sum(np.log(eigvals_pos)))
+    trace_L = float(np.trace(L_total_np))
+    L_dt_val = float(L_total_np[15, 15])
+    trace_L_ex = float(np.trace(L_total_np[16:22, 16:22]))
+
+    # PSD diagnostics from aggregated certificate
+    psd_delta = 0.0
+    psd_min_eig_before = 0.0
+    psd_min_eig_after = float(np.min(eigvals))
+    if aggregated_cert.influence is not None:
+        psd_delta = aggregated_cert.influence.psd_projection_delta
+    if aggregated_cert.conditioning is not None:
+        psd_min_eig_before = aggregated_cert.conditioning.eig_min
+        cond_number = aggregated_cert.conditioning.cond
+    else:
+        cond_number = 1.0
+
+    # Total trigger magnitude
+    total_trigger_mag = sum(c.total_trigger_magnitude() for c in all_certs)
+
+    diagnostics = ScanDiagnostics(
+        scan_number=0,  # Will be set by backend_node
+        timestamp=scan_end_time,
+        dt_sec=dt_sec,
+        n_points_raw=int(raw_points.shape[0]),
+        n_points_budget=int(points.shape[0]),
+        p_W=trans_final,
+        R_WL=R_final,
+        N_bins=np.array(scan_bins.N),
+        S_bins=np.array(scan_bins.s_dir),
+        kappa_bins=np.array(scan_bins.kappa_scan),
+        L_total=L_total_np,
+        h_total=h_total_np,
+        L_lidar=np.array(evidence_result.L_lidar),
+        L_odom=np.array(odom_result.L_odom),
+        L_imu=np.array(imu_result.L_imu),
+        L_gyro=np.array(gyro_result.L_gyro),
+        logdet_L_total=logdet_L,
+        trace_L_total=trace_L,
+        L_dt=L_dt_val,
+        trace_L_ex=trace_L_ex,
+        s_dt=float(s_dt),
+        s_ex=float(s_ex),
+        psd_delta_fro=psd_delta,
+        psd_min_eig_before=psd_min_eig_before,
+        psd_min_eig_after=psd_min_eig_after,
+        wahba_cost=float(wahba_result.cost),
+        translation_residual_norm=float(trans_result.residual_norm),
+        fusion_alpha=float(alpha),
+        total_trigger_magnitude=total_trigger_mag,
+        conditioning_number=cond_number,
+    )
+
     return ScanPipelineResult(
         belief_updated=belief_final,
         map_increments=map_update_result,
@@ -656,6 +733,7 @@ def process_scan_single_hypothesis(
         iw_lidar_bucket_dnu=iw_lidar_bucket_dnu,
         all_certs=all_certs,
         aggregated_cert=aggregated_cert,
+        diagnostics=diagnostics,
     )
 
 

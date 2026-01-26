@@ -96,7 +96,7 @@ def lidar_bucket_iw_suffstats_from_bin_residuals_jax(
     # Precompute per-bin rrT: (B,3,3)
     rrT_bin = jnp.einsum("bi,bj->bij", residuals_bin, residuals_bin)
 
-    K = jnp.int32(C.GC_LIDAR_N_BUCKETS)
+    K = int(C.GC_LIDAR_N_BUCKETS)  # Must be Python int for jnp.arange (concrete, not traced)
     B = responsibilities.shape[1]
 
     def one_bucket(k):

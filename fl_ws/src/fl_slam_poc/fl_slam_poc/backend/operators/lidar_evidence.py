@@ -108,7 +108,7 @@ def lidar_quadratic_evidence(
     
     # Step 1: Compute excitation scales (continuous, no branching)
     # Use belief covariance as the continuous excitation proxy (no legacy cache dependency).
-    _mu_pred, Sigma_pred = belief_pred.to_moments(eps_lift)
+    _mu_pred, Sigma_pred, _lift = belief_pred.to_moments(eps_lift)
     dt_effect = float(jnp.sqrt(Sigma_pred[15, 15]))
     extrinsic_effect = float(jnp.sqrt(jnp.trace(Sigma_pred[16:22, 16:22])))
     

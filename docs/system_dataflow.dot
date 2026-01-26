@@ -1,0 +1,264 @@
+digraph G {
+    rankdir=TB;
+    bgcolor="#1a1a1a";
+    fontcolor="#ffffff";
+    fontsize=14;
+    node [fontname="Arial", fontsize=10, shape=box, style="filled"];
+    edge [color="#888888"];
+    splines=polyline;
+    nodesep=0.3;
+    ranksep=0.6;
+    compound=true;
+
+    // ====== LAYER 1: ROSBAG INPUTS ======
+    subgraph cluster_rosbag {
+        label="📦 Rosbag Source (M3DGR Dynamic01)";
+        style="filled";
+        fillcolor="#222222";
+        color="#444444";
+        fontcolor="#cccccc";
+
+        // Unused topics (left) - red/dashed
+        BAG_VRPN [label="/vrpn_client_node\n/UGV/pose\n(Ground Truth)", fillcolor="#2a0e0e", style="filled,dashed", color="#ff4444", fontcolor="#ffcccc"];
+        BAG_CAM_IMU [label="/camera/imu", fillcolor="#2a0e0e", style="filled,dashed", color="#ff4444", fontcolor="#ffcccc"];
+        BAG_CAM_COLOR [label="/camera/color", fillcolor="#2a0e0e", style="filled,dashed", color="#ff4444", fontcolor="#ffcccc"];
+        BAG_CAM_DEPTH [label="/camera/depth", fillcolor="#2a0e0e", style="filled,dashed", color="#ff4444", fontcolor="#ffcccc"];
+        BAG_AVIA_LIDAR [label="/livox/avia\n/lidar", fillcolor="#2a0e0e", style="filled,dashed", color="#ff4444", fontcolor="#ffcccc"];
+        BAG_AVIA_IMU [label="/livox/avia\n/imu", fillcolor="#2a0e0e", style="filled,dashed", color="#ff4444", fontcolor="#ffcccc"];
+
+        // Active topics (right) - green
+        BAG_ODOM [label="/odom\nOdometry", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        BAG_MID_LIDAR [label="/livox/mid360\n/lidar", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        BAG_MID_IMU [label="/livox/mid360\n/imu", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+
+        // Force horizontal ordering
+        { rank=same; BAG_VRPN; BAG_CAM_IMU; BAG_CAM_COLOR; BAG_CAM_DEPTH; BAG_AVIA_LIDAR; BAG_AVIA_IMU; BAG_ODOM; BAG_MID_LIDAR; BAG_MID_IMU; }
+        BAG_VRPN -> BAG_CAM_IMU -> BAG_CAM_COLOR -> BAG_CAM_DEPTH -> BAG_AVIA_LIDAR -> BAG_AVIA_IMU -> BAG_ODOM -> BAG_MID_LIDAR -> BAG_MID_IMU [style="invis"];
+    }
+
+    // ====== LAYER 2: SENSOR HUB ======
+    subgraph cluster_hub {
+        label="🔧 gc_sensor_hub (4 Nodes)";
+        style="filled";
+        fillcolor="#222222";
+        color="#444444";
+        fontcolor="#cccccc";
+
+        LIVOX_CONV [label="livox_converter\nCustomMsg→PC2", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        ODOM_NORM [label="odom_normalizer", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        IMU_NORM [label="imu_normalizer", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        DEAD_AUDIT [label="dead_end_audit", fillcolor="#2d004d", color="#aa00aa", fontcolor="#ffffff"];
+
+        { rank=same; ODOM_NORM; LIVOX_CONV; IMU_NORM; DEAD_AUDIT; }
+        ODOM_NORM -> LIVOX_CONV -> IMU_NORM -> DEAD_AUDIT [style="invis"];
+    }
+
+    // ====== LAYER 2.5: CANONICAL TOPICS ======
+    subgraph cluster_canon {
+        label="📡 Canonical Topics";
+        style="filled";
+        fillcolor="#1a2a1a";
+        color="#33aa33";
+        fontcolor="#cccccc";
+
+        CAN_ODOM [label="/gc/sensors/odom\nOdometry", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        CAN_LIDAR [label="/gc/sensors/lidar_points\nPointCloud2", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        CAN_IMU [label="/gc/sensors/imu\nImu", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
+        CAN_DEAD [label="/gc/dead_end_status\nJSON", fillcolor="#2d004d", color="#aa00aa", fontcolor="#ffffff"];
+
+        { rank=same; CAN_ODOM; CAN_LIDAR; CAN_IMU; CAN_DEAD; }
+        CAN_ODOM -> CAN_LIDAR -> CAN_IMU -> CAN_DEAD [style="invis"];
+    }
+
+    // ====== LAYER 3: BACKEND ======
+    subgraph cluster_backend {
+        label="🧠 gc_backend_node";
+        style="filled";
+        fillcolor="#1a1a2a";
+        color="#666666";
+        fontcolor="#cccccc";
+
+        // IMU Buffer
+        IMU_BUF [label="IMU Buffer\n200 msgs", fillcolor="#1e1e1e", color="#666666", fontcolor="#aaaaaa"];
+
+        // Pipeline Row 1: S01-S08
+        S01 [label="S01\nPointBudget", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S02 [label="S02\nPredict", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S03 [label="S03\nDeskew", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S04 [label="S04\nBinSoft", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S05 [label="S05\nScanBin", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S06 [label="S06\nKappa", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S07 [label="S07\nWahba", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S08 [label="S08\nTranslation", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+
+        { rank=same; S01; S02; S03; S04; S05; S06; S07; S08; }
+        S01 -> S02 -> S03 -> S04 -> S05 -> S06 -> S07 -> S08 [style="invis"];
+
+        // Pipeline Row 2: S09 Parallel Evidence
+        S09A [label="S09a\nOdomEvid", fillcolor="#3a3a3a", color="#88cc88", fontcolor="#ffffff"];
+        S09B [label="S09b\nIMU-Accel", fillcolor="#3a3a3a", color="#88cc88", fontcolor="#ffffff"];
+        S09C [label="S09c\nIMU-Gyro", fillcolor="#3a3a3a", color="#88cc88", fontcolor="#ffffff"];
+        S09D [label="S09d\nLidarEvid", fillcolor="#3a3a3a", color="#88cc88", fontcolor="#ffffff"];
+
+        { rank=same; S09A; S09B; S09C; S09D; }
+        S09A -> S09B -> S09C -> S09D [style="invis"];
+
+        // Pipeline Row 3: S10-S15
+        S10 [label="S10\nFusionScale", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S11 [label="S11\nInfoFusion", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S12 [label="S12\nPoseUpdate", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S13 [label="S13\nPoseCov", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S14 [label="S14\nAnchorDrift", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+        S15 [label="S15\nHypoBary", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff"];
+
+        { rank=same; S10; S11; S12; S13; S14; S15; }
+        S10 -> S11 -> S12 -> S13 -> S14 -> S15 [style="invis"];
+
+        // State Management
+        ST_BELIEF [label="BeliefGaussianInfo\n22D × 8 Hypotheses", fillcolor="#1e1e1e", color="#666666", fontcolor="#ffffff"];
+        ST_MAP [label="MapStats\n48 Bins", fillcolor="#1e1e1e", color="#666666", fontcolor="#ffffff"];
+        ST_PROC [label="ProcessNoiseIW", fillcolor="#1e1e1e", color="#666666", fontcolor="#aaaaaa"];
+        ST_MEAS [label="MeasNoiseIW", fillcolor="#1e1e1e", color="#666666", fontcolor="#aaaaaa"];
+        ST_BUCKET [label="BucketNoiseIW", fillcolor="#1e1e1e", color="#666666", fontcolor="#aaaaaa"];
+
+        { rank=same; ST_BELIEF; ST_MAP; ST_PROC; ST_MEAS; ST_BUCKET; }
+        ST_BELIEF -> ST_MAP -> ST_PROC -> ST_MEAS -> ST_BUCKET [style="invis"];
+    }
+
+    // ====== LAYER 4: OUTPUTS ======
+    subgraph cluster_out {
+        label="📤 Outputs";
+        style="filled";
+        fillcolor="#0a1a2a";
+        color="#444466";
+        fontcolor="#cccccc";
+
+        OUT_STATE [label="/gc/state\nOdometry", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff"];
+        OUT_TRAJ [label="/gc/trajectory\nPath", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff"];
+        OUT_STATUS [label="/gc/status\nJSON", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff"];
+        OUT_MANIFEST [label="/gc/runtime_manifest\nJSON", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff"];
+        OUT_CERT [label="/gc/certificate\nJSON", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff"];
+
+        { rank=same; OUT_STATE; OUT_TRAJ; OUT_STATUS; OUT_MANIFEST; OUT_CERT; }
+        OUT_STATE -> OUT_TRAJ -> OUT_STATUS -> OUT_MANIFEST -> OUT_CERT [style="invis"];
+
+        // File outputs
+        OUT_TUM [label="Trajectory.txt\nTUM Format", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff"];
+        OUT_NPZ [label="Diagnostics.npz\nPer-Scan", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff"];
+        OUT_TF [label="TF Broadcast\nodom→base_link", fillcolor="#006633", color="#44ff88", fontcolor="#ffffff"];
+
+        { rank=same; OUT_TUM; OUT_NPZ; OUT_TF; }
+        OUT_TUM -> OUT_NPZ -> OUT_TF [style="invis"];
+    }
+
+    // ====== AUDIT (Separate) ======
+    subgraph cluster_audit {
+        label="📊 Audit";
+        style="filled";
+        fillcolor="#1a0a2a";
+        color="#aa00aa";
+        fontcolor="#cccccc";
+
+        WIRING [label="wiring_auditor\nEnd-of-Run Summary", fillcolor="#2d004d", color="#aa00aa", fontcolor="#ffffff"];
+    }
+
+    // ====== LEGEND (Vertical, compact) ======
+    subgraph cluster_legend {
+        label="Legend";
+        style="filled";
+        fillcolor="#111111";
+        color="#333333";
+        fontcolor="#888888";
+        fontsize=10;
+
+        L1 [label="Active", fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff", width=0.8];
+        L2 [label="Unused", fillcolor="#2a0e0e", style="filled,dashed", color="#ff4444", fontcolor="#ffcccc", width=0.8];
+        L3 [label="Pipeline", fillcolor="#333333", color="#aaaaaa", fontcolor="#ffffff", width=0.8];
+        L4 [label="State", fillcolor="#1e1e1e", color="#666666", fontcolor="#ffffff", width=0.8];
+        L5 [label="Output", fillcolor="#003366", color="#4488ff", fontcolor="#ffffff", width=0.8];
+        L6 [label="Audit", fillcolor="#2d004d", color="#aa00aa", fontcolor="#ffffff", width=0.8];
+
+        L1 -> L2 -> L3 -> L4 -> L5 -> L6 [style="invis"];
+    }
+
+    // ====== CONNECTIONS ======
+
+    // Rosbag -> Sensor Hub (Active flows)
+    BAG_ODOM -> ODOM_NORM [color="#00ff00", penwidth=2];
+    BAG_MID_LIDAR -> LIVOX_CONV [color="#00ff00", penwidth=2];
+    BAG_MID_IMU -> IMU_NORM [color="#00ff00", penwidth=2];
+
+    // Dead-end flows
+    BAG_VRPN -> DEAD_AUDIT [style="dashed", color="#ff4444"];
+    BAG_CAM_IMU -> DEAD_AUDIT [style="dashed", color="#ff4444"];
+    BAG_CAM_COLOR -> DEAD_AUDIT [style="dashed", color="#ff4444"];
+    BAG_CAM_DEPTH -> DEAD_AUDIT [style="dashed", color="#ff4444"];
+    BAG_AVIA_LIDAR -> DEAD_AUDIT [style="dashed", color="#ff4444"];
+    BAG_AVIA_IMU -> DEAD_AUDIT [style="dashed", color="#ff4444"];
+
+    // Sensor Hub -> Canonical
+    ODOM_NORM -> CAN_ODOM [color="#00ff00", penwidth=2];
+    LIVOX_CONV -> CAN_LIDAR [color="#00ff00", penwidth=2];
+    IMU_NORM -> CAN_IMU [color="#00ff00", penwidth=2];
+    DEAD_AUDIT -> CAN_DEAD [color="#aa00aa", penwidth=2];
+
+    // Canonical -> Backend
+    CAN_ODOM -> S01 [color="#00ff00", penwidth=2];
+    CAN_LIDAR -> S01 [color="#00ff00", penwidth=2];
+    CAN_IMU -> IMU_BUF [color="#00ff00", penwidth=2];
+    IMU_BUF -> S03 [color="#666666", style="dashed"];
+
+    // Pipeline flow S01-S08
+    S01 -> S02 [color="#aaaaaa", penwidth=1.5];
+    S02 -> S03 [color="#aaaaaa", penwidth=1.5];
+    S03 -> S04 [color="#aaaaaa", penwidth=1.5];
+    S04 -> S05 [color="#aaaaaa", penwidth=1.5];
+    S05 -> S06 [color="#aaaaaa", penwidth=1.5];
+    S06 -> S07 [color="#aaaaaa", penwidth=1.5];
+    S07 -> S08 [color="#aaaaaa", penwidth=1.5];
+
+    // S08 -> S09 parallel
+    S08 -> S09A [color="#aaaaaa", penwidth=1.5];
+    S08 -> S09B [color="#aaaaaa", penwidth=1.5];
+    S08 -> S09C [color="#aaaaaa", penwidth=1.5];
+    S08 -> S09D [color="#aaaaaa", penwidth=1.5];
+
+    // S09 -> S10 merge
+    S09A -> S10 [color="#88cc88", penwidth=1.5];
+    S09B -> S10 [color="#88cc88", penwidth=1.5];
+    S09C -> S10 [color="#88cc88", penwidth=1.5];
+    S09D -> S10 [color="#88cc88", penwidth=1.5];
+
+    // Pipeline flow S10-S15
+    S10 -> S11 [color="#aaaaaa", penwidth=1.5];
+    S11 -> S12 [color="#aaaaaa", penwidth=1.5];
+    S12 -> S13 [color="#aaaaaa", penwidth=1.5];
+    S13 -> S14 [color="#aaaaaa", penwidth=1.5];
+    S14 -> S15 [color="#aaaaaa", penwidth=1.5];
+
+    // Pipeline -> State
+    S15 -> ST_BELIEF [color="#aaaaaa", penwidth=2];
+    S15 -> ST_MAP [color="#aaaaaa", penwidth=2];
+    S15 -> ST_PROC [color="#666666", style="dashed"];
+    S15 -> ST_MEAS [color="#666666", style="dashed"];
+    S15 -> ST_BUCKET [color="#666666", style="dashed"];
+
+    // State -> Outputs
+    ST_BELIEF -> OUT_STATE [color="#4488ff", penwidth=2];
+    ST_BELIEF -> OUT_TRAJ [color="#4488ff", penwidth=2];
+    ST_BELIEF -> OUT_STATUS [color="#4488ff", penwidth=1.5];
+    ST_BELIEF -> OUT_MANIFEST [color="#4488ff", penwidth=1.5];
+    ST_BELIEF -> OUT_CERT [color="#4488ff", penwidth=1.5];
+    ST_BELIEF -> OUT_TUM [color="#4488ff", penwidth=2];
+    ST_BELIEF -> OUT_NPZ [color="#4488ff", penwidth=2];
+    ST_BELIEF -> OUT_TF [color="#44ff88", penwidth=2];
+
+    // Audit connections
+    CAN_DEAD -> WIRING [color="#aa00aa", penwidth=1.5];
+    OUT_STATUS -> WIRING [color="#aa00aa", penwidth=1.5];
+    OUT_MANIFEST -> WIRING [color="#aa00aa", penwidth=1.5];
+
+    // Layout constraints
+    { rank=source; BAG_VRPN; BAG_CAM_IMU; }
+    { rank=sink; L6; WIRING; }
+}

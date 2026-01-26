@@ -17,6 +17,7 @@ GT_FILE="$PROJECT_ROOT/rosbags/m3dgr/Dynamic01.txt"
 EST_FILE="/tmp/gc_slam_trajectory.tum"
 GT_ALIGNED="/tmp/m3dgr_ground_truth_aligned.tum"
 WIRING_SUMMARY="/tmp/gc_wiring_summary.json"
+DIAGNOSTICS_FILE="/tmp/gc_slam_diagnostics.npz"
 RESULTS_DIR="$PROJECT_ROOT/results/gc_$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$RESULTS_DIR/slam_run.log"
 # Detect venv path - try multiple locations
@@ -119,7 +120,7 @@ echo -e "Bag:     ${CYAN}$(basename "$BAG_PATH")${NC}"
 echo -e "Results: ${CYAN}$RESULTS_DIR${NC}"
 
 # Clean previous
-rm -f "$EST_FILE" "$GT_ALIGNED" "$WIRING_SUMMARY"
+rm -f "$EST_FILE" "$GT_ALIGNED" "$WIRING_SUMMARY" "$DIAGNOSTICS_FILE"
 mkdir -p "$RESULTS_DIR"
 
 # ============================================================================
@@ -250,6 +251,7 @@ ros2 launch fl_slam_poc gc_rosbag.launch.py \
   bag:="$BAG_PATH" \
   trajectory_export_path:="$EST_FILE" \
   wiring_summary_path:="$WIRING_SUMMARY" \
+  diagnostics_export_path:="$DIAGNOSTICS_FILE" \
   > "$LOG_FILE" 2>&1 &
 LAUNCH_PID=$!
 
@@ -367,6 +369,13 @@ if [ -f "$WIRING_SUMMARY" ]; then
     cp "$WIRING_SUMMARY" "$RESULTS_DIR/wiring_summary.json"
 fi
 
+# Copy diagnostics if available
+if [ -f "$DIAGNOSTICS_FILE" ]; then
+    cp "$DIAGNOSTICS_FILE" "$RESULTS_DIR/diagnostics.npz"
+    DIAG_SCANS=$(env -u PYTHONPATH "$PYTHON" -c "import numpy as np; d=np.load('$DIAGNOSTICS_FILE'); print(int(d['n_scans']))" 2>/dev/null || echo "0")
+    print_ok "Diagnostics collected: ${CYAN}$DIAG_SCANS${NC} scans"
+fi
+
 print_ok "Evaluation complete"
 
 # ============================================================================
@@ -482,3 +491,14 @@ echo -e "${BOLD}║  ${GREEN}EVALUATION COMPLETE${NC}${BOLD}                    
 echo -e "${BOLD}║  Results: ${CYAN}$RESULTS_DIR${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
+
+# ============================================================================
+# STAGE 6: Launch Dashboard
+# ============================================================================
+if [ -f "$RESULTS_DIR/diagnostics.npz" ]; then
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}Launching Diagnostics Dashboard...${NC}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/slam_dashboard.py" "$RESULTS_DIR/diagnostics.npz"
+fi

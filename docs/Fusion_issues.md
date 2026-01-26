@@ -4,10 +4,14 @@ This doc is a **code-level sanity check** of whether GC v2 currently fuses **LiD
 
 ## TL;DR (current working tree)
 
-- **Correct:** The GC v2 rosbag runner is effectively **LiDAR-only** today; **IMU and odom are subscribed but not fused into the belief**.
+- **Updated (Jan 2026):** GC v2 now fuses **all three sensor modalities**: LiDAR + IMU + Odom.
 - **Correct:** The SLAM update path is `on_lidar → process_scan_single_hypothesis → process_hypotheses`.
-- **Updated:** The GC backend no longer uses a hardcoded scan duration like `stamp_sec - 0.1`; scan bounds are derived from per-point timestamps (and always include the header stamp).
-- **Spec gap:** The spec says IMU uncertainty should influence deskew/covariances; the current implementation **does not consume IMU samples**, so that influence is not actually present yet.
+- **Correct:** Scan bounds are derived from per-point timestamps (and always include the header stamp).
+- **Implemented:** IMU is used for:
+  - Deskew via constant-twist IMU preintegration (`DeskewConstantTwist`)
+  - Gravity direction evidence (`ImuVMFGravityEvidence`)
+  - Rotation evidence (`ImuGyroRotationEvidence`)
+- **Implemented:** Odom is fused via `OdomQuadraticEvidence` (Gaussian SE(3) pose factor).
 
 ## 1) Launch wiring (what runs in GC rosbag eval)
 
@@ -122,23 +126,26 @@ flowchart LR
 
 See `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`.
 
-### 2.2 IMU is buffered only (not fused)
+### 2.2 IMU is buffered AND fused
 
 `on_imu()` appends `(stamp, gyro, accel)` into `self.imu_buffer`, and bounds it by `self.max_imu_buffer`.
 
-- Allocation: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:207`
-- Callback: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:301`
+**Updated (Jan 2026):** IMU data IS now consumed by the pipeline:
 
-**Verification:** there are no reads of `self.imu_buffer` anywhere in the active GC pipeline; IMU affects only counters/status logging.
+- `on_lidar()` extracts IMU arrays and passes them to `process_scan_single_hypothesis()`
+- IMU is used for deskew via `DeskewConstantTwist` (IMU preintegration)
+- IMU produces evidence via `ImuVMFGravityEvidence` and `ImuGyroRotationEvidence`
+- Evidence is fused: `L_evidence = L_lidar + L_odom + L_imu + L_gyro`
 
-### 2.3 Odom is stored only (not fused)
+### 2.3 Odom is stored AND fused
 
-`on_odom()` stores an SE(3) pose in `self.last_odom_pose` and timestamp in `self.last_odom_stamp`.
+`on_odom()` stores an SE(3) pose in `self.last_odom_pose` and covariance in `self.last_odom_cov_se3`.
 
-- Allocation: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:203`
-- Callback: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:325`
+**Updated (Jan 2026):** Odom data IS now consumed by the pipeline:
 
-**Verification:** there are no reads of `self.last_odom_pose` / `self.last_odom_stamp` in the active GC pipeline; odom affects only counters/status logging.
+- `on_lidar()` passes odom pose and covariance to `process_scan_single_hypothesis()`
+- Odom produces evidence via `OdomQuadraticEvidence` (Gaussian SE(3) pose factor)
+- Evidence is fused: `L_evidence = L_lidar + L_odom + L_imu + L_gyro`
 
 ## 3) Where SLAM actually happens (LiDAR pipeline)
 
@@ -153,16 +160,13 @@ The per-scan pipeline is the fixed 15-step sequence described in:
 
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:135`
 
-**Inputs actually used by the pipeline today**
+**Inputs used by the pipeline (Updated Jan 2026)**
 
 - LiDAR points/timestamps/weights (from `PointCloud2`)
+- IMU samples from `/gc/sensors/imu` (for deskew + evidence)
+- Odometry pose/covariance from `/gc/sensors/odom` (for evidence)
 - `dt_sec` derived from scan timing
 - internal state/config (`Q`, `bin_atlas`, `map_stats`, `belief_prev`, constants)
-
-**Inputs NOT used by the pipeline today**
-
-- IMU samples from `/livox/mid360/imu`
-- odometry samples from `/odom`
 
 ## 4) Spec intent vs current implementation (important clarification)
 
