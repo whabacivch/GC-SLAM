@@ -4,6 +4,66 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-26: LiDAR Evidence Fix — Apply SE(3) Residual (Not Absolute Pose)
+
+### Summary
+
+- **Fixed a hard SE(3) semantics bug in LiDAR evidence application**: `LidarQuadraticEvidence` previously treated the absolute pose estimate from `(R_hat, t_hat)` as a tangent-space increment, effectively composing an already-world-frame pose again and driving large orientation errors and translation blow-ups.
+- **Now uses right-perturbation log error**: `δ = Log(X_pred^{-1} ∘ X_lidar)` is embedded into the GC pose slice `[rot, trans]`, so LiDAR evidence targets the correct local state coordinates.
+- **Added per-scan rotation-binding diagnostics**: `rot_err_{lidar,odom}_deg_{pred,post}` are exported in `diagnostics.npz` to directly verify whether rotation residuals decrease after fusion.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/lidar_evidence.py`: Build `delta_z_star` from `se3_log(se3_relative(X_lidar, X_pred))` and transport translation/rotation curvature into right-perturbation coordinates.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py`: Compute and record LiDAR/odom rotation errors (pred vs post) for immediate residual-direction sanity checking.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/diagnostics.py`: Extend schema + NPZ export/load to include the new rotation-binding diagnostics.
+- `fl_ws/src/fl_slam_poc/test/test_operators.py`: Add tests that assert LiDAR evidence produces zero delta when `X_lidar == X_pred` and matches a known injected right-perturbation `xi`.
+
+### Verification
+
+- `bash tools/run_and_evaluate_gc.sh` runs end-to-end; results captured under `results/gc_20260126_144420/` and `results/gc_20260126_144936/` (per-run timestamped dirs).
+
+## 2026-01-26: IMU Gyro Evidence Fix — Correct SO(3) Residual Direction
+
+### Summary
+
+- **Fixed a sign/direction bug in IMU gyro rotation evidence**: the residual was computed as `Log(R_imu^T R_pred)` (meas^{-1} ∘ pred) but then applied as a target increment, causing the gyro factor to push the state away from the IMU-integrated orientation.
+- **Now uses measurement-target residual**: `r = Log(R_pred^T R_imu)` (pred^{-1} ∘ meas), consistent with the right-perturbation tangent convention used by the rest of GC v2.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/imu_gyro_evidence.py`: flip residual to `Log(R_end_pred^T @ R_end_imu)`.
+- `fl_ws/src/fl_slam_poc/test/test_operators.py`: add a small-angle unit test asserting `delta_meas=0 ⇒ r≈-rotvec_end_pred`.
+
+### Verification
+
+- `PYTHONPATH=fl_ws/src/fl_slam_poc .venv/bin/python -m pytest -q fl_ws/src/fl_slam_poc/test` passes.
+- `bash tools/run_and_evaluate_gc.sh` runs end-to-end; results captured under `results/gc_20260126_155819/`.
+
+## 2026-01-26: No-TF Frame Coherence (B2) — Base-Frame State + Explicit Extrinsics
+
+### Summary
+
+- **State frame made explicit**: treat the SE(3) state as `X = T_world<-base` (M3DGR bag uses `base_footprint`).
+- **Stop relabeling without transforming**: sensor normalizers now preserve incoming `frame_id` / `child_frame_id` by default (empty override strings mean “preserve”).
+- **Apply numeric extrinsics in backend (no-TF mode)**: IMU samples and LiDAR points are rotated into the base frame before any inference, using explicit `T_base_imu` and `T_base_lidar` parameters.
+- **Added IMU gravity coherence probes** to diagnostics (`accel_dir_dot_mu0`, `accel_mag_mean`) to validate that IMU is consistent with the estimated pose in the chosen base frame.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/odom_normalizer.py`: preserve frames when overrides are empty.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/imu_normalizer.py`: preserve `frame_id` when override is empty.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`: add `T_base_lidar`/`T_base_imu` params and apply `R_base<-sensor` rotations to LiDAR points and IMU (gyro/accel) samples.
+- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`: set `base_frame=base_footprint` and pass default extrinsics for M3DGR.
+- `fl_ws/src/fl_slam_poc/config/gc_unified.yaml`: preserve frames in the hub config; document default extrinsics.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/diagnostics.py`: export new coherence probe fields to NPZ.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py`: compute `accel_dir_dot_mu0` and `accel_mag_mean` per scan.
+
+### Verification
+
+- `PYTHONPATH=fl_ws/src/fl_slam_poc .venv/bin/python -m pytest -q fl_ws/src/fl_slam_poc/test` passes.
+- `bash tools/run_and_evaluate_gc.sh` runs end-to-end; results captured under `results/gc_20260126_161004/`.
+
 ## 2026-01-26: Principled Missing-Data Handling — OU Propagation + IMU Evidence Scaling
 
 ### Summary

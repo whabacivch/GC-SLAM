@@ -110,17 +110,46 @@ GC_IW_NU_WEAK_ADD = 0.5  # ν = p + 1 + GC_IW_NU_WEAK_ADD  (so ν - p - 1 = 0.5)
 # white-noise PSD proxies when explicitly discretized once).
 # =============================================================================
 #
-# Units:
-# - `GC_IMU_GYRO_NOISE_DENSITY` is treated as continuous-time gyro *rate* noise PSD,
-#   with effective units rad^2 / s. When used for an integrated angle residual over
-#   duration dt, we discretize once as: Σ_rot ≈ PSD * dt.
-# - `GC_IMU_ACCEL_NOISE_DENSITY` is treated as continuous-time accel noise PSD,
-#   with effective units m^2 / s^3 (since (m/s^2)^2 * s).
-GC_IMU_GYRO_NOISE_DENSITY = 8.7e-7   # rad^2 / s   (gyro rate noise PSD proxy)
-GC_IMU_ACCEL_NOISE_DENSITY = 9.5e-5  # m^2 / s^3   (accel noise PSD proxy)
+# EXPLICIT NOISE MODEL DECLARATIONS (prevents unit bugs):
+#
+# Each constant declares exactly ONE of:
+#   - PSD S (units /Hz, continuous time), OR
+#   - per-sample variance at a declared rate
+#
+# And specifies exactly ONE conversion path:
+#   - For integrated factors: PSD → integrated-angle covariance: S · dt_covered
+#   - For rate factors: PSD → per-sample rate covariance: S / Δt
+#
+# =============================================================================
+# Gyro Noise (ICM-40609, Livox Mid-360)
+# =============================================================================
+# NOISE MODEL: Continuous-time PSD
+# UNITS: rad²/s (gyro rate noise PSD)
+# PROVENANCE: Datasheet value (verify if 8.7e-7 is PSD or per-sample variance)
+# CONVERSION PATH: For integrated factors (gyro rotation evidence):
+#   Σ_rot = GC_IMU_GYRO_NOISE_DENSITY · dt_int
+#   where dt_int = Σ_i Δt_i over actual IMU sample intervals
+GC_IMU_GYRO_NOISE_DENSITY = 8.7e-7   # rad²/s (continuous-time PSD)
 
-# Default LiDAR translation-measurement covariance used by TranslationWLS (prior; adapted by IW updates).
-GC_LIDAR_SIGMA_MEAS = 0.01  # isotropic 3x3 covariance scale (legacy default)
+# =============================================================================
+# Accel Noise (ICM-40609, Livox Mid-360)
+# =============================================================================
+# NOISE MODEL: Continuous-time PSD
+# UNITS: m²/s³ (accel noise PSD, since (m/s²)² · s = m²/s³)
+# PROVENANCE: Datasheet value (verify if 9.5e-5 is PSD or per-sample variance)
+# CONVERSION PATH: For integrated factors (accel velocity evidence):
+#   Σ_vel = GC_IMU_ACCEL_NOISE_DENSITY · dt_int
+#   where dt_int = Σ_i Δt_i over actual IMU sample intervals
+GC_IMU_ACCEL_NOISE_DENSITY = 9.5e-5  # m²/s³ (continuous-time PSD)
+
+# =============================================================================
+# LiDAR Translation Measurement Noise
+# =============================================================================
+# NOISE MODEL: Discrete covariance (not PSD)
+# UNITS: m² (isotropic 3×3 covariance scale)
+# PROVENANCE: Legacy default (adapted by IW updates from residuals)
+# CONVERSION PATH: Direct use (already discrete covariance, no conversion needed)
+GC_LIDAR_SIGMA_MEAS = 0.01  # m² (discrete covariance, isotropic 3×3 scale)
 
 # Livox Mid-360 bucketization constants (Phase 3 part 2)
 GC_LIDAR_N_LINES = 8

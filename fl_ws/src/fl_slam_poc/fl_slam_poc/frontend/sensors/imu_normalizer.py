@@ -54,7 +54,8 @@ class ImuNormalizerNode(Node):
         # Parameters
         self.declare_parameter("input_topic", "/livox/mid360/imu")
         self.declare_parameter("output_topic", "/gc/sensors/imu")
-        self.declare_parameter("output_frame", "imu_link")
+        # If empty, preserve incoming frame id (strict no-TF mode contract).
+        self.declare_parameter("output_frame", "")
 
         input_topic = str(self.get_parameter("input_topic").value)
         output_topic = str(self.get_parameter("output_topic").value)
@@ -116,7 +117,7 @@ class ImuNormalizerNode(Node):
         # Create normalized output message
         out = Imu()
         out.header = msg.header
-        out.header.frame_id = self.output_frame
+        out.header.frame_id = self.output_frame or msg.header.frame_id
         out.orientation = msg.orientation
         out.orientation_covariance = msg.orientation_covariance
         out.angular_velocity = msg.angular_velocity

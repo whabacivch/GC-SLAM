@@ -31,14 +31,14 @@ gc_sensor_hub:
     odom_normalizer:
       input_topic: /odom
       output_topic: /gc/sensors/odom
-      output_frame: odom
-      child_frame: base_link
+      output_frame: ""  # Preserve bag frame_id (no-TF mode).
+      child_frame: ""   # Preserve bag child_frame_id (no-TF mode).
 
     # IMU Normalizer: raw IMU -> canonical IMU
     imu_normalizer:
       input_topic: /livox/mid360/imu
       output_topic: /gc/sensors/imu
-      output_frame: imu_link
+      output_frame: ""  # Preserve bag frame_id (no-TF mode).
 
     # Dead End Audit: subscribes to unused topics for accountability
     dead_end_audit:
@@ -67,7 +67,13 @@ gc_backend:
 
     # Frame IDs
     odom_frame: odom
-    base_frame: base_link
+    # For M3DGR Dynamic01, bag truth uses base_footprint. Keep this consistent with odom child_frame_id.
+    base_frame: base_footprint
+
+    # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] (rotvec, radians).
+    # Bag truth has LiDAR+IMU in livox_frame; default assumes identity rotation.
+    T_base_lidar: [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]
+    T_base_imu:   [0.0,   0.0, 0.0,   0.0, 0.0, 0.0]
 
     # Trajectory export
     trajectory_export_path: /tmp/gc_slam_trajectory.tum

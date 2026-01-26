@@ -52,8 +52,9 @@ class OdomNormalizerNode(Node):
         # Parameters
         self.declare_parameter("input_topic", "/odom")
         self.declare_parameter("output_topic", "/gc/sensors/odom")
-        self.declare_parameter("output_frame", "odom")
-        self.declare_parameter("child_frame", "base_link")
+        # If empty, preserve incoming frame ids (strict no-TF mode contract).
+        self.declare_parameter("output_frame", "")
+        self.declare_parameter("child_frame", "")
 
         input_topic = str(self.get_parameter("input_topic").value)
         output_topic = str(self.get_parameter("output_topic").value)
@@ -105,8 +106,8 @@ class OdomNormalizerNode(Node):
         # Create normalized output message
         out = Odometry()
         out.header = msg.header
-        out.header.frame_id = self.output_frame
-        out.child_frame_id = self.child_frame
+        out.header.frame_id = self.output_frame or msg.header.frame_id
+        out.child_frame_id = self.child_frame or msg.child_frame_id
         out.pose = msg.pose
         out.twist = msg.twist
 

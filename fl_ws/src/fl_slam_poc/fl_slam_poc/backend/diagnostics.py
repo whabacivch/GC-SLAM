@@ -78,12 +78,27 @@ class ScanDiagnostics:
     wahba_cost: float = 0.0
     translation_residual_norm: float = 0.0
 
+    # Rotation binding diagnostics (degrees)
+    rot_err_lidar_deg_pred: float = 0.0
+    rot_err_lidar_deg_post: float = 0.0
+    rot_err_odom_deg_pred: float = 0.0
+    rot_err_odom_deg_post: float = 0.0
+
     # Fusion diagnostics
     fusion_alpha: float = 1.0
 
     # Certificate summaries
     total_trigger_magnitude: float = 0.0
     conditioning_number: float = 1.0
+    
+    # IMU discretization diagnostics
+    dt_scan: float = 0.0  # LiDAR scan duration
+    dt_int: float = 0.0  # IMU-covered time (Σ_i Δt_i over actual sample intervals)
+    num_imu_samples: int = 0  # Number of IMU samples used
+
+    # Frame coherence probes (base-frame IMU sanity)
+    accel_dir_dot_mu0: float = 0.0  # xbar · mu0 in body frame (should be near +1 when consistent)
+    accel_mag_mean: float = 0.0     # mean ||a|| (m/s^2), should be near 9.81 when stationary
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -119,9 +134,18 @@ class ScanDiagnostics:
             "trace_Sigma_a_mode": self.trace_Sigma_a_mode,
             "wahba_cost": self.wahba_cost,
             "translation_residual_norm": self.translation_residual_norm,
+            "rot_err_lidar_deg_pred": self.rot_err_lidar_deg_pred,
+            "rot_err_lidar_deg_post": self.rot_err_lidar_deg_post,
+            "rot_err_odom_deg_pred": self.rot_err_odom_deg_pred,
+            "rot_err_odom_deg_post": self.rot_err_odom_deg_post,
             "fusion_alpha": self.fusion_alpha,
             "total_trigger_magnitude": self.total_trigger_magnitude,
             "conditioning_number": self.conditioning_number,
+            "dt_scan": self.dt_scan,
+            "dt_int": self.dt_int,
+            "num_imu_samples": self.num_imu_samples,
+            "accel_dir_dot_mu0": self.accel_dir_dot_mu0,
+            "accel_mag_mean": self.accel_mag_mean,
         }
 
     @classmethod
@@ -159,9 +183,18 @@ class ScanDiagnostics:
             trace_Sigma_a_mode=d.get("trace_Sigma_a_mode", 0.0),
             wahba_cost=d.get("wahba_cost", 0.0),
             translation_residual_norm=d.get("translation_residual_norm", 0.0),
+            rot_err_lidar_deg_pred=d.get("rot_err_lidar_deg_pred", 0.0),
+            rot_err_lidar_deg_post=d.get("rot_err_lidar_deg_post", 0.0),
+            rot_err_odom_deg_pred=d.get("rot_err_odom_deg_pred", 0.0),
+            rot_err_odom_deg_post=d.get("rot_err_odom_deg_post", 0.0),
             fusion_alpha=d.get("fusion_alpha", 1.0),
             total_trigger_magnitude=d.get("total_trigger_magnitude", 0.0),
             conditioning_number=d.get("conditioning_number", 1.0),
+            dt_scan=d.get("dt_scan", 0.0),
+            dt_int=d.get("dt_int", 0.0),
+            num_imu_samples=d.get("num_imu_samples", 0),
+            accel_dir_dot_mu0=d.get("accel_dir_dot_mu0", 0.0),
+            accel_mag_mean=d.get("accel_mag_mean", 0.0),
         )
 
 
@@ -234,6 +267,9 @@ class DiagnosticsLog:
             "scan_numbers": np.array([s.scan_number for s in self.scans]),
             "timestamps": np.array([s.timestamp for s in self.scans]),
             "dt_secs": np.array([s.dt_sec for s in self.scans]),
+            "dt_scan": np.array([s.dt_scan for s in self.scans]),
+            "dt_int": np.array([s.dt_int for s in self.scans]),
+            "num_imu_samples": np.array([s.num_imu_samples for s in self.scans]),
             "n_points_raw": np.array([s.n_points_raw for s in self.scans]),
             "n_points_budget": np.array([s.n_points_budget for s in self.scans]),
             "p_W": np.stack([s.p_W for s in self.scans]),  # (n, 3)
@@ -259,9 +295,15 @@ class DiagnosticsLog:
             "trace_Sigma_a_mode": np.array([s.trace_Sigma_a_mode for s in self.scans]),
             "wahba_cost": np.array([s.wahba_cost for s in self.scans]),
             "translation_residual_norm": np.array([s.translation_residual_norm for s in self.scans]),
+            "rot_err_lidar_deg_pred": np.array([s.rot_err_lidar_deg_pred for s in self.scans]),
+            "rot_err_lidar_deg_post": np.array([s.rot_err_lidar_deg_post for s in self.scans]),
+            "rot_err_odom_deg_pred": np.array([s.rot_err_odom_deg_pred for s in self.scans]),
+            "rot_err_odom_deg_post": np.array([s.rot_err_odom_deg_post for s in self.scans]),
             "fusion_alpha": np.array([s.fusion_alpha for s in self.scans]),
             "total_trigger_magnitude": np.array([s.total_trigger_magnitude for s in self.scans]),
             "conditioning_number": np.array([s.conditioning_number for s in self.scans]),
+            "accel_dir_dot_mu0": np.array([s.accel_dir_dot_mu0 for s in self.scans]),
+            "accel_mag_mean": np.array([s.accel_mag_mean for s in self.scans]),
         }
 
         # Optional individual evidence components
@@ -294,6 +336,9 @@ class DiagnosticsLog:
                 scan_number=int(data["scan_numbers"][i]),
                 timestamp=float(data["timestamps"][i]),
                 dt_sec=float(data["dt_secs"][i]),
+                dt_scan=float(data["dt_scan"][i]) if "dt_scan" in data else 0.0,
+                dt_int=float(data["dt_int"][i]) if "dt_int" in data else 0.0,
+                num_imu_samples=int(data["num_imu_samples"][i]) if "num_imu_samples" in data else 0,
                 n_points_raw=int(data["n_points_raw"][i]),
                 n_points_budget=int(data["n_points_budget"][i]),
                 p_W=data["p_W"][i],
@@ -322,9 +367,15 @@ class DiagnosticsLog:
                 trace_Sigma_a_mode=float(data["trace_Sigma_a_mode"][i]),
                 wahba_cost=float(data["wahba_cost"][i]),
                 translation_residual_norm=float(data["translation_residual_norm"][i]),
+                rot_err_lidar_deg_pred=float(data["rot_err_lidar_deg_pred"][i]) if "rot_err_lidar_deg_pred" in data else 0.0,
+                rot_err_lidar_deg_post=float(data["rot_err_lidar_deg_post"][i]) if "rot_err_lidar_deg_post" in data else 0.0,
+                rot_err_odom_deg_pred=float(data["rot_err_odom_deg_pred"][i]) if "rot_err_odom_deg_pred" in data else 0.0,
+                rot_err_odom_deg_post=float(data["rot_err_odom_deg_post"][i]) if "rot_err_odom_deg_post" in data else 0.0,
                 fusion_alpha=float(data["fusion_alpha"][i]),
                 total_trigger_magnitude=float(data["total_trigger_magnitude"][i]),
                 conditioning_number=float(data["conditioning_number"][i]),
+                accel_dir_dot_mu0=float(data["accel_dir_dot_mu0"][i]) if "accel_dir_dot_mu0" in data else 0.0,
+                accel_mag_mean=float(data["accel_mag_mean"][i]) if "accel_mag_mean" in data else 0.0,
             )
             log.scans.append(diag)
 

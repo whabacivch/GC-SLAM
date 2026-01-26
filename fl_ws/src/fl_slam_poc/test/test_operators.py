@@ -223,6 +223,167 @@ class TestWahbaSVD:
         assert cert.exact is True
 
 
+class TestLidarQuadraticEvidencePoseError:
+    def test_delta_is_zero_when_meas_equals_pred(self):
+        from fl_slam_poc.backend.operators.lidar_evidence import lidar_quadratic_evidence, MapBinStats
+        from fl_slam_poc.backend.operators.binning import ScanBinStats
+        from fl_slam_poc.common.geometry import se3_jax
+
+        B = constants.GC_B_BINS
+        key = jax.random.PRNGKey(0)
+        mu_map = random_array(key, (B, 3))
+        mu_map = mu_map / (jnp.linalg.norm(mu_map, axis=1, keepdims=True) + 1e-12)
+
+        scan_bins = ScanBinStats(
+            N=jnp.ones((B,), dtype=jnp.float64),
+            s_dir=mu_map,
+            p_bar=jnp.zeros((B, 3), dtype=jnp.float64),
+            Sigma_p=jnp.tile(jnp.eye(3, dtype=jnp.float64)[None, :, :], (B, 1, 1)),
+            kappa_scan=jnp.ones((B,), dtype=jnp.float64),
+        )
+        map_bins = MapBinStats(
+            S_dir=jnp.zeros((B, 3), dtype=jnp.float64),
+            N_dir=jnp.ones((B,), dtype=jnp.float64),
+            N_pos=jnp.ones((B,), dtype=jnp.float64),
+            sum_p=jnp.zeros((B, 3), dtype=jnp.float64),
+            sum_ppT=jnp.zeros((B, 3, 3), dtype=jnp.float64),
+            mu_dir=mu_map,
+            kappa_map=jnp.ones((B,), dtype=jnp.float64),
+            centroid=jnp.zeros((B, 3), dtype=jnp.float64),
+            Sigma_c=jnp.tile(jnp.eye(3, dtype=jnp.float64)[None, :, :], (B, 1, 1)),
+        )
+
+        # Non-identity predicted pose
+        t_pred = jnp.array([1.2, -0.4, 0.7], dtype=jnp.float64)
+        rot_pred = jnp.array([0.1, -0.05, 0.02], dtype=jnp.float64)
+        X_pred = jnp.concatenate([t_pred, rot_pred])
+
+        belief_pred = BeliefGaussianInfo.create_identity_prior(anchor_id="t", stamp_sec=0.0)
+        belief_pred = BeliefGaussianInfo(
+            chart_id=belief_pred.chart_id,
+            anchor_id=belief_pred.anchor_id,
+            X_anchor=X_pred,
+            stamp_sec=belief_pred.stamp_sec,
+            z_lin=belief_pred.z_lin,
+            L=belief_pred.L,
+            h=belief_pred.h,
+            cert=belief_pred.cert,
+        )
+
+        R_hat = se3_jax.so3_exp(rot_pred)
+        t_hat = t_pred
+        t_cov = 0.01 * jnp.eye(3, dtype=jnp.float64)
+
+        result, cert, effect = lidar_quadratic_evidence(
+            belief_pred=belief_pred,
+            scan_bins=scan_bins,
+            map_bins=map_bins,
+            R_hat=R_hat,
+            t_hat=t_hat,
+            t_cov=t_cov,
+            eps_psd=constants.GC_EPS_PSD,
+            eps_lift=constants.GC_EPS_LIFT,
+        )
+
+        assert isinstance(cert, CertBundle)
+        assert isinstance(effect, ExpectedEffect)
+        assert jnp.allclose(result.delta_z_star[:6], jnp.zeros((6,), dtype=jnp.float64), atol=1e-8)
+
+    def test_delta_matches_right_perturbation_log_error(self):
+        from fl_slam_poc.backend.operators.lidar_evidence import lidar_quadratic_evidence, MapBinStats
+        from fl_slam_poc.backend.operators.binning import ScanBinStats
+        from fl_slam_poc.common.belief import pose_se3_to_z_delta
+        from fl_slam_poc.common.geometry import se3_jax
+
+        B = constants.GC_B_BINS
+        mu_map = jnp.tile(jnp.array([[1.0, 0.0, 0.0]], dtype=jnp.float64), (B, 1))
+
+        scan_bins = ScanBinStats(
+            N=jnp.ones((B,), dtype=jnp.float64),
+            s_dir=mu_map,
+            p_bar=jnp.zeros((B, 3), dtype=jnp.float64),
+            Sigma_p=jnp.tile(jnp.eye(3, dtype=jnp.float64)[None, :, :], (B, 1, 1)),
+            kappa_scan=jnp.ones((B,), dtype=jnp.float64),
+        )
+        map_bins = MapBinStats(
+            S_dir=jnp.zeros((B, 3), dtype=jnp.float64),
+            N_dir=jnp.ones((B,), dtype=jnp.float64),
+            N_pos=jnp.ones((B,), dtype=jnp.float64),
+            sum_p=jnp.zeros((B, 3), dtype=jnp.float64),
+            sum_ppT=jnp.zeros((B, 3, 3), dtype=jnp.float64),
+            mu_dir=mu_map,
+            kappa_map=jnp.ones((B,), dtype=jnp.float64),
+            centroid=jnp.zeros((B, 3), dtype=jnp.float64),
+            Sigma_c=jnp.tile(jnp.eye(3, dtype=jnp.float64)[None, :, :], (B, 1, 1)),
+        )
+
+        t_pred = jnp.array([0.3, 0.1, -0.2], dtype=jnp.float64)
+        rot_pred = jnp.array([0.02, -0.03, 0.01], dtype=jnp.float64)
+        X_pred = jnp.concatenate([t_pred, rot_pred])
+
+        belief_pred = BeliefGaussianInfo.create_identity_prior(anchor_id="t", stamp_sec=0.0)
+        belief_pred = BeliefGaussianInfo(
+            chart_id=belief_pred.chart_id,
+            anchor_id=belief_pred.anchor_id,
+            X_anchor=X_pred,
+            stamp_sec=belief_pred.stamp_sec,
+            z_lin=belief_pred.z_lin,
+            L=belief_pred.L,
+            h=belief_pred.h,
+            cert=belief_pred.cert,
+        )
+
+        # Small right-perturbation applied to predicted pose
+        xi = jnp.array([0.05, -0.02, 0.01, 0.01, 0.0, -0.015], dtype=jnp.float64)  # [rho, phi]
+        X_meas = se3_jax.se3_compose(X_pred, se3_jax.se3_exp(xi))
+
+        R_hat = se3_jax.so3_exp(X_meas[3:6])
+        t_hat = X_meas[:3]
+        t_cov = 0.02 * jnp.eye(3, dtype=jnp.float64)
+
+        result, _, _ = lidar_quadratic_evidence(
+            belief_pred=belief_pred,
+            scan_bins=scan_bins,
+            map_bins=map_bins,
+            R_hat=R_hat,
+            t_hat=t_hat,
+            t_cov=t_cov,
+            eps_psd=constants.GC_EPS_PSD,
+            eps_lift=constants.GC_EPS_LIFT,
+        )
+
+        expected_delta_pose_z = pose_se3_to_z_delta(xi)
+        assert jnp.allclose(result.delta_z_star[:6], expected_delta_pose_z, atol=1e-6)
+
+
+class TestImuGyroEvidenceResidualDirection:
+    def test_residual_is_pred_inv_comp_meas(self):
+        """
+        If the predicted end orientation is R_end_pred = R_start * Exp(phi_pred) and the
+        IMU measurement is delta = 0, then the residual should be Log(R_end_pred^T * R_start)
+        = -phi_pred for small angles (pred^{-1} ∘ meas).
+        """
+        from fl_slam_poc.backend.operators.imu_gyro_evidence import imu_gyro_rotation_evidence
+
+        rotvec_start = jnp.zeros((3,), dtype=jnp.float64)
+        rotvec_end_pred = jnp.array([0.01, -0.02, 0.005], dtype=jnp.float64)
+        delta_meas = jnp.zeros((3,), dtype=jnp.float64)
+
+        Sigma_g = jnp.eye(3, dtype=jnp.float64)
+        dt_int = 1.0
+
+        result, _, _ = imu_gyro_rotation_evidence(
+            rotvec_start_WB=rotvec_start,
+            rotvec_end_pred_WB=rotvec_end_pred,
+            delta_rotvec_meas=delta_meas,
+            Sigma_g=Sigma_g,
+            dt_int=dt_int,
+        )
+
+        # For small angles: Log(Exp(phi_pred)^T) ≈ -phi_pred
+        assert jnp.allclose(result.r_rot, -rotvec_end_pred, atol=1e-6)
+
+
 class TestPredictDiffusion:
     """Tests for PredictDiffusion operator."""
 

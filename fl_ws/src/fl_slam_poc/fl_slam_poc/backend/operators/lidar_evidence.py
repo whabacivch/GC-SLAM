@@ -13,7 +13,12 @@ from typing import Tuple
 
 from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
-from fl_slam_poc.common.belief import BeliefGaussianInfo, D_Z, SLICE_POSE
+from fl_slam_poc.common.belief import (
+    BeliefGaussianInfo,
+    D_Z,
+    SLICE_POSE,
+    pose_se3_to_z_delta,
+)
 from fl_slam_poc.common.certificates import (
     CertBundle,
     ExpectedEffect,
@@ -105,7 +110,11 @@ def lidar_quadratic_evidence(
     R_hat = jnp.asarray(R_hat, dtype=jnp.float64)
     t_hat = jnp.asarray(t_hat, dtype=jnp.float64)
     t_cov = jnp.asarray(t_cov, dtype=jnp.float64)
-    
+
+    # Predicted world pose (measurement will be compared as a right-perturbation in this chart).
+    pose_pred = belief_pred.mean_world_pose(eps_lift=eps_lift)  # (6,) [trans, rotvec]
+    R_pred = se3_jax.so3_exp(pose_pred[3:6])
+
     # Step 1: Compute excitation scales (continuous, no branching)
     # Use belief covariance as the continuous excitation proxy (no legacy cache dependency).
     _mu_pred, Sigma_pred, _lift = belief_pred.to_moments(eps_lift)
@@ -114,18 +123,19 @@ def lidar_quadratic_evidence(
     
     s_dt = dt_effect / (dt_effect + c_dt)
     s_ex = extrinsic_effect / (extrinsic_effect + c_ex)
-    
-    # Step 2: Build delta_z* from (R_hat, t_hat)
-    # Pose slice corresponds to [rotation, translation] in right perturbation
-    delta_z_star = jnp.zeros(D_Z, dtype=jnp.float64)
-    
-    # Convert R_hat to rotation vector
-    rotvec = se3_jax.so3_log(R_hat)
-    
-    # Set pose slice: [rotation(0:3), translation(3:6)]
-    delta_z_star = delta_z_star.at[0:3].set(rotvec)
-    delta_z_star = delta_z_star.at[3:6].set(t_hat)
-    
+
+    # Step 2: Build delta_z* as a right-perturbation error:
+    #   X_meas is the absolute scan pose in world from (R_hat, t_hat)
+    #   xi_err = Log( X_pred^{-1} ∘ X_meas )   (se3_jax ordering: [rho, phi])
+    #   delta_pose_z = [phi, rho]             (GC ordering: [rot, trans])
+    rotvec_meas = se3_jax.so3_log(R_hat)
+    pose_meas = jnp.concatenate([t_hat, rotvec_meas])
+    T_err = se3_jax.se3_relative(pose_meas, pose_pred)  # pose_pred^{-1} ∘ pose_meas
+    xi_err = se3_jax.se3_log(T_err)  # [rho, phi]
+    delta_pose_z = pose_se3_to_z_delta(xi_err)  # [rot, trans]
+
+    delta_z_star = jnp.zeros(D_Z, dtype=jnp.float64).at[SLICE_POSE].set(delta_pose_z)
+
     # Step 3: Build L_lidar from closed-form Fisher-style pose information (no sigma-point regression)
     #
     # Rotation: vMF directional curvature proxy aggregated over bins:
@@ -133,14 +143,18 @@ def lidar_quadratic_evidence(
     #
     # Translation: use TranslationWLS covariance as a Gaussian measurement term:
     #   H_trans = (t_cov + eps I)^{-1}
-    mu_map = jnp.asarray(map_bins.mu_dir, dtype=jnp.float64)  # (B,3)
+    mu_map = jnp.asarray(map_bins.mu_dir, dtype=jnp.float64)  # (B,3) in world frame
     I3 = jnp.eye(3, dtype=jnp.float64)
     P = I3[None, :, :] - jnp.einsum("bi,bj->bij", mu_map, mu_map)  # (B,3,3)
     w_b = scan_bins.N * map_bins.kappa_map * scan_bins.kappa_scan  # (B,)
-    H_rot = jnp.einsum("b,bij->ij", w_b, P)
+    H_rot_W = jnp.einsum("b,bij->ij", w_b, P)
+    # Convert curvature to right-perturbation body coordinates: δθ_world ≈ R_pred δθ_body
+    H_rot = R_pred.T @ H_rot_W @ R_pred
     H_rot = domain_projection_psd(H_rot, eps_psd).M_psd
 
-    t_cov_psd = domain_projection_psd(t_cov, eps_psd).M_psd
+    # TranslationWLS returns covariance in world translation coordinates; convert to right-perturbation coords.
+    t_cov_body = R_pred.T @ t_cov @ R_pred
+    t_cov_psd = domain_projection_psd(t_cov_body, eps_psd).M_psd
     H_trans, _ = spd_cholesky_inverse_lifted(t_cov_psd, eps_lift)
 
     total_mass = float(jnp.sum(scan_bins.N))

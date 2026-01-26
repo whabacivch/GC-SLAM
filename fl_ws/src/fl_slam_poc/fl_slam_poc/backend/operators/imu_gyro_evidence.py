@@ -37,7 +37,7 @@ def imu_gyro_rotation_evidence(
     rotvec_end_pred_WB: jnp.ndarray,    # (3,) scan-end predicted orientation
     delta_rotvec_meas: jnp.ndarray,     # (3,) IMU-preintegrated relative rotvec over scan
     Sigma_g: jnp.ndarray,               # (3,3) gyro noise covariance proxy
-    dt_scan: float,
+    dt_int: float,                      # Sum of actual IMU sample intervals (bag-agnostic)
     eps_psd: float = constants.GC_EPS_PSD,
     eps_lift: float = constants.GC_EPS_LIFT,
     chart_id: str = constants.GC_CHART_ID,
@@ -49,12 +49,14 @@ def imu_gyro_rotation_evidence(
     We form a predicted scan-end orientation from the scan-start orientation and IMU delta:
       R_end_imu = R_start * Exp(delta_rotvec_meas)
 
-    Residual on SO(3):
-      r = Log( R_end_imu^T * R_end_pred )
+    Residual on SO(3) (right-perturbation, measurement-target form):
+      r = Log( R_end_pred^T * R_end_imu )
 
     Covariance on r is approximated as:
-      Sigma_rot ≈ Sigma_g * dt_scan
-    (continuous-time white noise angle variance accumulation).
+      Sigma_rot ≈ Sigma_g * dt_int
+    where dt_int = Σ_i Δt_i over actual IMU sample intervals (bag-agnostic definition).
+    
+    Continuous mass check: if dt_int ≈ 0 (no samples), evidence is ~0 without boolean gates.
     """
     rotvec_start_WB = jnp.asarray(rotvec_start_WB, dtype=jnp.float64).reshape(-1)
     rotvec_end_pred_WB = jnp.asarray(rotvec_end_pred_WB, dtype=jnp.float64).reshape(-1)
@@ -66,18 +68,29 @@ def imu_gyro_rotation_evidence(
     R_end_imu = R_start @ R_delta
     R_end_pred = se3_jax.so3_exp(rotvec_end_pred_WB)
 
-    r_rot = se3_jax.so3_log(R_end_imu.T @ R_end_pred)
+    # Residual must be pred^{-1} ∘ meas so that the canonical quadratic term
+    # 0.5 (r - 0)^T Σ^{-1} (r - 0) drives R_end_pred toward R_end_imu.
+    r_rot = se3_jax.so3_log(R_end_pred.T @ R_end_imu)
 
-    dt = float(dt_scan)
-    dt = float(jnp.maximum(jnp.array(dt, dtype=jnp.float64), 1e-12))
-    Sigma_rot = Sigma_g * dt
+    # dt_int is bag-agnostic: sum of actual IMU sample intervals
+    # Continuous mass check: if dt_int ≈ 0 (no samples), evidence becomes ~0 without boolean gates
+    # Use continuous scaling: mass_scale = dt_int / (dt_int + eps_mass)
+    # When dt_int ≈ 0, mass_scale ≈ 0, so evidence is scaled to ~0
+    eps_mass = constants.GC_EPS_MASS
+    dt_safe = jnp.maximum(jnp.array(dt_int, dtype=jnp.float64), 1e-12)
+    mass_scale = dt_safe / (dt_safe + eps_mass)  # Continuous: 0 when dt_int≈0, 1 when dt_int>>eps_mass
+    
+    Sigma_rot = Sigma_g * dt_safe
     Sigma_rot_psd = domain_projection_psd(Sigma_rot, eps_psd).M_psd
     L_rot, lift_strength = spd_cholesky_inverse_lifted(Sigma_rot_psd, eps_lift)
+    
+    # Scale evidence by continuous mass (branch-free)
+    L_rot_scaled = mass_scale * L_rot
 
     L = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
-    L = L.at[0:3, 0:3].set(L_rot)
+    L = L.at[0:3, 0:3].set(L_rot_scaled)
     h = jnp.zeros((D_Z,), dtype=jnp.float64)
-    h = h.at[0:3].set(L_rot @ r_rot)
+    h = h.at[0:3].set(L_rot_scaled @ r_rot)
 
     nll_proxy = 0.5 * float(r_rot @ L_rot @ r_rot)
 
@@ -115,4 +128,3 @@ def imu_gyro_rotation_evidence(
     )
 
     return ImuGyroEvidenceResult(L_gyro=L, h_gyro=h, r_rot=r_rot), cert, effect
-

@@ -39,10 +39,18 @@ def measurement_noise_mean_jax(
     mn_state: MeasurementNoiseIWState,
     idx: int,
 ) -> jnp.ndarray:
-    """IW mean Σ_hat for block idx (0=gyro, 1=accel, 2=lidar)."""
+    """
+    IW mode Σ_mode for block idx (0=gyro, 1=accel, 2=lidar).
+    
+    IW mode is the operational covariance everywhere: Σ_mode = Psi / (nu + p + 1)
+    
+    This is always defined and stable across regimes (no undefined-mean regimes).
+    Makes certificates more meaningful (no conditioning spikes from mean-existence transition).
+    """
     p = mn_state.block_dims[idx].astype(jnp.float64)
-    denom_raw = mn_state.nu[idx] - p - 1.0
-    denom = _positive_part_softplus(denom_raw, eps=1e-12)
+    # IW mode: Sigma_mode = Psi / (nu + p + 1)
+    # Always defined (nu + p + 1 > 0 always)
+    denom = mn_state.nu[idx] + p + 1.0
     Sigma = mn_state.Psi_blocks[idx] / denom
     Sigma_psd, _ = domain_projection_psd_core(Sigma, C.GC_EPS_PSD)
     return Sigma_psd

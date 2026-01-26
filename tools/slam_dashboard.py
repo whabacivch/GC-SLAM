@@ -171,6 +171,9 @@ def create_full_dashboard(data: dict, selected_scan: int = 0, output_path: str =
         "s_ex": safe_list("s_ex"),
         "fusion_alpha": safe_list("fusion_alpha"),
         "dt_secs": safe_list("dt_secs", 0.1),
+        "dt_scan": safe_list("dt_scan", 0.1),
+        "dt_int": safe_list("dt_int", 0.1),
+        "num_imu_samples": safe_list("num_imu_samples", 0),
         "wahba_cost": safe_list("wahba_cost"),
         "translation_residual_norm": safe_list("translation_residual_norm"),
     }
@@ -599,7 +602,9 @@ def create_full_dashboard(data: dict, selected_scan: int = 0, output_path: str =
             // Row 2: Fusion alpha
             {{ x: timelineData.scan_idx, y: timelineData.fusion_alpha, name: 'α', line: {{color: '#4ecdc4'}}, xaxis: 'x2', yaxis: 'y2' }},
             // Row 3: dt and diagnostics
-            {{ x: timelineData.scan_idx, y: timelineData.dt_secs, name: 'dt (s)', line: {{color: '#a55eea'}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dt_secs, name: 'dt_sec (s)', line: {{color: '#a55eea'}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dt_scan, name: 'dt_scan (s)', line: {{color: '#9b59b6'}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dt_int, name: 'dt_int (s)', line: {{color: '#8e44ad'}}, xaxis: 'x3', yaxis: 'y3' }},
             {{ x: timelineData.scan_idx, y: timelineData.wahba_cost, name: 'Wahba', line: {{color: '#f7b731'}}, xaxis: 'x3', yaxis: 'y3' }},
             {{ x: timelineData.scan_idx, y: timelineData.translation_residual_norm, name: 'Trans', line: {{color: '#fd9644'}}, xaxis: 'x3', yaxis: 'y3' }},
         ];

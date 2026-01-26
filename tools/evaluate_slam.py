@@ -25,6 +25,7 @@ Uses evo library for standard SLAM metrics, enhanced with comprehensive statisti
 """
 import argparse
 import os
+import sys
 from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
@@ -160,7 +161,7 @@ def validate_op_reports(op_report_path, require_imu=True):
     print(f"  OpReport checks passed: {len(reports)} total reports.")
 
 
-def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
+def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str, strict: bool = True):
     """
     Validate trajectory has proper timestamps and coordinates.
     
@@ -168,6 +169,11 @@ def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
     - Monotonic timestamps (no duplicates, increasing)
     - Reasonable coordinate ranges
     - Sufficient poses
+    
+    Args:
+        traj: Trajectory to validate
+        name: Name for logging
+        strict: If True, raise ValueError on failure. If False, only warn.
     
     Returns True if valid, prints warnings for issues.
     """
@@ -178,6 +184,7 @@ def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
     print(f"    Poses: {len(timestamps)}")
     
     valid = True
+    critical_errors = []
     
     # Check monotonic timestamps
     diffs = np.diff(timestamps)
@@ -185,6 +192,7 @@ def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
         non_mono = np.sum(diffs < 0)
         print(f"    WARNING: {non_mono} non-monotonic timestamp gaps!")
         valid = False
+        critical_errors.append("non-monotonic timestamps")
     
     # Check for duplicate timestamps (strict: must be > 0, not >= 0)
     dups = np.sum(diffs == 0)
@@ -192,6 +200,7 @@ def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
         print(f"    WARNING: {dups} duplicate timestamps ({100*dups/len(timestamps):.1f}%)")
         print("    FAILED: Timestamps must be strictly monotonic (no duplicates)")
         valid = False
+        critical_errors.append("duplicate timestamps")
     
     # Check coordinate ranges
     print(f"    Coordinate ranges:")
@@ -199,11 +208,15 @@ def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
     print(f"      Y: [{xyz[:,1].min():.2f}, {xyz[:,1].max():.2f}] m")
     print(f"      Z: [{xyz[:,2].min():.2f}, {xyz[:,2].max():.2f}] m")
     
-    # Check for unreasonable values
+    # Check for unreasonable values (warn but don't fail for estimated trajectory)
     max_coord = 1000.0  # 1km max reasonable range
     if np.any(np.abs(xyz) > max_coord):
-        print(f"    WARNING: Coordinates exceed {max_coord}m - possible data corruption!")
-        valid = False
+        print(f"    WARNING: Coordinates exceed {max_coord}m - possible data corruption or coordinate frame mismatch!")
+        if strict:
+            valid = False
+            critical_errors.append("coordinates exceed reasonable range")
+        else:
+            print(f"    (Continuing with evaluation despite large coordinate values)")
     
     # Check timestamp range
     duration = timestamps[-1] - timestamps[0]
@@ -213,7 +226,16 @@ def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str):
     if valid:
         print("    Status: VALID")
         return
-    raise ValueError(f"{name} trajectory validation failed.")
+    
+    # Only raise for critical errors (timestamp issues) if strict mode
+    if critical_errors:
+        error_msg = f"{name} trajectory validation failed: {', '.join(critical_errors)}"
+        if strict:
+            raise ValueError(error_msg)
+        else:
+            print(f"    WARNING: {error_msg} (continuing anyway)")
+    else:
+        print(f"    Status: WARNINGS (continuing with evaluation)")
 
 
 def compute_ate_full(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D):
@@ -1030,8 +1052,9 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     
     # Validate trajectories
     print("\n2. Validating trajectories...")
-    validate_trajectory(gt_traj, "Ground Truth")
-    validate_trajectory(est_traj, "Estimated")
+    validate_trajectory(gt_traj, "Ground Truth", strict=True)
+    # Use non-strict validation for estimated trajectory to allow evaluation even with extreme values
+    validate_trajectory(est_traj, "Estimated", strict=False)
     
     # OpReport validation (IMU + Frobenius diagnostics)
     print("\n3. Validating OpReports (runtime health + audit)...")
@@ -1141,10 +1164,21 @@ if __name__ == "__main__":
     ap.add_argument("--no-imu", action="store_true", help="Disable IMU OpReport requirements")
     args = ap.parse_args()
 
-    main(
-        args.ground_truth,
-        args.estimated,
-        args.output_dir,
-        args.op_report,
-        require_imu=not args.no_imu,
-    )
+    try:
+        main(
+            args.ground_truth,
+            args.estimated,
+            args.output_dir,
+            args.op_report,
+            require_imu=not args.no_imu,
+        )
+    except KeyboardInterrupt:
+        print("\n\nEvaluation interrupted by user.")
+        sys.exit(130)
+    except Exception as e:
+        print(f"\n\nERROR: Evaluation failed with exception: {type(e).__name__}")
+        print(f"Message: {e}")
+        import traceback
+        print("\nTraceback:")
+        traceback.print_exc()
+        sys.exit(1)

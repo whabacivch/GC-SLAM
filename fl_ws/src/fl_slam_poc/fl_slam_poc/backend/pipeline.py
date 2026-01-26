@@ -170,6 +170,60 @@ class ScanPipelineResult:
 # =============================================================================
 
 
+def compute_imu_integration_time(
+    imu_stamps: jnp.ndarray,
+    t_start: float,
+    t_end: float,
+) -> float:
+    """
+    Compute dt_int = sum of IMU sample intervals in (t_start, t_end).
+    
+    This is the IMU integration time: dt_int = Σ_i (t_{i+1} - t_i) for all
+    IMU samples where t_i ∈ (t_start, t_end).
+    
+    Absolute invariants (non-negotiable):
+    - 0 ≤ dt_int ≤ (t_end - t_start)
+    - dt_int resets every scan
+    - dt_int is never cumulative
+    
+    Args:
+        imu_stamps: (M,) array of IMU timestamps (may include zeros for padding)
+        t_start: Start of integration interval (t_last_scan)
+        t_end: End of integration interval (t_scan)
+    
+    Returns:
+        dt_int: Sum of actual IMU sample intervals in the interval
+    """
+    import numpy as np
+    imu_stamps_arr = np.asarray(imu_stamps, dtype=np.float64)
+    t_start = float(t_start)
+    t_end = float(t_end)
+    
+    # Filter to samples in (t_start, t_end) and exclude zero-padded entries
+    eps = 1e-9
+    mask = (imu_stamps_arr > t_start - eps) & (imu_stamps_arr <= t_end + eps) & (imu_stamps_arr > 0.0)
+    valid_stamps = imu_stamps_arr[mask]
+    
+    if len(valid_stamps) < 2:
+        return 0.0
+    
+    # Sort to ensure chronological order
+    valid_stamps = np.sort(valid_stamps)
+    
+    # Compute dt_i = t_{i+1} - t_i for consecutive samples
+    dt_intervals = valid_stamps[1:] - valid_stamps[:-1]
+    dt_intervals = np.maximum(dt_intervals, 0.0)  # Ensure non-negative
+    
+    # dt_int = sum of all intervals
+    dt_int = float(np.sum(dt_intervals))
+    
+    # Enforce invariant: 0 ≤ dt_int ≤ (t_end - t_start)
+    dt_max = t_end - t_start
+    dt_int = max(0.0, min(dt_int, dt_max))
+    
+    return dt_int
+
+
 def process_scan_single_hypothesis(
     belief_prev: BeliefGaussianInfo,
     raw_points: jnp.ndarray,
@@ -186,6 +240,8 @@ def process_scan_single_hypothesis(
     scan_start_time: float,
     scan_end_time: float,
     dt_sec: float,
+    t_last_scan: float,  # NEW: Previous scan time for IMU interval
+    t_scan: float,        # NEW: Current scan time for IMU interval
     Q: jnp.ndarray,
     bin_atlas: BinAtlas,
     map_stats: MapBinStats,
@@ -298,24 +354,24 @@ def process_scan_single_hypothesis(
     )
     xi_body = se3_jax.se3_log(delta_pose)  # (6,) twist over interval
 
+    # =====================================================================
+    # IMU INTEGRATION TIME: dt_int = Σ_i Δt_i over (t_last_scan, t_scan)
+    # =====================================================================
+    # CRITICAL: IMU is path-integral data, not a snapshot
+    # dt_int is the sum of actual IMU sample intervals in the integration window
+    # Absolute invariants: 0 ≤ dt_int ≤ dt_sec
+    dt_int = compute_imu_integration_time(
+        imu_stamps=imu_stamps,
+        t_start=t_last_scan,
+        t_end=t_scan,
+    )
+    
     # IMU measurement-noise IW sufficient stats (Σg, Σa) from commutative residuals
     # Average IMU sampling period for PSD mapping (Var * dt -> PSD).
     m_imu = imu_stamps.shape[0]
     dt_imu = (imu_stamps[-1] - imu_stamps[0]) / jnp.maximum(jnp.array(m_imu - 1, dtype=jnp.float64), 1.0)
     dt_imu = jnp.maximum(dt_imu, 1e-12)
 
-    # Actual IMU integration time: time span of IMU samples used in preintegration
-    # This is the correct time for IMU evidence covariance scaling, not the LiDAR scan duration.
-    # For large LiDAR gaps, dt_scan can be huge, but IMU only integrates over actual samples.
-    # The smooth window weights (w_imu) already filter samples, so use the time span
-    # of the IMU buffer (which contains the samples that contribute to preintegration).
-    # This is branch-free and continuous: if IMU buffer is empty, dt_imu_integration ≈ dt_scan.
-    dt_imu_integration_raw = jnp.maximum(
-        imu_stamps[-1] - imu_stamps[0],
-        jnp.array(scan_end_time - scan_start_time, dtype=jnp.float64)
-    )
-    dt_imu_integration = float(jnp.maximum(dt_imu_integration_raw, 1e-12))
-    
     dt_scan = jnp.maximum(jnp.array(scan_end_time - scan_start_time, dtype=jnp.float64), 1e-12)
     omega_avg = delta_pose[3:6] / dt_scan
     iw_meas_gyro_dPsi, iw_meas_gyro_dnu = imu_gyro_meas_iw_suffstats_from_avg_rate_jax(
@@ -505,15 +561,14 @@ def process_scan_single_hypothesis(
     all_certs.append(imu_cert)
 
     # IMU gyro rotation evidence (Gaussian on SO(3) using preintegrated delta rotation)
-    # Use actual IMU integration time, not LiDAR scan duration, for covariance scaling.
-    # This prevents incorrect inflation of IMU evidence during large LiDAR gaps.
+    # CRITICAL: Pass dt_int (IMU integration time), not dt_scan (LiDAR scan duration)
     Sigma_g = jnp.asarray(config.Sigma_g, dtype=jnp.float64)
     gyro_result, gyro_cert, gyro_effect = imu_gyro_rotation_evidence(
         rotvec_start_WB=rotvec0,
         rotvec_end_pred_WB=pose_pred[3:6],
         delta_rotvec_meas=delta_pose[3:6],
         Sigma_g=Sigma_g,
-        dt_scan=dt_imu_integration,  # Use actual IMU integration time, not LiDAR scan duration
+        dt_int=dt_int,  # CORRECT: IMU integration time, not scan duration
         eps_psd=config.eps_psd,
         eps_lift=config.eps_lift,
         chart_id=belief_pred.chart_id,
@@ -676,6 +731,43 @@ def process_scan_single_hypothesis(
     from scipy.spatial.transform import Rotation as R_scipy
     R_final = R_scipy.from_rotvec(rotvec_final).as_matrix()
 
+    # Rotation-binding diagnostics: verify residuals decrease after fusion.
+    pose_pred_np = np.array(belief_pred.mean_world_pose(eps_lift=config.eps_lift))
+    R_pred = R_scipy.from_rotvec(pose_pred_np[3:6]).as_matrix()
+
+    odom_pose_np = np.array(odom_pose)
+    R_odom = R_scipy.from_rotvec(odom_pose_np[3:6]).as_matrix()
+
+    R_lidar = np.array(R_hat)
+
+    rot_err_lidar_deg_pred = float(
+        np.linalg.norm(R_scipy.from_matrix(R_pred.T @ R_lidar).as_rotvec()) * (180.0 / np.pi)
+    )
+    rot_err_lidar_deg_post = float(
+        np.linalg.norm(R_scipy.from_matrix(R_final.T @ R_lidar).as_rotvec()) * (180.0 / np.pi)
+    )
+    rot_err_odom_deg_pred = float(
+        np.linalg.norm(R_scipy.from_matrix(R_pred.T @ R_odom).as_rotvec()) * (180.0 / np.pi)
+    )
+    rot_err_odom_deg_post = float(
+        np.linalg.norm(R_scipy.from_matrix(R_final.T @ R_odom).as_rotvec()) * (180.0 / np.pi)
+    )
+
+    # IMU gravity direction coherence probe (in body frame).
+    imu_accel_np = np.array(imu_accel, dtype=np.float64)
+    w_imu_np = np.array(w_imu, dtype=np.float64).reshape(-1)
+    accel_bias_np = np.array(accel_bias, dtype=np.float64).reshape(-1)
+    a_corr = imu_accel_np - accel_bias_np[None, :]
+    a_norm = np.linalg.norm(a_corr, axis=1)
+    accel_mag_mean = float(np.sum(w_imu_np * a_norm) / (np.sum(w_imu_np) + 1e-12))
+    x = a_corr / (a_norm[:, None] + 1e-12)
+    S = np.sum(w_imu_np[:, None] * x, axis=0)
+    xbar = S / (np.linalg.norm(S) + 1e-12)
+    g = np.array(constants.GC_GRAVITY_W, dtype=np.float64).reshape(-1)
+    g_hat = g / (np.linalg.norm(g) + 1e-12)
+    mu0 = R_pred.T @ (-g_hat)
+    accel_dir_dot_mu0 = float(np.dot(xbar, mu0))
+
     # Compute evidence diagnostics
     L_total_np = np.array(L_evidence)
     h_total_np = np.array(h_evidence)
@@ -707,6 +799,7 @@ def process_scan_single_hypothesis(
         scan_number=0,  # Will be set by backend_node
         timestamp=scan_end_time,
         dt_sec=dt_sec,
+        dt_int=dt_int,  # IMU integration time: sum of sample intervals in (t_last_scan, t_scan)
         n_points_raw=int(raw_points.shape[0]),
         n_points_budget=int(points.shape[0]),
         p_W=trans_final,
@@ -731,6 +824,12 @@ def process_scan_single_hypothesis(
         psd_min_eig_after=psd_min_eig_after,
         wahba_cost=float(wahba_result.cost),
         translation_residual_norm=float(trans_result.residual_norm),
+        rot_err_lidar_deg_pred=rot_err_lidar_deg_pred,
+        rot_err_lidar_deg_post=rot_err_lidar_deg_post,
+        rot_err_odom_deg_pred=rot_err_odom_deg_pred,
+        rot_err_odom_deg_post=rot_err_odom_deg_post,
+        accel_dir_dot_mu0=accel_dir_dot_mu0,
+        accel_mag_mean=accel_mag_mean,
         fusion_alpha=float(alpha),
         total_trigger_magnitude=total_trigger_mag,
         conditioning_number=cond_number,

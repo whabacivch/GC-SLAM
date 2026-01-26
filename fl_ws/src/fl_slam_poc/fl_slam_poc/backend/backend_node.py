@@ -80,6 +80,20 @@ from fl_slam_poc.backend.diagnostics import ScanDiagnostics, DiagnosticsLog
 from scipy.spatial.transform import Rotation
 
 
+def _parse_T_base_sensor_6d(xyz_rxyz) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Parse 6D extrinsic parameter [x, y, z, rx, ry, rz] (rotvec radians) into (R, t) where:
+      p_base = R @ p_sensor + t
+    """
+    v = np.array(xyz_rxyz, dtype=np.float64).reshape(-1)
+    if v.shape[0] != 6:
+        raise ValueError(f"Expected 6D extrinsic [x,y,z,rx,ry,rz], got shape {v.shape}")
+    t = v[:3]
+    rotvec = v[3:6]
+    Rm = Rotation.from_rotvec(rotvec).as_matrix()
+    return Rm, t
+
+
 def _smooth_window_weight(dist: float, min_r: float, max_r: float, sigma: float) -> float:
     """Continuous range weighting without hard gates."""
     # Smooth window: sigmoid(dist-min_r) * sigmoid(max_r-dist)
@@ -240,6 +254,10 @@ class GoldenChildBackend(Node):
         self.declare_parameter("diagnostics_export_path", "/tmp/gc_slam_diagnostics.npz")
         self.declare_parameter("status_check_period_sec", 5.0)
         self.declare_parameter("forgetting_factor", 0.99)
+        # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] rotvec (radians).
+        # These are applied numerically (not just frame_id relabeling).
+        self.declare_parameter("T_base_lidar", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.declare_parameter("T_base_imu", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         # Hard single-path enforcement: if enabled, missing topics are hard errors.
         self.declare_parameter("use_imu", True)
         self.declare_parameter("use_odom", True)
@@ -266,6 +284,14 @@ class GoldenChildBackend(Node):
         # Map statistics (accumulates over time with forgetting)
         self.map_stats = create_empty_map_stats(self.config.B_BINS)
         self.forgetting_factor = float(self.get_parameter("forgetting_factor").value)
+
+        # Parse and cache no-TF extrinsics.
+        self.R_base_lidar, self.t_base_lidar = _parse_T_base_sensor_6d(
+            self.get_parameter("T_base_lidar").value
+        )
+        self.R_base_imu, self.t_base_imu = _parse_T_base_sensor_6d(
+            self.get_parameter("T_base_imu").value
+        )
         
         # Initialize hypotheses with identity prior
         self.hypotheses: List[BeliefGaussianInfo] = []
@@ -409,6 +435,11 @@ class GoldenChildBackend(Node):
         )
         accel = accel_raw * constants.GC_IMU_ACCEL_SCALE  # g → m/s²
 
+        # No-TF mode: rotate IMU measurements into the base/body frame.
+        # This is a numeric transform (not just frame_id relabeling).
+        gyro = self.R_base_imu @ gyro
+        accel = self.R_base_imu @ accel
+
         self.imu_buffer.append((stamp_sec, gyro, accel))
         
         # Keep buffer bounded
@@ -478,10 +509,22 @@ class GoldenChildBackend(Node):
             )
             return
 
-        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-
+        # =====================================================================
+        # TIMESTAMP AUDIT: Log header stamp and per-point time offsets
+        # =====================================================================
+        header_stamp_sec = msg.header.stamp.sec
+        header_stamp_nsec = msg.header.stamp.nanosec
+        stamp_sec = header_stamp_sec + header_stamp_nsec * 1e-9
+        
         # Parse point cloud (vectorized; preserves Livox metadata)
         points, timestamps, weights, ring, tag = parse_pointcloud2_vectorized(msg)
+
+        # No-TF mode: transform LiDAR points into the base/body frame before any inference.
+        # p_base = R_base_lidar @ p_lidar + t_base_lidar
+        if points.shape[0] > 0:
+            pts_np = np.array(points)
+            pts_base = (self.R_base_lidar @ pts_np.T).T + self.t_base_lidar[None, :]
+            points = jnp.array(pts_base, dtype=jnp.float64)
         n_points = points.shape[0]
 
         if n_points == 0:
@@ -490,21 +533,65 @@ class GoldenChildBackend(Node):
             timestamps = jnp.zeros(1, dtype=jnp.float64)
             weights = jnp.zeros(1, dtype=jnp.float64)
             n_points = 1
+            per_point_offset_min = 0.0
+            per_point_offset_max = 0.0
+            per_point_offset_units = "ns (synthetic, empty scan)"
+        else:
+            # Extract per-point time_offset values for audit logging
+            # Note: time_offset is stored as uint32 nanoseconds in the PointCloud2 message
+            # The parse function converts it to seconds, so we need to get raw offsets
+            field_map = {f.name: (f.offset, f.datatype) for f in msg.fields}
+            if "time_offset" in field_map:
+                off, dt = field_map["time_offset"]
+                # Read raw uint32 time_offset values (vectorized for efficiency)
+                # time_offset is at offset 'off' within each point, so we need to stride by point_step
+                # Create a view that reads uint32 from each point's time_offset field
+                offsets_raw = np.array([
+                    struct.unpack_from('<I', msg.data, i * msg.point_step + off)[0]
+                    for i in range(n_points)
+                ], dtype=np.uint32)
+                per_point_offset_min = float(np.min(offsets_raw)) if len(offsets_raw) > 0 else 0.0
+                per_point_offset_max = float(np.max(offsets_raw)) if len(offsets_raw) > 0 else 0.0
+                per_point_offset_units = "ns (uint32, relative to timebase)"
+            else:
+                per_point_offset_min = 0.0
+                per_point_offset_max = 0.0
+                per_point_offset_units = "ns (not available)"
 
-        # Compute dt since last scan
-        # Derive scan bounds from per-point timestamps when available; always include header stamp.
+        # =====================================================================
+        # SCAN TIME RULE: t_scan comes from PointCloud2.header.stamp
+        # Per-point offsets are for deskew INSIDE the scan, not scan-to-scan dt
+        # =====================================================================
+        t_scan = stamp_sec  # CORRECT: scan time is header.stamp, not per-point timestamps
+        
+        # Derive scan bounds from per-point timestamps for deskew (within-scan only)
         stamp_j = jnp.array(stamp_sec, dtype=jnp.float64)
         scan_start_time = float(jnp.minimum(stamp_j, jnp.min(timestamps)))
         scan_end_time = float(jnp.maximum(stamp_j, jnp.max(timestamps)))
 
+        # Compute dt since last scan (using t_scan, not scan_end_time)
         dt_raw = (
-            scan_end_time - self.last_scan_stamp
+            t_scan - self.last_scan_stamp
             if self.last_scan_stamp > 0
             else (scan_end_time - scan_start_time)
         )
         eps_dt = np.finfo(np.float64).eps
         dt_sec = float(jnp.sqrt(jnp.array(dt_raw, dtype=jnp.float64) ** 2 + eps_dt))
-        self.last_scan_stamp = scan_end_time
+        self.last_scan_stamp = t_scan  # CORRECT: update using t_scan (header.stamp)
+
+        # =====================================================================
+        # TIMESTAMP AUDIT LOGGING (before IMU processing)
+        # =====================================================================
+        t_last_scan = self.last_scan_stamp if self.last_scan_stamp > 0 else t_scan
+        self.get_logger().info(
+            f"Scan #{self.scan_count} timestamp audit: "
+            f"header.stamp=({header_stamp_sec}.{header_stamp_nsec:09d}) "
+            f"per_point_offset=[{per_point_offset_min:.0f}, {per_point_offset_max:.0f}] {per_point_offset_units} "
+            f"t_scan={t_scan:.9f} "
+            f"scan_bounds=[{scan_start_time:.9f}, {scan_end_time:.9f}] "
+            f"dt_scan_to_scan={dt_sec:.6f} "
+            f"IMU_interval=({t_last_scan:.9f}, {t_scan:.9f})"
+        )
 
         # Apply forgetting to map stats
         self.map_stats = apply_forgetting(self.map_stats, self.forgetting_factor)
@@ -522,6 +609,25 @@ class GoldenChildBackend(Node):
         imu_stamps_j = jnp.array(imu_stamps, dtype=jnp.float64)
         imu_gyro_j = jnp.array(imu_gyro, dtype=jnp.float64)
         imu_accel_j = jnp.array(imu_accel, dtype=jnp.float64)
+        
+        # =====================================================================
+        # IMU INTEGRATION TIME COMPUTATION (after IMU arrays are built)
+        # =====================================================================
+        # CRITICAL: IMU is path-integral data over (t_last_scan, t_scan)
+        # dt_int = sum of IMU sample intervals in that interval
+        from fl_slam_poc.backend.pipeline import compute_imu_integration_time
+        dt_int = compute_imu_integration_time(
+            imu_stamps=imu_stamps,  # Use numpy array directly
+            t_start=t_last_scan,
+            t_end=t_scan,
+        )
+        
+        # Log dt_int with invariant check
+        self.get_logger().info(
+            f"Scan #{self.scan_count} IMU integration: "
+            f"dt_int={dt_int:.6f} dt_scan={dt_sec:.6f} "
+            f"invariant_check={0.0 <= dt_int <= dt_sec}"
+        )
         
         # Run pipeline for each hypothesis
         results: List[ScanPipelineResult] = []
@@ -542,6 +648,9 @@ class GoldenChildBackend(Node):
             # Precompute Q once for this scan (shared across hypotheses)
             Q_scan = process_noise_state_to_Q_jax(self.process_noise_state)
 
+            # t_last_scan is already defined above (line 547) for IMU integration interval
+            # IMU is path-integral data over (t_last_scan, t_scan), not a snapshot
+            
             for i, belief in enumerate(self.hypotheses):
                 result = process_scan_single_hypothesis(
                     belief_prev=belief,
@@ -559,6 +668,8 @@ class GoldenChildBackend(Node):
                     scan_start_time=scan_start_time,
                     scan_end_time=scan_end_time,
                     dt_sec=dt_sec,
+                    t_last_scan=t_last_scan,  # IMU integration interval start
+                    t_scan=t_scan,            # IMU integration interval end
                     Q=Q_scan,
                     bin_atlas=self.bin_atlas,
                     map_stats=self.map_stats,
