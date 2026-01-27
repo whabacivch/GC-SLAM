@@ -144,8 +144,8 @@
 +  Alignment: xbar @ mu0 should be ~+1.0 for correct gravity alignment
 +  If negative, the IMU extrinsic is likely inverting gravity!
 +State Ordering:
-+  L_imu is placed at [0:3, 0:3] which is the ROTATION block in GC ordering.
-+  (GC state: [rot(0:3), trans(3:6), ...])
++  L_imu is placed at [3:6, 3:6] which is the ROTATION block in GC ordering.
++  (GC state: [trans(0:3), rot(3:6), ...])
 +=============================================================================
 ```
 
@@ -154,12 +154,8 @@
 ```diff
 -    odom_cov_se3: jnp.ndarray,       # (6,6) covariance in [trans, rotvec] coords
 +    odom_cov_se3: jnp.ndarray,       # (6,6) covariance in ROS [x,y,z,roll,pitch,yaw] order
-+    CRITICAL: ROS odom covariance is in [x,y,z,roll,pitch,yaw] = [trans,rot] order,
-+    but GC tangent is in [rot,trans] order. We reorder here.
--    cov = jnp.asarray(odom_cov_se3, dtype=jnp.float64)
-+    cov_ros = jnp.asarray(odom_cov_se3, dtype=jnp.float64)
-+    perm = jnp.array([3, 4, 5, 0, 1, 2], dtype=jnp.int32)
-+    cov = cov_ros[perm, :][:, perm]
++    NOTE: ROS odom covariance is [trans, rot] and GC tangent now matches; no permutation needed.
++    cov = jnp.asarray(odom_cov_se3, dtype=jnp.float64)
 ```
 
 ### Diagnostics (`fl_slam_poc/backend/diagnostics.py`)
@@ -174,18 +170,18 @@
 ```diff
 -Pose is represented as 6D vector: [translation(3), rotation_vector(3)]
 +=============================================================================
-+ORDERING CONVENTIONS (CRITICAL - two different orderings are used!)
++ORDERING CONVENTIONS (UNIFIED - all use [trans, rot] ordering!)
 +=============================================================================
 +1. SE(3) POSE (se3_jax format):
 +   6D vector: [trans(3), rot(3)] = [x, y, z, rx, ry, rz]
 +   Used by: se3_compose, se3_inverse, X_anchor, mean_world_pose()
 +2. GC STATE VECTOR (tangent space):
-+   22D vector: [rot(3), trans(3), vel(3), bg(3), ba(3), dt(1), ex(6)]
-+   Pose slice: [0:3] = rotation, [3:6] = translation
++   22D vector: [trans(3), rot(3), vel(3), bg(3), ba(3), dt(1), ex(6)]
++   Pose slice: [0:3] = translation, [3:6] = rotation
 +   Used by: L, h, z_lin, all evidence operators
-+CONVERSION FUNCTIONS:
-+   pose_se3_to_z_delta(): [trans, rot] → [rot, trans] (SE3 → GC)
-+   pose_z_to_se3_delta(): [rot, trans] → [trans, rot] (GC → SE3)
++CONVERSION FUNCTIONS (identity - orderings now match):
++   pose_se3_to_z_delta(): returns input unchanged
++   pose_z_to_se3_delta(): returns input unchanged
 +Reference: docs/FRAME_AND_QUATERNION_CONVENTIONS.md
 +=============================================================================
 ```
@@ -197,11 +193,11 @@
 +CONVENTION QUICK REFERENCE (see docs/FRAME_AND_QUATERNION_CONVENTIONS.md)
 +=============================================================================
 +STATE VECTOR (22D):
-+  [rot(0:3), trans(3:6), vel(6:9), bg(9:12), ba(12:15), dt(15:16), ex(16:22)]
-+  Note: GC state uses [rot, trans] ordering (opposite of se3_jax [trans, rot])
++  [trans(0:3), rot(3:6), vel(6:9), bg(9:12), ba(12:15), dt(15:16), ex(16:22)]
++  Note: GC state uses [trans, rot] ordering (same as se3_jax and ROS)
 +SE(3) POSES:
 +  Internal 6D: [trans(3), rotvec(3)] = [x, y, z, rx, ry, rz]
-+  Use pose_se3_to_z_delta() / pose_z_to_se3_delta() for conversion
++  No conversion needed - orderings now match
 +GRAVITY:
 +  World: Z-UP convention, gravity points DOWN = [0, 0, -9.81] m/s²
 +  Accelerometer measures reaction to gravity (pointing UP when level)

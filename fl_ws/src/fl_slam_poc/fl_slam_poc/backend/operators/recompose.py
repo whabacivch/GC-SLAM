@@ -63,16 +63,16 @@ def _bch3_correction(xi1: jnp.ndarray, xi2: jnp.ndarray) -> jnp.ndarray:
     Returns:
         BCH3 correction term (6,)
     """
-    # Extract rotation and translation parts
-    # xi = [rotation(3), translation(3)]
-    omega1 = xi1[:3]
-    v1 = xi1[3:6]
-    omega2 = xi2[:3]
-    v2 = xi2[3:6]
+    # Extract translation and rotation parts
+    # xi = [translation(3), rotation(3)] (GC ordering matches se3_jax)
+    v1 = xi1[:3]
+    omega1 = xi1[3:6]
+    v2 = xi2[:3]
+    omega2 = xi2[3:6]
     
     # Compute adjoint action ad(xi1) @ xi2
-    # For SE(3): ad([omega, v]) = [[omega]x, 0; [v]x, [omega]x]
-    # where [.]x is the skew-symmetric matrix
+    # For SE(3) with xi = [v, omega]: ad([v, omega]) in [omega, v] ordering is
+    # [[omega]x, 0; [v]x, [omega]x]. We compute in [v, omega] and return [v, omega].
     
     # Cross products for rotation part
     omega_cross = jnp.cross(omega1, omega2)
@@ -80,8 +80,8 @@ def _bch3_correction(xi1: jnp.ndarray, xi2: jnp.ndarray) -> jnp.ndarray:
     # Cross products for translation part
     v_cross = jnp.cross(omega1, v2) + jnp.cross(v1, omega2)
     
-    # BCH3 second-order term: 0.5 * [xi1, xi2]
-    correction = 0.5 * jnp.concatenate([omega_cross, v_cross])
+    # BCH3 second-order term: 0.5 * [xi1, xi2] in [trans, rot] ordering
+    correction = 0.5 * jnp.concatenate([v_cross, omega_cross])
     
     return correction
 
@@ -121,17 +121,17 @@ def pose_update_frobenius_recompose(
     
     # Step 1: Compute MAP increment
     delta_z = belief_post.mean_increment(eps_lift)
-    delta_pose_z = delta_z[SLICE_POSE]  # (6,) GC ordering: [rot, trans]
+    delta_pose_z = delta_z[SLICE_POSE]  # (6,) GC ordering: [trans, rot]
     
     # Step 2: Compute Frobenius strength (continuous)
     frobenius_strength = total_trigger_magnitude / (total_trigger_magnitude + c_frob)
     
-    # Step 3: Compute BCH correction in GC pose ordering [rot, trans].
+    # Step 3: Compute BCH correction in GC pose ordering [trans, rot].
     #
     # NOTE: belief_post.X_anchor is an SE(3) element encoded as [trans, rot] for se3_jax,
-    # not a GC-ordered tangent increment, so we do not mix it into the BCH term.
+    # which now matches GC ordering.
     #
-    # We instead use the current pose linearization offset (in-chart) as the second term.
+    # We use the current pose linearization offset (in-chart) as the second term.
     xi_lin_z = belief_post.z_lin[SLICE_POSE]
     bch_correction = _bch3_correction(xi_lin_z, delta_pose_z)
     
@@ -141,8 +141,8 @@ def pose_update_frobenius_recompose(
     
     # Step 5: Compose with anchor to get new world pose
     # X_new = X_anchor ∘ Exp(delta_pose_corrected)
-    # Convert GC-ordered increment to se3_jax ordering before Exp.
-    delta_pose_corrected_se3 = pose_z_to_se3_delta(delta_pose_corrected_z)
+    # GC ordering now matches se3_jax - no conversion needed (identity).
+    delta_pose_corrected_se3 = pose_z_to_se3_delta(delta_pose_corrected_z)  # identity
     delta_SE3 = se3_jax.se3_exp(delta_pose_corrected_se3)
     X_new = se3_jax.se3_compose(belief_post.X_anchor, delta_SE3)
     

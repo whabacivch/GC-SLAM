@@ -97,10 +97,10 @@ def imu_gyro_rotation_evidence(
     L_rot_scaled = mass_scale * L_rot
 
     L = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
-    # GC ordering: [0:3] = rotation, [3:6] = translation (opposite of se3_jax)
-    L = L.at[0:3, 0:3].set(L_rot_scaled)
+    # GC ordering: [trans(0:3), rot(3:6)] - rotation evidence goes to [3:6] block
+    L = L.at[3:6, 3:6].set(L_rot_scaled)
     h = jnp.zeros((D_Z,), dtype=jnp.float64)
-    h = h.at[0:3].set(L_rot_scaled @ r_rot)
+    h = h.at[3:6].set(L_rot_scaled @ r_rot)
 
     nll_proxy = 0.5 * float(r_rot @ L_rot @ r_rot)
 

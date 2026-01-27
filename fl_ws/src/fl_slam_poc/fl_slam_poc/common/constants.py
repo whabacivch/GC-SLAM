@@ -9,12 +9,12 @@ CONVENTION QUICK REFERENCE (see docs/FRAME_AND_QUATERNION_CONVENTIONS.md)
 =============================================================================
 
 STATE VECTOR (22D):
-  [rot(0:3), trans(3:6), vel(6:9), bg(9:12), ba(12:15), dt(15:16), ex(16:22)]
-  Note: GC state uses [rot, trans] ordering (opposite of se3_jax [trans, rot])
+  [trans(0:3), rot(3:6), vel(6:9), bg(9:12), ba(12:15), dt(15:16), ex(16:22)]
+  Note: GC state now uses [trans, rot] ordering (SAME as se3_jax and ROS)
 
 SE(3) POSES:
   Internal 6D: [trans(3), rotvec(3)] = [x, y, z, rx, ry, rz]
-  Use pose_se3_to_z_delta() / pose_z_to_se3_delta() for conversion
+  No conversion needed - GC state and SE(3) now use same ordering!
 
 GRAVITY:
   World: Z-UP convention, gravity points DOWN = [0, 0, -9.81] m/s²
@@ -89,10 +89,11 @@ GC_ANCHOR_DRIFT_M0 = 0.5  # Position drift threshold (meters)
 GC_ANCHOR_DRIFT_R0 = 0.2  # Rotation drift threshold (radians)
 
 # State slice indices (0-based, per spec Section 1.1)
-GC_SLICE_SO3_START = 0
-GC_SLICE_SO3_END = 3
-GC_SLICE_TRANS_START = 3
-GC_SLICE_TRANS_END = 6
+# NEW CONVENTION: [trans, rot] ordering (same as se3_jax and ROS)
+GC_SLICE_TRANS_START = 0
+GC_SLICE_TRANS_END = 3
+GC_SLICE_SO3_START = 3
+GC_SLICE_SO3_END = 6
 GC_SLICE_VEL_START = 6
 GC_SLICE_VEL_END = 9
 GC_SLICE_GYRO_BIAS_START = 9
@@ -190,7 +191,7 @@ GC_LIDAR_N_BUCKETS = GC_LIDAR_N_LINES * GC_LIDAR_N_TAGS  # 24
 # Each value below is a diffusion *rate* in the units of the corresponding state
 # coordinate squared per second (z^2 / s), compatible with `cov += dt * Q`.
 #
-# State block ordering: [rot(3), trans(3), vel(3), bg(3), ba(3), dt(1), ex(6)].
+# State block ordering: [trans(3), rot(3), vel(3), bg(3), ba(3), dt(1), ex(6)].
 #
 # Notes:
 # - Rotation diffusion is in rad^2 / s and can be reasonably tied to gyro PSD.

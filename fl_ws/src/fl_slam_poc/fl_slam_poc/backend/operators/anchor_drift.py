@@ -119,12 +119,13 @@ def anchor_drift_update(
     delta_pose = delta_z[SLICE_POSE]  # (6,)
     
     # Step 2: Compute drift magnitudes
+    # GC ordering: [trans(0:3), rot(3:6)]
     # Position drift: ||delta_t||
-    delta_trans = delta_pose[3:6]
+    delta_trans = delta_pose[0:3]
     drift_m = float(jnp.linalg.norm(delta_trans))
-    
+
     # Rotation drift: ||delta_omega||
-    delta_rot = delta_pose[0:3]
+    delta_rot = delta_pose[3:6]
     drift_r = float(jnp.linalg.norm(delta_rot))
     
     # Step 3: Compute rho (continuous)
@@ -132,9 +133,9 @@ def anchor_drift_update(
     
     # Step 4: Blend anchor update
     # new_anchor = current_anchor ⊕ Exp(rho * delta_pose)
-    # delta_pose is GC-ordered [rot, trans]; se3_jax expects [trans, rot].
+    # delta_pose is GC-ordered [trans, rot]; se3_jax uses same ordering!
     scaled_delta_z = rho * delta_pose
-    scaled_delta_se3 = pose_z_to_se3_delta(scaled_delta_z)
+    scaled_delta_se3 = pose_z_to_se3_delta(scaled_delta_z)  # identity now
     delta_SE3 = se3_jax.se3_exp(scaled_delta_se3)
     X_anchor_new = se3_jax.se3_compose(belief.X_anchor, delta_SE3)
     

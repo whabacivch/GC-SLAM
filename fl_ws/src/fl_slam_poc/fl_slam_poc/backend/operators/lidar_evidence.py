@@ -127,12 +127,12 @@ def lidar_quadratic_evidence(
     # Step 2: Build delta_z* as a right-perturbation error:
     #   X_meas is the absolute scan pose in world from (R_hat, t_hat)
     #   xi_err = Log( X_pred^{-1} ∘ X_meas )   (se3_jax ordering: [rho, phi])
-    #   delta_pose_z = [phi, rho]             (GC ordering: [rot, trans])
+    #   delta_pose_z = [rho, phi]             (GC ordering: [trans, rot] - same as se3_jax!)
     rotvec_meas = se3_jax.so3_log(R_hat)
     pose_meas = jnp.concatenate([t_hat, rotvec_meas])
     T_err = se3_jax.se3_relative(pose_meas, pose_pred)  # pose_pred^{-1} ∘ pose_meas
-    xi_err = se3_jax.se3_log(T_err)  # [rho, phi]
-    delta_pose_z = pose_se3_to_z_delta(xi_err)  # [rot, trans]
+    xi_err = se3_jax.se3_log(T_err)  # [rho, phi] = [trans, rot]
+    delta_pose_z = pose_se3_to_z_delta(xi_err)  # identity now - [trans, rot]
 
     delta_z_star = jnp.zeros(D_Z, dtype=jnp.float64).at[SLICE_POSE].set(delta_pose_z)
 
@@ -161,8 +161,9 @@ def lidar_quadratic_evidence(
     info_scale = total_mass / (total_mass + constants.GC_EPS_MASS)
 
     L_lidar_raw = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
-    L_lidar_raw = L_lidar_raw.at[0:3, 0:3].set(info_scale * H_rot)
-    L_lidar_raw = L_lidar_raw.at[3:6, 3:6].set(info_scale * H_trans)
+    # GC ordering: [trans(0:3), rot(3:6)]
+    L_lidar_raw = L_lidar_raw.at[0:3, 0:3].set(info_scale * H_trans)
+    L_lidar_raw = L_lidar_raw.at[3:6, 3:6].set(info_scale * H_rot)
     
     # Step 4: Apply excitation scaling to relevant blocks (always)
     # Time offset: index 15

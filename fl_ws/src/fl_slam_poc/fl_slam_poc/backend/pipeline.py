@@ -921,7 +921,7 @@ def process_scan_single_hypothesis(
         max_abs = np.nanmax(np.abs(L_total_np))
         # Identify which block has the issue
         block_info = []
-        for name, sl in [("rot", slice(0, 3)), ("trans", slice(3, 6)), ("vel", slice(6, 9)),
+        for name, sl in [("trans", slice(0, 3)), ("rot", slice(3, 6)), ("vel", slice(6, 9)),
                          ("bg", slice(9, 12)), ("ba", slice(12, 15)), ("dt", slice(15, 16)),
                          ("ex", slice(16, 22))]:
             block = L_total_np[sl, sl]

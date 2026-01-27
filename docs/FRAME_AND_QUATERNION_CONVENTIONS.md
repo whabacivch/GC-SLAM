@@ -121,10 +121,10 @@ accel_base = R_base_imu @ accel_imu
 - **Location**: `fl_slam_poc/common/belief.py:89-102`
 
 ### State Vector (22D)
-- **Ordering**: `[rot(3), trans(3), vel(3), bg(3), ba(3), dt(1), ex(6)]`
-- **Pose slice**: `[rot(0:3), trans(3:6)]` = `[rx, ry, rz, tx, ty, tz]`
-- **Note**: State uses `[rot, trans]` but SE(3) functions use `[trans, rot]`
-- **Conversion**: `pose_se3_to_z_delta()` and `pose_z_to_se3_delta()` handle the reordering
+- **Ordering**: `[trans(3), rot(3), vel(3), bg(3), ba(3), dt(1), ex(6)]`
+- **Pose slice**: `[trans(0:3), rot(3:6)]` = `[tx, ty, tz, rx, ry, rz]`
+- **Note**: State and SE(3) now share the same `[trans, rot]` ordering
+- **Conversion**: `pose_se3_to_z_delta()` and `pose_z_to_se3_delta()` are identity (kept for compatibility)
 
 ## Covariance Ordering
 
@@ -134,14 +134,13 @@ accel_base = R_base_imu @ accel_imu
 - **Comment**: "Pose covariance is row-major 6x6: [x,y,z,roll,pitch,yaw]"
 
 ### GC Internal Covariance
-- **GC convention**: `[rx, ry, rz, tx, ty, tz]` = `[rot(0:3), trans(3:6)]`
-- **Permutation**: `perm = [3, 4, 5, 0, 1, 2]` (ROS → GC)
-- **Location**: `fl_slam_poc/backend/operators/odom_evidence.py:76`
+- **GC convention**: `[x, y, z, roll, pitch, yaw]` = `[trans(0:3), rot(3:6)]`
+- **Permutation**: **None** (GC now matches ROS ordering)
+- **Location**: `fl_slam_poc/backend/operators/odom_evidence.py`
   ```python
   # ROS pose covariance: [x, y, z, roll, pitch, yaw] = [trans(0:3), rot(3:6)]
-  # GC pose ordering:    [rx, ry, rz, tx, ty, tz]    = [rot(0:3), trans(3:6)]
-  perm = jnp.array([3, 4, 5, 0, 1, 2], dtype=jnp.int32)
-  cov = cov_ros[perm, :][:, perm]
+  # GC pose ordering:    [tx, ty, tz, rx, ry, rz]    = [trans(0:3), rot(3:6)]
+  cov = cov_ros  # no permutation needed
   ```
 
 ## Rotation Representations
@@ -195,13 +194,13 @@ accel_base = R_base_imu @ accel_imu
 
 ### Covariance Ordering
 - [x] ROS odom: `[x, y, z, roll, pitch, yaw]` = `[trans, rot]` ✓
-- [x] GC internal: `[rx, ry, rz, tx, ty, tz]` = `[rot, trans]` ✓
-- [x] Permutation applied: `perm = [3, 4, 5, 0, 1, 2]` ✓
+- [x] GC internal: `[tx, ty, tz, rx, ry, rz]` = `[trans, rot]` ✓
+- [x] No permutation applied (orderings match) ✓
 
 ### SE(3) Representation
 - [x] Internal pose: `[trans(3), rotvec(3)]` = `[x, y, z, rx, ry, rz]` ✓
-- [x] State vector: `[rot(3), trans(3), ...]` = `[rx, ry, rz, tx, ty, tz, ...]` ✓
-- [x] Conversion functions handle reordering ✓
+- [x] State vector: `[trans(3), rot(3), ...]` = `[tx, ty, tz, rx, ry, rz, ...]` ✓
+- [x] Conversion functions are identity (ordering is unified) ✓
 
 ## Potential Issues
 
@@ -215,13 +214,13 @@ accel_base = R_base_imu @ accel_imu
 - **Resolution**: Confirmed Z-up via ground plane analysis (diagnose_coordinate_frames.py)
 
 ### 3. Covariance Permutation
-- **Status**: ✓ Correctly implemented
-- **Location**: `odom_evidence.py:76` applies permutation from ROS to GC ordering
+- **Status**: ✓ Removed (no longer needed)
+- **Location**: `odom_evidence.py` uses ROS covariance directly
 
 ### 4. SE(3) vs State Ordering
-- **Status**: ✓ Handled correctly
-- **Note**: SE(3) uses `[trans, rot]`, state uses `[rot, trans]`
-- **Conversion**: `pose_se3_to_z_delta()` and `pose_z_to_se3_delta()` handle this
+- **Status**: ✓ Unified
+- **Note**: SE(3) and state both use `[trans, rot]`
+- **Conversion**: `pose_se3_to_z_delta()` and `pose_z_to_se3_delta()` are identity
 
 ## References
 

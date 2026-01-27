@@ -4,6 +4,31 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-27: GC Pose Ordering Migration to [trans, rot]
+
+### Summary
+
+- **Unified ordering**: GC tangent pose ordering now matches SE(3) and ROS (`[trans, rot]`), eliminating the legacy permutation and dual conventions.
+- **Identity conversions**: `pose_se3_to_z_delta()` and `pose_z_to_se3_delta()` are now identity mappings (kept for compatibility).
+- **Operator alignment**: Updated all evidence, IW, recompose, and pipeline block placements to the unified ordering; fixed BCH correction output ordering.
+- **Docs aligned**: Updated canonical conventions and diagnostics docs to reflect the unified pose and covariance ordering.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/constants.py`: GC slice constants and convention header updated to `[trans, rot]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/belief.py`: unified ordering docs, slice indices, and identity conversions.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/imu_evidence.py`: rotation block placement moved to `[3:6]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/imu_gyro_evidence.py`: rotation block placement moved to `[3:6]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/lidar_evidence.py`: pose blocks swapped to `[trans, rot]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/odom_evidence.py`: removed ROS→GC permutation (orderings now match).
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/anchor_drift.py`: pose extraction uses `[trans, rot]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/recompose.py`: BCH extraction/output order updated to `[trans, rot]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/inverse_wishart_jax.py`: IW block mapping updated for `[trans, rot]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/structures/inverse_wishart_jax.py`: process-noise block ordering and priors updated for `[trans, rot]`.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py`: pose covariance extraction updated.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py`: diagnostics block ordering updated to `[trans, rot]`.
+- `docs/FRAME_AND_QUATERNION_CONVENTIONS.md`, `docs/Fusion_issues.md`, `docs/CODE_DIFF_SUMMARY.md`, `tools/DIAGNOSTIC_TOOLS.md`: documentation updated to the unified convention.
+
 ## 2026-01-27: Fix Critical T_base_imu Mismatch Causing Yaw Drift
 
 ### Summary

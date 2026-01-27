@@ -192,7 +192,7 @@ The strict interface spec does not define an odometry operator, and does not pre
 ## 5) Notes that impact “fusion correctness” even before IMU/odom are wired
 
 - **Scan timing:** scan start/end are derived from per-point timestamps (when present) and the message header stamp; this removes implicit “magic” scan durations.
-- **Pose ordering:** the spec’s tangent ordering for the pose slice is `[rot, trans]`, while `se3_jax` encodes SE(3) elements/increments as `[trans, rot]`. Any operator that applies SE(3) group ops must convert explicitly, or fusion will be silently wrong.
+- **Pose ordering:** GC tangent ordering now matches `se3_jax` (`[trans, rot]`), so SE(3) group ops no longer require permutation. Conversion helpers are identity and kept only for compatibility.
 
 ## 6) What this doc does NOT claim
 

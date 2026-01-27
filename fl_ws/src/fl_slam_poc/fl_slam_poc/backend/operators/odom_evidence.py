@@ -49,12 +49,12 @@ def odom_quadratic_evidence(
       T_err = T_pred^{-1} ∘ T_odom
       xi_err = Log(T_err)   (6,) [rho, phi] in se3_jax ordering
 
-    Then embed into the 22D chart pose slice ([rot, trans]) and build:
+    Then embed into the 22D chart pose slice ([trans, rot]) and build:
       L = Σ^{-1}
       h = L * delta_z_star
 
-    CRITICAL: ROS odom covariance is in [x,y,z,roll,pitch,yaw] = [trans,rot] order,
-    but GC tangent is in [rot,trans] order. We reorder here.
+    NOTE: ROS odom covariance is in [x,y,z,roll,pitch,yaw] = [trans,rot] order,
+    which now matches GC tangent ordering. No permutation needed!
     """
     belief_pred_pose = jnp.asarray(belief_pred_pose, dtype=jnp.float64).reshape(-1)
     odom_pose = jnp.asarray(odom_pose, dtype=jnp.float64).reshape(-1)
@@ -64,17 +64,15 @@ def odom_quadratic_evidence(
     T_err = se3_jax.se3_relative(odom_pose, belief_pred_pose)  # belief^{-1} ∘ odom
     xi_err = se3_jax.se3_log(T_err)  # [rho, phi]
 
-    # Map to 22D pose slice ordering [rot, trans]
-    delta_pose_z = pose_se3_to_z_delta(xi_err)  # [rot, trans]
+    # Map to 22D pose slice ordering [trans, rot] - same as se3_jax, no conversion needed!
+    delta_pose_z = pose_se3_to_z_delta(xi_err)  # identity - [trans, rot]
     delta_z_star = jnp.zeros((D_Z,), dtype=jnp.float64)
     delta_z_star = delta_z_star.at[0:6].set(delta_pose_z)
 
-    # Permute covariance from ROS [trans,rot] to GC [rot,trans] ordering.
     # ROS pose covariance: [x, y, z, roll, pitch, yaw] = [trans(0:3), rot(3:6)]
-    # GC pose ordering:    [rx, ry, rz, tx, ty, tz]    = [rot(0:3), trans(3:6)]
-    # Permutation: GC[0:3] <- ROS[3:6] (rot), GC[3:6] <- ROS[0:3] (trans)
-    perm = jnp.array([3, 4, 5, 0, 1, 2], dtype=jnp.int32)
-    cov = cov_ros[perm, :][:, perm]
+    # GC pose ordering:    [tx, ty, tz, rx, ry, rz]    = [trans(0:3), rot(3:6)]
+    # No permutation needed - orderings now match!
+    cov = cov_ros
 
     cov_psd = domain_projection_psd(cov, eps_psd).M_psd
     L_pose, lift_strength = spd_cholesky_inverse_lifted(cov_psd, eps_lift)

@@ -7,7 +7,7 @@ in information form on the augmented tangent space.
 Uses JAX for all math operations.
 
 =============================================================================
-ORDERING CONVENTIONS (CRITICAL - two different orderings are used!)
+ORDERING CONVENTIONS (UNIFIED - all use [trans, rot] ordering!)
 =============================================================================
 
 1. SE(3) POSE (se3_jax format):
@@ -15,16 +15,19 @@ ORDERING CONVENTIONS (CRITICAL - two different orderings are used!)
    Used by: se3_compose, se3_inverse, X_anchor, mean_world_pose()
 
 2. GC STATE VECTOR (tangent space):
-   22D vector: [rot(3), trans(3), vel(3), bg(3), ba(3), dt(1), ex(6)]
-   Pose slice: [0:3] = rotation, [3:6] = translation
+   22D vector: [trans(3), rot(3), vel(3), bg(3), ba(3), dt(1), ex(6)]
+   Pose slice: [0:3] = translation, [3:6] = rotation
    Used by: L, h, z_lin, all evidence operators
 
-CONVERSION FUNCTIONS:
-   pose_se3_to_z_delta(): [trans, rot] → [rot, trans] (SE3 → GC)
-   pose_z_to_se3_delta(): [rot, trans] → [trans, rot] (GC → SE3)
+3. ROS ODOM COVARIANCE:
+   [x, y, z, roll, pitch, yaw] = [trans(0:3), rot(3:6)]
+   No permutation needed - matches GC ordering!
+
+CONVERSION FUNCTIONS (now identity - kept for backwards compatibility):
+   pose_se3_to_z_delta(): returns input unchanged
+   pose_z_to_se3_delta(): returns input unchanged
 
 Reference: docs/FRAME_AND_QUATERNION_CONVENTIONS.md
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 2.1
 =============================================================================
 """
 
@@ -61,20 +64,19 @@ D_DESKEW = 22  # Deskew tangent dimension
 
 # State slice indices (0-based)
 # Using Python slice objects for clean indexing
-SLICE_SO3 = slice(0, 3)  # δθ (rotation)
-SLICE_TRANS = slice(3, 6)  # δt (translation)
+# NEW CONVENTION: [trans, rot] ordering (same as se3_jax and ROS)
+SLICE_TRANS = slice(0, 3)  # δt (translation)
+SLICE_SO3 = slice(3, 6)  # δθ (rotation)
 SLICE_VEL = slice(6, 9)  # δv (velocity)
 SLICE_GYRO_BIAS = slice(9, 12)  # δbg (gyro bias)
 SLICE_ACCEL_BIAS = slice(12, 15)  # δba (accel bias)
 SLICE_TIME_OFFSET = slice(15, 16)  # δΔt (time offset)
 SLICE_EXTRINSIC = slice(16, 22)  # δξLI (LiDAR-IMU extrinsic)
 
-# Pose slice (rotation + translation) in the GC tangent ordering
-# Per spec: [δθ, δt] = [rotation, translation].
+# Pose slice (translation + rotation) in the unified GC tangent ordering
+# Per new convention: [δt, δθ] = [translation, rotation].
 #
-# IMPORTANT: se3_jax uses 6D vectors ordered as [translation, rotation].
-# Any time we apply SE(3) group operators (Exp/compose/inverse), we must
-# convert between these two conventions explicitly.
+# This matches se3_jax and ROS conventions - no conversion needed!
 SLICE_POSE = slice(0, 6)
 
 
@@ -124,26 +126,26 @@ def pose_z_to_se3_delta(delta_pose_z: jnp.ndarray) -> jnp.ndarray:
     """
     Convert a GC-ordered pose increment to se3_jax ordering.
 
-    GC tangent pose slice: [rot(3), trans(3)]
-    se3_jax increment:     [trans(3), rot(3)]
+    IDENTITY FUNCTION (kept for backwards compatibility).
+    Both GC and se3_jax now use [trans(3), rot(3)] ordering.
     """
     delta_pose_z = jnp.asarray(delta_pose_z, dtype=jnp.float64).reshape(-1)
     if delta_pose_z.shape[0] != 6:
         raise ValueError(f"delta_pose_z must be (6,), got {delta_pose_z.shape}")
-    return jnp.concatenate([delta_pose_z[3:6], delta_pose_z[0:3]])
+    return delta_pose_z  # Identity - orderings now match
 
 
 def pose_se3_to_z_delta(delta_pose_se3: jnp.ndarray) -> jnp.ndarray:
     """
     Convert a se3_jax-ordered pose increment to GC tangent ordering.
 
-    se3_jax increment:     [trans(3), rot(3)]
-    GC tangent pose slice: [rot(3), trans(3)]
+    IDENTITY FUNCTION (kept for backwards compatibility).
+    Both se3_jax and GC now use [trans(3), rot(3)] ordering.
     """
     delta_pose_se3 = jnp.asarray(delta_pose_se3, dtype=jnp.float64).reshape(-1)
     if delta_pose_se3.shape[0] != 6:
         raise ValueError(f"delta_pose_se3 must be (6,), got {delta_pose_se3.shape}")
-    return jnp.concatenate([delta_pose_se3[3:6], delta_pose_se3[0:3]])
+    return delta_pose_se3  # Identity - orderings now match
 
 
 @jax.jit

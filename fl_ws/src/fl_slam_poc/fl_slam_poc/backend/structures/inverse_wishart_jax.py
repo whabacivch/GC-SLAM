@@ -16,7 +16,7 @@ from fl_slam_poc.common import constants as C
 
 
 # Process-noise blocks in the 22D tangent ordering:
-# [rot(3), trans(3), vel(3), bg(3), ba(3), dt(1), ex(6)]
+# [trans(3), rot(3), vel(3), bg(3), ba(3), dt(1), ex(6)]
 PROCESS_BLOCK_DIMS = jnp.array([3, 3, 3, 3, 3, 1, 6], dtype=jnp.int32)  # (7,)
 PROCESS_BLOCK_STARTS = jnp.array([0, 3, 6, 9, 12, 15, 16], dtype=jnp.int32)  # (7,)
 
@@ -59,8 +59,8 @@ def create_datasheet_process_noise_state() -> ProcessNoiseIWState:
     # NOTE: these are weak priors; the IW update adapts them from innovations.
     sigma_diag = jnp.array(
         [
-            C.GC_PROCESS_ROT_DIFFUSION,        # rot   (rad^2 / s)
             C.GC_PROCESS_TRANS_DIFFUSION,      # trans (m^2 / s)
+            C.GC_PROCESS_ROT_DIFFUSION,        # rot   (rad^2 / s)
             C.GC_PROCESS_VEL_DIFFUSION,        # vel   (m^2 / s^3)
             C.GC_PROCESS_BG_DIFFUSION,         # bg
             C.GC_PROCESS_BA_DIFFUSION,         # ba
@@ -78,4 +78,3 @@ def create_datasheet_process_noise_state() -> ProcessNoiseIWState:
         Psi_blocks = Psi_blocks.at[i, :dim_i, :dim_i].set(Psi_i)
 
     return ProcessNoiseIWState(nu=nu, Psi_blocks=Psi_blocks, block_dims=block_dims)
-

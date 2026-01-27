@@ -152,10 +152,10 @@ python3 tools/diagnose_frame_offset.py <gt_trajectory.tum> <est_trajectory.tum>
 - **Action**: Run `estimate_imu_base_extrinsic_rotation.py` to re-verify
 
 ### Odom Covariance Ordering
-- **ROS convention**: `[x, y, z, roll, pitch, yaw]`
-- **GC convention**: `[rx, ry, rz, tx, ty, tz]`
-- **Status**: Fixed with permutation `[3,4,5,0,1,2]` in `odom_evidence.py`
-- **Action**: Run `diagnose_coordinate_frames.py` to verify ordering is correct
+- **ROS convention**: `[x, y, z, roll, pitch, yaw]` = `[trans, rot]`
+- **GC convention**: `[tx, ty, tz, rx, ry, rz]` = `[trans, rot]` (matches ROS)
+- **Status**: Unified ordering; no permutation applied
+- **Action**: Run `diagnose_coordinate_frames.py` to verify odom covariance is ROS-standard
 
 ## Transformation Chain
 
@@ -183,7 +183,7 @@ Before trusting any extrinsics, verify:
 - [ ] Run `diagnose_coordinate_frames.py` and review all interpretations
 - [ ] Verify LiDAR Z-convention matches your `T_base_lidar` rotation
 - [ ] Verify IMU gravity direction matches expected base frame
-- [ ] Verify odom covariance ordering (ROS vs GC)
+- [ ] Verify odom covariance ordering is `[trans, rot]` (ROS standard, matches GC)
 - [ ] Check that transformations are applied in the right places
 - [ ] Verify frame IDs are consistent across the pipeline
 
@@ -192,4 +192,4 @@ Before trusting any extrinsics, verify:
 1. **If LiDAR is Z-down**: Set `T_base_lidar = [-0.011, 0.0, 0.778, 3.141593, 0.0, 0.0]`
 2. **If LiDAR is Z-up**: Keep `T_base_lidar = [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]`
 3. **If IMU gravity is wrong**: Re-run `estimate_imu_base_extrinsic_rotation.py`
-4. **If odom ordering is wrong**: Check permutation in `odom_evidence.py`
+4. **If odom ordering is wrong**: Verify the incoming `/odom` covariance is ROS-standard (no permutation in `odom_evidence.py`)

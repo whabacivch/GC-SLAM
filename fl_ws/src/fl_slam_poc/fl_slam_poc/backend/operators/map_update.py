@@ -205,14 +205,15 @@ def pos_cov_inflation_pushforward(
     _, cov_full, _ = belief_post.to_moments(eps_lift)
 
     # Pose covariance is the 6x6 block
-    # [rotation cov (3x3), rot-trans cross (3x3)]
-    # [trans-rot cross (3x3), translation cov (3x3)]
+    # GC ordering: [trans(0:3), rot(3:6)]
+    # [translation cov (3x3), trans-rot cross (3x3)]
+    # [rot-trans cross (3x3), rotation cov (3x3)]
     Sigma_pose = cov_full[SLICE_POSE, SLICE_POSE]  # (6, 6)
 
     # For position inflation, we need the translation uncertainty
     # and how rotation uncertainty affects position
-    Sigma_trans = Sigma_pose[3:6, 3:6]  # Translation covariance
-    Sigma_rot = Sigma_pose[0:3, 0:3]  # Rotation covariance
+    Sigma_trans = Sigma_pose[0:3, 0:3]  # Translation covariance
+    Sigma_rot = Sigma_pose[3:6, 3:6]  # Rotation covariance
 
     # Call vectorized core
     delta_S_dir, delta_N_dir, delta_N_pos, delta_sum_p, delta_sum_ppT, total_inflation, total_psd_projection_delta = (

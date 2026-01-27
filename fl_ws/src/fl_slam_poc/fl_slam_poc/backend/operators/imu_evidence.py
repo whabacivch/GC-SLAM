@@ -31,8 +31,8 @@ Expected vs Measured:
   If negative, the IMU extrinsic is likely inverting gravity!
 
 State Ordering:
-  L_imu is placed at [0:3, 0:3] which is the ROTATION block in GC ordering.
-  (GC state: [rot(0:3), trans(3:6), ...])
+  L_imu is placed at [3:6, 3:6] which is the ROTATION block in GC ordering.
+  (GC state: [trans(0:3), rot(3:6), ...])
 =============================================================================
 
 ## vMF HESSIAN APPROXIMATION NOTE (Audit Compliance)
@@ -211,9 +211,10 @@ def imu_vmf_gravity_evidence(
     H_rot_psd, H_cert_vec = domain_projection_psd_core(H_rot, eps_psd)
 
     L = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
-    L = L.at[0:3, 0:3].set(H_rot_psd)
+    # GC ordering: [trans(0:3), rot(3:6)] - rotation evidence goes to [3:6] block
+    L = L.at[3:6, 3:6].set(H_rot_psd)
     h = jnp.zeros((D_Z,), dtype=jnp.float64)
-    h = h.at[0:3].set(-g_rot)
+    h = h.at[3:6].set(-g_rot)
 
     nll_proxy = float(-kappa_f * (mu0 @ xbar))
     # Conditioning comes from the PSD projection certificate (already clamped).
