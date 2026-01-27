@@ -6,6 +6,11 @@ This document lists all available tools to diagnose coordinate frame issues.
 
 Run the comprehensive diagnostic:
 ```bash
+# Use venv Python directly (recommended)
+.venv/bin/python tools/diagnose_coordinate_frames.py rosbags/m3dgr/Dynamic01_ros2
+
+# Or activate venv first, then python3 will use venv Python
+source .venv/bin/activate
 python3 tools/diagnose_coordinate_frames.py rosbags/m3dgr/Dynamic01_ros2
 ```
 
@@ -27,7 +32,7 @@ This will tell you:
 
 **Usage**:
 ```bash
-python3 tools/diagnose_coordinate_frames.py <bag_path> [--n-scans 20]
+.venv/bin/python tools/diagnose_coordinate_frames.py <bag_path> [--n-scans 20]
 ```
 
 **Output**: Clear interpretation of what conventions are actually used.
@@ -45,7 +50,7 @@ python3 tools/diagnose_coordinate_frames.py <bag_path> [--n-scans 20]
 
 **Usage**:
 ```bash
-python3 tools/check_lidar_mount_angle.py <bag_path> [--n-scans 10]
+.venv/bin/python tools/check_lidar_mount_angle.py <bag_path> [--n-scans 10]
 ```
 
 **Output**: Tells you if lidar is horizontal (rotation [0,0,0] likely correct) or angled.
@@ -63,7 +68,7 @@ python3 tools/check_lidar_mount_angle.py <bag_path> [--n-scans 10]
 
 **Usage**:
 ```bash
-python3 tools/estimate_imu_base_extrinsic_rotation.py <bag_path>
+.venv/bin/python tools/estimate_imu_base_extrinsic_rotation.py <bag_path>
 ```
 
 **Output**: Suggested `T_base_imu` rotation vector.
@@ -81,7 +86,7 @@ python3 tools/estimate_imu_base_extrinsic_rotation.py <bag_path>
 
 **Usage**:
 ```bash
-python3 tools/estimate_lidar_base_extrinsic.py <bag_path> --base-source odom
+.venv/bin/python tools/estimate_lidar_base_extrinsic.py <bag_path> --base-source odom
 ```
 
 **Output**: Estimated `T_base_lidar` transform.
@@ -100,7 +105,7 @@ python3 tools/estimate_lidar_base_extrinsic.py <bag_path> --base-source odom
 
 **Usage**:
 ```bash
-python3 tools/inspect_rosbag_deep.py <bag_path> [--json output.json]
+.venv/bin/python tools/inspect_rosbag_deep.py <bag_path> [--json output.json]
 ```
 
 **Output**: Complete bag inventory.
@@ -118,7 +123,7 @@ python3 tools/inspect_rosbag_deep.py <bag_path> [--json output.json]
 
 **Usage**:
 ```bash
-python3 tools/inspect_odom_source.py <bag_path>
+.venv/bin/python tools/inspect_odom_source.py <bag_path>
 ```
 
 ---
@@ -134,7 +139,7 @@ python3 tools/inspect_odom_source.py <bag_path>
 
 **Usage**:
 ```bash
-python3 tools/diagnose_frame_offset.py <gt_trajectory.tum> <est_trajectory.tum>
+.venv/bin/python tools/diagnose_frame_offset.py <gt_trajectory.tum> <est_trajectory.tum>
 ```
 
 ---

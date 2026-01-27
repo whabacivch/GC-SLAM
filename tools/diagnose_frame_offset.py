@@ -205,7 +205,7 @@ def main():
     if len(sys.argv) < 3:
         print("Usage: diagnose_frame_offset.py <gt_tum> <est_tum>")
         print("\nExample:")
-        print("  python tools/diagnose_frame_offset.py results/gc_20260126_173510/ground_truth_aligned.tum results/gc_20260126_173510/estimated_trajectory.tum")
+        print("  .venv/bin/python tools/diagnose_frame_offset.py results/gc_20260126_173510/ground_truth_aligned.tum results/gc_20260126_173510/estimated_trajectory.tum")
         return 1
 
     gt_path = sys.argv[1]

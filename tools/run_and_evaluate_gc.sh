@@ -20,20 +20,9 @@ WIRING_SUMMARY="/tmp/gc_wiring_summary.json"
 DIAGNOSTICS_FILE="/tmp/gc_slam_diagnostics.npz"
 RESULTS_DIR="$PROJECT_ROOT/results/gc_$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$RESULTS_DIR/slam_run.log"
-# Detect venv path - try multiple locations
-if [ -n "$VENV_PATH" ] && [ -d "$VENV_PATH" ]; then
-    # Use explicitly set VENV_PATH if it exists
-    :
-elif [ -d "$PROJECT_ROOT/.venv" ]; then
-    # Use project-local venv if it exists
-    VENV_PATH="$PROJECT_ROOT/.venv"
-elif [ -d "$HOME/.venv" ]; then
-    # Fallback to home directory venv
-    VENV_PATH="$HOME/.venv"
-else
-    # Last resort: try to find any venv with JAX
-    VENV_PATH="$PROJECT_ROOT/.venv"
-fi
+# Source common venv detection
+source "$(dirname "$0")/common_venv.sh"
+# $PYTHON and $VENV_PATH are now set by common_venv.sh
 
 # Terminal colors
 RED='\033[0;31m'
@@ -128,32 +117,8 @@ mkdir -p "$RESULTS_DIR"
 # ============================================================================
 print_stage 0 5 "Preflight Checks"
 
-# Activate venv
-if [ -d "$VENV_PATH" ] && [ -x "$VENV_PATH/bin/python" ]; then
-    # Don't source `bin/activate` here.
-    # Some venvs can be moved/renamed; their activate script hardcodes the original path.
-    # Instead, "activate" by forcing the venv bin dir onto PATH and setting VIRTUAL_ENV.
-    export VIRTUAL_ENV="$VENV_PATH"
-    export PATH="$VENV_PATH/bin:$PATH"
-    hash -r 2>/dev/null || true
-    print_ok "Python venv selected: $VENV_PATH"
-else
-    print_fail "Venv not found or invalid: $VENV_PATH"
-    echo "  Searched locations:"
-    echo "    - \$VENV_PATH: ${VENV_PATH:-<not set>}"
-    echo "    - \$PROJECT_ROOT/.venv: $PROJECT_ROOT/.venv"
-    echo "    - \$HOME/.venv: ${HOME}/.venv"
-    exit 1
-fi
-
-# IMPORTANT: Always use the venv interpreter explicitly.
-# Rationale: calling `python3` may resolve to system Python even with a venv
-# activated, which can cause missing deps (e.g., JAX) and confusing behavior.
-PYTHON="$VENV_PATH/bin/python"
-if [ ! -x "$PYTHON" ]; then
-    print_fail "Venv python not found/executable: $PYTHON"
-    exit 1
-fi
+# Venv is already set up by common_venv.sh
+print_ok "Python venv selected: $VENV_PATH"
 print_ok "Using python: $PYTHON"
 
 # Check JAX + Golden Child imports

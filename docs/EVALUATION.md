@@ -39,14 +39,14 @@ ros2 launch fl_slam_poc poc_m3dgr_rosbag.launch.py \
 If you already have trajectory files:
 
 ```bash
-# Align timestamps
-python3 tools/align_ground_truth.py \
+# Align timestamps (use venv Python)
+.venv/bin/python tools/align_ground_truth.py \
   rosbags/m3dgr/Dynamic01.txt \
   /tmp/fl_slam_trajectory.tum \
   /tmp/ground_truth_aligned.tum
 
-# Compute metrics and plots
-python3 tools/evaluate_slam.py \
+# Compute metrics and plots (use venv Python)
+.venv/bin/python tools/evaluate_slam.py \
   /tmp/ground_truth_aligned.tum \
   /tmp/fl_slam_trajectory.tum \
   results/my_evaluation

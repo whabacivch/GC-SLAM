@@ -12,13 +12,13 @@ Four panels:
 
 Usage:
     # Auto-open in browser (Wayland and X11 compatible)
-    python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz
+    .venv/bin/python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz
     
     # Save to file and open manually
-    python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz --output dashboard.html
+    .venv/bin/python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz --output dashboard.html
     
     # Start at specific scan
-    python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz --scan 50
+    .venv/bin/python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz --scan 50
 """
 
 import argparse
@@ -780,7 +780,7 @@ def create_full_dashboard(data: dict, selected_scan: int = 0, output_path: str =
             print(f"Please manually open: {html_path}")
             print("")
             print("Or use --output to save to a specific location:")
-            print(f"  python tools/slam_dashboard.py <diagnostics.npz> --output dashboard.html")
+            print(f"  .venv/bin/python tools/slam_dashboard.py <diagnostics.npz> --output dashboard.html")
     
     return html_path
 

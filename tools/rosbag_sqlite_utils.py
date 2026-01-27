@@ -5,7 +5,7 @@ Goal: eliminate copy/paste drift across `tools/*.py` while preserving the
 current scripts' behavior (notably: `resolve_db3_path()` returns "" on failure).
 
 This module intentionally lives in `tools/` (not the ROS package) so scripts
-executed as `python3 tools/<script>.py` can import it without installation.
+executed as `.venv/bin/python tools/<script>.py` can import it without installation.
 """
 
 from __future__ import annotations

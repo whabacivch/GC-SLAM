@@ -55,16 +55,10 @@ else
   _fl_msg "Git: (not found)"
 fi
 
-VENV_PATH="${REPO_ROOT}/${FL_VENV}"
-if [[ -d "${VENV_PATH}" ]]; then
-  _fl_msg "Activating venv: ${VENV_PATH}"
-  # shellcheck disable=SC1090
-  source "${VENV_PATH}/bin/activate"
-else
-  _fl_err "Python venv not found: ${VENV_PATH}"
-  _fl_err "Create it with: python3 -m venv \"${VENV_PATH}\""
-  return 2
-fi
+# Source common venv detection
+source "${REPO_ROOT}/tools/common_venv.sh"
+# $PYTHON and $VENV_PATH are now set by common_venv.sh
+_fl_msg "Activating venv: ${VENV_PATH}"
 
 _fl_msg "Sourcing ROS: ${FL_ROS_SETUP}"
 set +u
@@ -87,7 +81,7 @@ source "${REPO_ROOT}/${FL_WS_DIR}/install/setup.bash"
 set -u
 
 _fl_msg "Import provenance:"
-python3 - <<'PY'
+"$PYTHON" - <<'PY'
 import importlib
 import inspect
 

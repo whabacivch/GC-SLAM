@@ -152,8 +152,8 @@ Check 3: Backend status
 2. Run individual test files:
    ```bash
    cd fl_ws/src/fl_slam_poc
-   python3 -m pytest test/test_audit_invariants.py -v
-   python3 -m pytest test/test_rgbd_multimodal.py -v
+   .venv/bin/python -m pytest test/test_audit_invariants.py -v
+   .venv/bin/python -m pytest test/test_rgbd_multimodal.py -v
    ```
 
 ### Integration Tests Fail

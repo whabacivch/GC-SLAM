@@ -10,9 +10,9 @@ Goal: make evaluation robust by surfacing *everything that can bite us*:
 - Optional JSON summary export for CI/automation
 
 Usage:
-  python3 tools/inspect_rosbag_deep.py /path/to/bag_dir
-  python3 tools/inspect_rosbag_deep.py /path/to/bag_dir --json /tmp/bag_summary.json
-  python3 tools/inspect_rosbag_deep.py /path/to/bag_dir --full-scan-all
+  .venv/bin/python tools/inspect_rosbag_deep.py /path/to/bag_dir
+  .venv/bin/python tools/inspect_rosbag_deep.py /path/to/bag_dir --json /tmp/bag_summary.json
+  .venv/bin/python tools/inspect_rosbag_deep.py /path/to/bag_dir --full-scan-all
 
 Notes:
   - Expects a ROS 2 bag directory containing at least one *.db3 file.

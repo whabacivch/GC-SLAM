@@ -15,7 +15,10 @@ TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
 STARTUP_SEC="${STARTUP_SEC:-25}"
 REQUIRE_LOOP="${REQUIRE_LOOP:-1}"
 REQUIRE_SLAM_ACTIVE="${REQUIRE_SLAM_ACTIVE:-1}"
-VENV_PATH="${VENV_PATH:-${PROJECT_DIR}/.venv}"
+# Source common venv detection
+source "${SCRIPT_DIR}/common_venv.sh"
+# $PYTHON and $VENV_PATH are now set by common_venv.sh
+
 echo "=========================================="
 echo "FL-SLAM Integration Test Suite"
 echo "=========================================="
@@ -28,17 +31,8 @@ echo "  Require loop: ${REQUIRE_LOOP}"
 echo "  SLAM active:  ${REQUIRE_SLAM_ACTIVE}"
 echo ""
 
-if [[ -d "${VENV_PATH}" ]]; then
-  # shellcheck disable=SC1090
-  source "${VENV_PATH}/bin/activate"
-else
-  echo "ERROR: Python venv not found at ${VENV_PATH}" >&2
-  echo "Create it with: python3 -m venv \"${VENV_PATH}\"" >&2
-  exit 1
-fi
-
 echo "Running preflight checks..."
-python3 - <<PY
+"$PYTHON" - <<PY
 import os
 import sys
 import traceback
@@ -164,7 +158,7 @@ for _ in $(seq 1 10); do
     continue
   fi
   backend_mode="$(
-    python3 - <<'PY' "${backend_json}" 2>/dev/null || true
+    "$PYTHON" - <<'PY' "${backend_json}" 2>/dev/null || true
 import json, sys
 raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip().splitlines()[0].strip()
 try:

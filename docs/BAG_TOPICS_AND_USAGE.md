@@ -214,7 +214,7 @@ Run:
 ```bash
 source /opt/ros/jazzy/setup.bash
 source fl_ws/install/setup.bash
-python3 tools/inspect_rosbag_deep.py rosbags/m3dgr/Dynamic01_ros2 --json /tmp/m3dgr_summary.json
+.venv/bin/python tools/inspect_rosbag_deep.py rosbags/m3dgr/Dynamic01_ros2 --json /tmp/m3dgr_summary.json
 ```
 
 #### Key bag topics
