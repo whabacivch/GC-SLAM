@@ -70,7 +70,8 @@ def imu_gyro_rotation_evidence(
 
     # Residual must be pred^{-1} ∘ meas so that the canonical quadratic term
     # 0.5 (r - 0)^T Σ^{-1} (r - 0) drives R_end_pred toward R_end_imu.
-    r_rot = se3_jax.so3_log(R_end_pred.T @ R_end_imu)
+    R_diff = R_end_pred.T @ R_end_imu
+    r_rot = se3_jax.so3_log(R_diff)
 
     # dt_int is bag-agnostic: sum of actual IMU sample intervals.
     # Continuous mass check: when dt_int -> 0, evidence weight -> 0 (no boolean gates).
@@ -83,10 +84,20 @@ def imu_gyro_rotation_evidence(
     Sigma_rot_psd = domain_projection_psd(Sigma_rot, eps_psd).M_psd
     L_rot, lift_strength = spd_cholesky_inverse_lifted(Sigma_rot_psd, eps_lift)
     
+    # Diagnostic: check for NaN at each step
+    import numpy as _np
+    if not _np.all(_np.isfinite(_np.array(R_diff))):
+        raise ValueError(f"R_diff has NaN: {_np.array(R_diff)}")
+    if not _np.all(_np.isfinite(_np.array(r_rot))):
+        raise ValueError(f"r_rot has NaN from so3_log. R_diff trace={float(jnp.trace(R_diff)):.6f}")
+    if not _np.all(_np.isfinite(_np.array(L_rot))):
+        raise ValueError(f"L_rot has NaN. Sigma_rot diag={_np.diag(_np.array(Sigma_rot))}, dt_eff={float(dt_eff)}")
+    
     # Scale evidence by continuous mass (branch-free)
     L_rot_scaled = mass_scale * L_rot
 
     L = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
+    # GC ordering: [0:3] = rotation, [3:6] = translation (opposite of se3_jax)
     L = L.at[0:3, 0:3].set(L_rot_scaled)
     h = jnp.zeros((D_Z,), dtype=jnp.float64)
     h = h.at[0:3].set(L_rot_scaled @ r_rot)

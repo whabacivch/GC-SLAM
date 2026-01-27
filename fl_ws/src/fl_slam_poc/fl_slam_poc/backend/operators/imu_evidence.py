@@ -11,6 +11,30 @@ where:
 We convert this factor to quadratic Gaussian information by Laplace at delta=0
 using closed-form derivatives (intrinsic primitives only; no autodiff).
 
+=============================================================================
+GRAVITY CONVENTION (CRITICAL)
+=============================================================================
+World frame: Z-UP convention
+  gravity_W = [0, 0, -9.81] m/s²  (gravity points DOWN in -Z direction)
+  g_hat = [0, 0, -1]              (normalized gravity direction, pointing DOWN)
+  minus_g_hat = [0, 0, +1]        (expected accel direction, pointing UP)
+
+Accelerometer Convention:
+  IMU accelerometers measure REACTION TO GRAVITY (specific force), NOT gravity.
+  When level and stationary, accelerometer reads +Z (pointing UP).
+  This is the force preventing the sensor from freefalling.
+
+Expected vs Measured:
+  mu0 = R_body^T @ minus_g_hat    (expected accel direction in body frame)
+  xbar = normalized(mean(accel))  (measured accel direction in body frame)
+  Alignment: xbar @ mu0 should be ~+1.0 for correct gravity alignment
+  If negative, the IMU extrinsic is likely inverting gravity!
+
+State Ordering:
+  L_imu is placed at [0:3, 0:3] which is the ROTATION block in GC ordering.
+  (GC state: [rot(0:3), trans(3:6), ...])
+=============================================================================
+
 ## vMF HESSIAN APPROXIMATION NOTE (Audit Compliance)
 
 The Hessian H_rot used for the information matrix is an approximation to the

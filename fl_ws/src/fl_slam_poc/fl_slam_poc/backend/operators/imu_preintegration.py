@@ -99,7 +99,15 @@ def preintegrate_imu_relative_pose_jax(
     carry0 = (R, jnp.zeros((3,), dtype=jnp.float64), jnp.zeros((3,), dtype=jnp.float64))
     (R_end, v_end, p_end), _ = jax.lax.scan(step, carry0, (imu_gyro, imu_accel, dt, w))
 
-    rotvec_end = se3_jax.so3_log(R_end)
-    delta_pose = jnp.concatenate([p_end, rotvec_end], axis=0)
-    return delta_pose, R_end, p_end, ess
+    # CRITICAL FIX: Compute RELATIVE rotation delta, not absolute end orientation.
+    # R_end = R_start @ dR_0 @ dR_1 @ ... (absolute)
+    # delta_R = R_start^T @ R_end = dR_0 @ dR_1 @ ... (relative)
+    # Before: returned rotvec_end = Log(R_end) which is absolute orientation.
+    # This caused imu_gyro_rotation_evidence to compute R_end_imu = R_start @ Exp(rotvec_end)
+    # = R_start @ R_end (WRONG!) instead of just R_end.
+    R_start = se3_jax.so3_exp(rotvec_start_WB)
+    delta_R = R_start.T @ R_end  # Relative rotation from start to end
+    rotvec_delta = se3_jax.so3_log(delta_R)
+    delta_pose = jnp.concatenate([p_end, rotvec_delta], axis=0)
+    return delta_pose, delta_R, p_end, ess
 

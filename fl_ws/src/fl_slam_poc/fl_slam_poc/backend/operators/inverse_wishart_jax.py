@@ -123,16 +123,22 @@ def process_noise_iw_apply_suffstats_jax(
     pn_state: ProcessNoiseIWState,
     dPsi: jnp.ndarray,   # (7,6,6)
     dnu: jnp.ndarray,    # (7,)
-    dt_sec: float,
+    dt_sec: float,  # Unused - kept for API compatibility, will be removed
     eps_psd: float = C.GC_EPS_PSD,
     nu_max: float = 1000.0,
 ) -> tuple[ProcessNoiseIWState, jnp.ndarray]:
     """
     Apply aggregated commutative sufficient statistics to update the IW state (once per scan).
 
-    Forgetful retention is applied deterministically:
-      Psi <- rho * Psi + dPsi / dt
+    DISCRETE-TIME update (no dt division):
+      Psi <- rho * Psi + dPsi
       nu  <- rho * nu  + dnu
+
+    Rationale: dPsi is already "incremental sufficient statistics for this step" computed
+    from the realized state increment. Dividing by dt would incorrectly interpret it as a
+    continuous-time rate, but we don't have a continuous-time innovation model for dPsi.
+    The correct place for dt-scaling is in PredictDiffusion (Sigma += Q_mode * dt_sec),
+    not in the IW posterior update.
 
     ν is clipped to remain > p+1 (mean exists) and to a fixed nu_max.
     """
@@ -149,9 +155,8 @@ def process_noise_iw_apply_suffstats_jax(
         dtype=jnp.float64,
     )
 
-    dt_safe = jnp.maximum(jnp.array(dt_sec, dtype=jnp.float64), 1e-12)
-
-    Psi_raw = (rho[:, None, None] * pn_state.Psi_blocks) + (dPsi / dt_safe)
+    # Discrete-time sufficient statistics update - NO division by dt
+    Psi_raw = (rho[:, None, None] * pn_state.Psi_blocks) + dPsi
     Psi_raw = Psi_raw * PROCESS_BLOCK_MASKS
 
     # Project each padded block to PSD for numerical stability (always applied).

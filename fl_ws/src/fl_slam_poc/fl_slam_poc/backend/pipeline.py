@@ -397,24 +397,37 @@ def process_scan_single_hypothesis(
     
     # IMU measurement-noise IW sufficient stats (Σg, Σa) from commutative residuals
     # Average IMU sampling period for PSD mapping (Var * dt -> PSD).
-    # imu_stamps is padded with zeros; compute span only over valid stamps.
+    # NOTE: imu_stamps is padded with zeros; exclude padded entries by construction.
     import numpy as np
     imu_stamps_np = np.asarray(imu_stamps, dtype=np.float64).reshape(-1)
-    valid_mask = imu_stamps_np > 0.0
-    n_valid = int(np.sum(valid_mask))
+    valid_mask_np = imu_stamps_np > 0.0
+    n_valid = int(np.sum(valid_mask_np))
     if n_valid >= 2:
-        valid = np.sort(imu_stamps_np[valid_mask])
+        valid = np.sort(imu_stamps_np[valid_mask_np])
         dt_imu = float((valid[-1] - valid[0]) / max(n_valid - 1, 1))
     else:
         dt_imu = 0.0
     dt_imu = jnp.maximum(jnp.array(dt_imu, dtype=jnp.float64), 1e-12)
 
-    # Use scan-to-scan dt_int for average angular rate (omega_avg) since delta_rotvec is interval-integrated.
-    dt_int_j = jnp.maximum(jnp.array(dt_int, dtype=jnp.float64), 1e-12)
-    omega_avg = delta_pose_int[3:6] / dt_int_j
+    # CRITICAL: omega_avg must be an angular-rate proxy (rad/s), not a finite-rotation / dt surrogate.
+    # Using so3_log(delta_R) / dt is only valid in the small-angle limit and can destabilize IW updates.
+    # Use the weighted mean of the debiased gyro measurements over the integration window instead.
+    imu_stamps_j = jnp.asarray(imu_stamps, dtype=jnp.float64).reshape(-1)
+    valid_mask = (imu_stamps_j > 0.0).astype(jnp.float64)
+    w_imu_int_valid = w_imu_int * valid_mask
+    w_sum_imu_int = jnp.sum(w_imu_int_valid) + config.eps_mass
+    w_norm_imu_int = w_imu_int_valid / w_sum_imu_int
+    omega_avg = jnp.einsum("m,mi->i", w_norm_imu_int, (imu_gyro - gyro_bias[None, :]))
+    
+    # Diagnostic: omega_avg sanity (no heuristics / no gating).
+    _omega_avg_np = np.array(omega_avg)
+    if not np.all(np.isfinite(_omega_avg_np)):
+        raise ValueError(f"omega_avg contains non-finite values: {_omega_avg_np}")
+    _omega_avg_norm = float(np.linalg.norm(_omega_avg_np))
+    
     iw_meas_gyro_dPsi, iw_meas_gyro_dnu = imu_gyro_meas_iw_suffstats_from_avg_rate_jax(
         imu_gyro=imu_gyro,
-        weights=w_imu_int,
+        weights=w_imu_int_valid,
         gyro_bias=gyro_bias,
         omega_avg=omega_avg,
         dt_imu_sec=dt_imu,
@@ -423,7 +436,7 @@ def process_scan_single_hypothesis(
     iw_meas_accel_dPsi, iw_meas_accel_dnu = imu_accel_meas_iw_suffstats_from_gravity_dir_jax(
         rotvec_world_body=rotvec0,
         imu_accel=imu_accel,
-        weights=w_imu_int,
+        weights=w_imu_int_valid,
         accel_bias=accel_bias,
         gravity_W=gravity_W,
         dt_imu_sec=dt_imu,
@@ -604,6 +617,18 @@ def process_scan_single_hypothesis(
     # IMU gyro rotation evidence (Gaussian on SO(3) using preintegrated delta rotation)
     # CRITICAL: Pass dt_int (IMU integration time), not dt_scan (LiDAR scan duration)
     Sigma_g = jnp.asarray(config.Sigma_g, dtype=jnp.float64)
+    
+    # Diagnostic: check inputs for NaN before gyro evidence
+    _rotvec0_np = np.array(rotvec0)
+    _pose_pred_np = np.array(pose_pred)
+    _delta_pose_int_np = np.array(delta_pose_int)
+    if not np.all(np.isfinite(_rotvec0_np)):
+        raise ValueError(f"rotvec0 contains NaN: {_rotvec0_np}")
+    if not np.all(np.isfinite(_pose_pred_np)):
+        raise ValueError(f"pose_pred contains NaN: {_pose_pred_np}")
+    if not np.all(np.isfinite(_delta_pose_int_np)):
+        raise ValueError(f"delta_pose_int contains NaN: {_delta_pose_int_np}")
+    
     gyro_result, gyro_cert, gyro_effect = imu_gyro_rotation_evidence(
         rotvec_start_WB=rotvec0,
         rotvec_end_pred_WB=pose_pred[3:6],
@@ -634,6 +659,14 @@ def process_scan_single_hypothesis(
     # Combine evidence terms additively before fusion scaling
     L_evidence = evidence_result.L_lidar + odom_result.L_odom + imu_result.L_imu + gyro_result.L_gyro
     h_evidence = evidence_result.h_lidar + odom_result.h_odom + imu_result.h_imu + gyro_result.h_gyro
+
+    # Diagnostic: check which evidence component has NaN
+    for name, L in [("L_lidar", evidence_result.L_lidar), ("L_odom", odom_result.L_odom),
+                    ("L_imu", imu_result.L_imu), ("L_gyro", gyro_result.L_gyro)]:
+        L_np = np.array(L)
+        if not np.all(np.isfinite(L_np)):
+            nan_pos = np.argwhere(~np.isfinite(L_np))[:5]
+            raise ValueError(f"{name} contains NaN at positions {nan_pos.tolist()}")
 
     # Fisher-derived excitation scaling (Contract 1): scale dt/ex prior strength by (1 - s)
     s_dt, s_ex = compute_excitation_scales_jax(L_evidence=L_evidence, L_prior=belief_pred.L)
@@ -768,14 +801,38 @@ def process_scan_single_hypothesis(
     # =========================================================================
     # Step 13: PoseCovInflationPushforward
     # =========================================================================
+    # CRITICAL FIX: When the map is empty (first scan), R_hat and t_hat from
+    # Wahba/WLS are meaningless (identity/zero). Instead, use the POSTERIOR
+    # BELIEF's pose to place the scan in the map. This ensures the first scan
+    # is conditioned on IMU/odom data, not just placed at identity.
+    #
+    # The posterior belief already incorporates:
+    # - Odom evidence (L_odom, h_odom)
+    # - IMU gravity evidence (L_imu, h_imu)
+    # - IMU gyro evidence (L_gyro, h_gyro)
+    #
+    # When map has data, R_hat/t_hat from scan-to-map alignment are valid.
+    map_total_mass = float(jnp.sum(map_stats.N_dir))
+    map_is_empty = map_total_mass < config.eps_mass
+
+    if map_is_empty:
+        # First scan: use belief pose (conditioned on IMU/odom) for map placement
+        pose_for_map = belief_recomposed.mean_world_pose(eps_lift=config.eps_lift)
+        R_for_map = se3_jax.so3_exp(pose_for_map[3:6])  # Rotation from belief
+        t_for_map = pose_for_map[:3]  # Translation from belief
+    else:
+        # Subsequent scans: use Wahba/WLS alignment (scan-to-map matching)
+        R_for_map = R_hat
+        t_for_map = t_hat
+
     map_update_result, map_update_cert, map_update_effect = pos_cov_inflation_pushforward(
         belief_post=belief_recomposed,
         scan_N=scan_bins.N,
         scan_s_dir=scan_bins.s_dir,
         scan_p_bar=scan_bins.p_bar,
         scan_Sigma_p=scan_bins.Sigma_p,
-        R_hat=R_hat,
-        t_hat=t_hat,
+        R_hat=R_for_map,
+        t_hat=t_for_map,
         eps_psd=config.eps_psd,
         eps_lift=config.eps_lift,
     )
@@ -819,18 +876,25 @@ def process_scan_single_hypothesis(
 
     R_lidar = np.array(R_hat)
 
-    rot_err_lidar_deg_pred = float(
-        np.linalg.norm(R_scipy.from_matrix(R_pred.T @ R_lidar).as_rotvec()) * (180.0 / np.pi)
-    )
-    rot_err_lidar_deg_post = float(
-        np.linalg.norm(R_scipy.from_matrix(R_final.T @ R_lidar).as_rotvec()) * (180.0 / np.pi)
-    )
-    rot_err_odom_deg_pred = float(
-        np.linalg.norm(R_scipy.from_matrix(R_pred.T @ R_odom).as_rotvec()) * (180.0 / np.pi)
-    )
-    rot_err_odom_deg_post = float(
-        np.linalg.norm(R_scipy.from_matrix(R_final.T @ R_odom).as_rotvec()) * (180.0 / np.pi)
-    )
+    # Compute rotation errors robustly (handle non-orthogonal matrices from numerical issues)
+    def _safe_rotation_error_deg(R1: np.ndarray, R2: np.ndarray) -> float:
+        """Compute rotation error in degrees, handling numerical edge cases."""
+        try:
+            R_diff = R1.T @ R2
+            # Force orthogonality via SVD projection
+            U, _, Vt = np.linalg.svd(R_diff)
+            R_diff_ortho = U @ Vt
+            # Ensure proper rotation (det = +1)
+            if np.linalg.det(R_diff_ortho) < 0:
+                R_diff_ortho = -R_diff_ortho
+            return float(np.linalg.norm(R_scipy.from_matrix(R_diff_ortho).as_rotvec()) * (180.0 / np.pi))
+        except Exception:
+            return float("nan")
+
+    rot_err_lidar_deg_pred = _safe_rotation_error_deg(R_pred, R_lidar)
+    rot_err_lidar_deg_post = _safe_rotation_error_deg(R_final, R_lidar)
+    rot_err_odom_deg_pred = _safe_rotation_error_deg(R_pred, R_odom)
+    rot_err_odom_deg_post = _safe_rotation_error_deg(R_final, R_odom)
 
     # IMU gravity direction coherence probe (in body frame).
     imu_accel_np = np.array(imu_accel, dtype=np.float64)
@@ -850,6 +914,23 @@ def process_scan_single_hypothesis(
     # Compute evidence diagnostics
     L_total_np = np.array(L_evidence)
     h_total_np = np.array(h_evidence)
+
+    # Diagnostic: check for non-finite values before eigvalsh (deterministic check, not a gate)
+    if not np.all(np.isfinite(L_total_np)):
+        nan_count = np.sum(~np.isfinite(L_total_np))
+        max_abs = np.nanmax(np.abs(L_total_np))
+        # Identify which block has the issue
+        block_info = []
+        for name, sl in [("rot", slice(0, 3)), ("trans", slice(3, 6)), ("vel", slice(6, 9)),
+                         ("bg", slice(9, 12)), ("ba", slice(12, 15)), ("dt", slice(15, 16)),
+                         ("ex", slice(16, 22))]:
+            block = L_total_np[sl, sl]
+            if not np.all(np.isfinite(block)):
+                block_info.append(f"{name}:NaN")
+        raise ValueError(
+            f"L_total contains {nan_count} non-finite values (max_abs={max_abs:.2e}). "
+            f"Blocks with NaN: {block_info}. Check evidence operators for source."
+        )
 
     # Safe logdet computation (handle near-singular matrices)
     eigvals = np.linalg.eigvalsh(L_total_np)

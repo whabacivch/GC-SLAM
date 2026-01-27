@@ -26,6 +26,112 @@ Use `tools/inspect_rosbag_deep.py` to regenerate counts/frames when bags change.
 
 ## M3DGR Dynamic01 (ROS 2 bag)
 
+### Hardware Platform
+
+The M3DGR dataset uses a ground robot platform with the following sensor configuration:
+
+**Platform Overview:**
+- Lower main platform: 35 cm × 84 cm, 26 cm from ground
+- Upper platform: 35 cm × 35 cm, 45 cm above lower platform
+- Top platform (antennas): 15 cm above upper platform
+- Overall height: ~133 cm to top of omnidirectional camera mast
+
+**Sensor Mounting:**
+- Front-view LiDAR (Livox Avia) and VI-sensor (RealSense D435i) mounted ~9 cm forward from front edge of lower platform
+- 360° LiDAR (Livox MID-360) mounted on upper platform
+- Omnidirectional camera (Insta360 X4) on tall mast extending upward
+- GPS/RTK receivers (CUAV C-RTK9Ps, C-RTK2HP) on lower platform front-center
+- Pixhawk flight controller on lower platform
+- On-board computer on lower platform rear-center
+- Wheel odometer (WHEELTEC) on rear wheel
+
+*Note: See M3DGR dataset documentation for detailed platform schematic diagrams and photographs showing sensor placement, dimensions, coordinate frames, and physical mounting angles. The platform schematic shows the 360° LiDAR (MID-360) mounted on the upper platform with coordinate systems indicated for each sensor.*
+
+### Sensor Specifications
+
+All sensors and tracking devices with their most important parameters:
+
+#### LiDAR Sensors
+
+1. **LiDAR1 - Livox Avia**
+   - Type: Non-repetitive scanning
+   - Horizontal FOV: 70.4°
+   - Vertical FOV: 77.2°
+   - Frequency: 10 Hz
+   - Max Range: 450 m
+   - Range Precision: 2 cm
+   - Angular Precision: 0.05°
+   - IMU: 6-axis, 200 Hz
+   - ROS Topic: `/livox/avia/lidar`
+
+2. **LiDAR2 - Livox MID-360** (Primary sensor used by GC v2)
+   - Type: Non-repetitive scanning
+   - Horizontal FOV: 360°
+   - Vertical FOV: -7° to +52° (scans from 7° below to 52° above horizontal)
+   - Frequency: 10 Hz
+   - Max Range: 40 m
+   - Range Resolution: 3 cm
+   - Angular Resolution: 0.15°
+   - IMU: 6-axis, 200 Hz
+   - ROS Topic: `/livox/mid360/lidar`
+   - **Frame Convention**: `livox_frame` uses Z-down convention; requires 180° rotation about X-axis to convert to Z-up `base_footprint` frame
+
+#### Visual-Inertial Sensor
+
+3. **V-I Sensor - RealSense D435i**
+   - RGB/Depth Resolution: 640×480
+   - Horizontal FOV: 69°
+   - Vertical FOV: 42.5°
+   - Frequency: 15 Hz
+   - IMU: 6-axis, 200 Hz
+   - ROS Topics:
+     - `/camera/color/image_raw/compressed` (RGB)
+     - `/camera/aligned_depth_to_color/image_raw/compressedDepth` (Depth)
+     - `/camera/imu` (IMU)
+   - *Note: Insta360 X4 driver ROS package available for real-time streaming (modify device ID in launch file)*
+
+#### Omnidirectional Camera
+
+4. **Insta360 X4**
+   - RGB Resolution: 2880×1440
+   - Horizontal FOV: 360°
+   - Vertical FOV: 360°
+   - Frequency: 15 Hz
+   - ROS Topic: `/cv_camera/image_raw/compressed`
+
+#### Odometry
+
+5. **Wheel Odometer - WHEELTEC**
+   - Type: 2D odometry
+   - Frequency: 20 Hz
+   - ROS Topic: `/odom`
+   - Frame: `odom_combined` → `base_footprint`
+
+#### GNSS/RTK
+
+6. **GNSS Receiver - CUAV C-RTK9Ps**
+   - Systems: BDS/GPS/GLONASS/Galileo
+   - Frequency: 10 Hz
+   - ROS Topics:
+     - `/ublox_driver/ephem`
+     - `/ublox_driver/glo_ephem`
+     - `/ublox_driver/iono_params`
+     - `/ublox_driver/range_meas`
+     - `/ublox_driver/receiver_lla`
+     - `/ublox_driver/receiver_pvt`
+     - `/ublox_driver/time_pulse_info`
+
+7. **RTK Receiver - CUAV C-RTK2HP**
+   - Localization Accuracy: 0.8 cm (H) / 1.5 cm (V)
+   - Frequency: 15 Hz
+
+#### Motion Capture
+
+8. **Motion-capture System - OptiTrack**
+   - Localization Accuracy: 1 mm
+   - Frequency: 360 Hz
+   - ROS Topic: `/vrpn_client_node/UGV/pose` (ground truth for evaluation only)
+
 ### Summary (bag truth)
 
 - **TF**: `/tf` and `/tf_static` are **absent**
@@ -40,6 +146,8 @@ Use `tools/inspect_rosbag_deep.py` to regenerate counts/frames when bags change.
 - **Livox frames**:
   - `/livox/mid360/lidar.header.frame_id = livox_frame`
   - `/livox/mid360/imu.header.frame_id = livox_frame`
+  - `/livox/avia/lidar.header.frame_id = livox_frame` (if present)
+  - `/livox/avia/imu.header.frame_id = livox_frame` (if present)
   - `/livox/avia/*` topics may be present, but require `livox_ros_driver` message package to decode.
 
 ### Adopted calibration + launch defaults (MVP)
@@ -47,7 +155,13 @@ Use `tools/inspect_rosbag_deep.py` to regenerate counts/frames when bags change.
 These are the **explicit parameters we run with** for M3DGR (to compensate for missing `/tf(_static)` and missing `CameraInfo`):
 
 - **Base/body frame policy**: `base_frame` is treated as the dataset **body/IMU frame \(b\)** (we keep the name `base_footprint` for M3DGR because it matches bag truth).
-- **LiDAR mounting** (MID-360, no-TF): `lidar_base_extrinsic = [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]` interpreted as \(T_{b\leftarrow \text{mid360}}\) with format `[x,y,z,rx,ry,rz]` and `R=I`.
+- **LiDAR mounting** (MID-360, no-TF): `T_base_lidar = [-0.011, 0.0, 0.778, 3.141593, 0.0, 0.0]` interpreted as \(T_{b\leftarrow \text{mid360}}\) with format `[x,y,z,rx,ry,rz]` (rotvec in radians).
+  - Translation: `[-0.011, 0.0, 0.778]` meters (LiDAR offset from base)
+  - Rotation: `[3.141593, 0.0, 0.0]` radians (180° around X-axis to convert from Z-down `livox_frame` to Z-up `base_footprint`)
+  - **Critical**: The 180° rotation is required because MID-360 `livox_frame` uses Z-down convention, while `base_footprint` uses Z-up.
+- **IMU mounting** (MID-360, no-TF): `T_base_imu = [0.0, 0.0, 0.0, -0.015586, 0.489293, 0.0]` (rotvec in radians).
+  - Translation: `[0.0, 0.0, 0.0]` (IMU co-located with LiDAR in MID-360 unit)
+  - Rotation: `[-0.015586, 0.489293, 0.0]` radians (~28° misalignment, estimated via gravity alignment)
 - **IMU source**: `/livox/mid360/imu`
 - **RealSense intrinsics** (640×480, bag has no `CameraInfo`):
   - `camera_fx = 610.16`
@@ -57,6 +171,39 @@ These are the **explicit parameters we run with** for M3DGR (to compensate for m
 - **IMU noise densities** (used by preintegration; random-walk terms are intentionally not used):
   - `imu_gyro_noise_density = 1.7e-4` (rad/s/√Hz)
   - `imu_accel_noise_density = 1.9e-4` (m/s²/√Hz)
+
+### ROS Topics Reference
+
+Complete list of ROS topics available in M3DGR rosbag sequences:
+
+#### LiDAR Topics
+- **LiDAR1**: `/livox/avia/lidar` (Livox Avia, `livox_ros_driver/msg/CustomMsg`)
+- **LiDAR2**: `/livox/mid360/lidar` (Livox MID-360, `livox_ros_driver2/msg/CustomMsg`)
+
+#### Odometry
+- **Wheel Odometer**: `/odom` (`nav_msgs/msg/Odometry`, 20 Hz)
+
+#### Camera Topics
+- **RGB Camera**: `/camera/color/image_raw/compressed` (`sensor_msgs/msg/CompressedImage`)
+- **Omnidirectional Camera**: `/cv_camera/image_raw/compressed` (`sensor_msgs/msg/CompressedImage`)
+- **Depth Camera**: `/camera/aligned_depth_to_color/image_raw/compressedDepth` (`sensor_msgs/msg/CompressedImage`)
+
+#### GNSS Topics
+- `/ublox_driver/ephem` (ephemeris data)
+- `/ublox_driver/glo_ephem` (GLONASS ephemeris)
+- `/ublox_driver/iono_params` (ionospheric parameters)
+- `/ublox_driver/range_meas` (range measurements)
+- `/ublox_driver/receiver_lla` (receiver latitude/longitude/altitude)
+- `/ublox_driver/receiver_pvt` (receiver position/velocity/time)
+- `/ublox_driver/time_pulse_info` (time pulse information)
+
+#### IMU Topics
+- `/camera/imu` (`sensor_msgs/msg/Imu`, RealSense D435i IMU, 200 Hz)
+- `/livox/avia/imu` (`sensor_msgs/msg/Imu`, Livox Avia IMU, 200 Hz)
+- `/livox/mid360/imu` (`sensor_msgs/msg/Imu`, Livox MID-360 IMU, 200 Hz) - **Primary IMU used by GC v2**
+
+#### Ground Truth
+- `/vrpn_client_node/UGV/pose` (`geometry_msgs/msg/PoseStamped`, OptiTrack motion capture, 360 Hz) - **Evaluation only, must never be fused**
 
 ### Topic inventory (observed)
 
@@ -83,6 +230,8 @@ These are the *bag inputs* used by the MVP pipeline (or present but explicitly n
 | `/vrpn_client_node/UGV/pose` | `geometry_msgs/msg/PoseStamped` | **Evaluation only** | Ground-truth source for offline evaluation. Must never be fused into inference. |
 | `/livox/avia/lidar` | `livox_ros_driver/msg/CustomMsg` | Not yet | Present in bag; requires `livox_ros_driver` Python messages to decode and use. |
 | `/livox/avia/imu` | `sensor_msgs/msg/Imu` | Not yet | Present for future work; currently unused. |
+| `/cv_camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Not yet | Insta360 X4 omnidirectional camera (360° H/V FOV). |
+| `/ublox_driver/*` | Various GNSS messages | Not yet | GNSS/RTK receiver topics (ephemeris, iono params, range measurements, receiver LLA/PVT, time pulse). |
 
 #### Pipeline topic graph (MVP run)
 

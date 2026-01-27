@@ -71,11 +71,14 @@ gc_backend:
     base_frame: base_footprint
 
     # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] (rotvec, radians).
-    # Estimated from Dynamic01 bag gravity alignment (tools/estimate_imu_base_extrinsic_rotation.py):
-    #   IMU accel direction in livox_frame: [-0.47, -0.015, 0.88]
-    #   Expected in base_footprint (Z-up):   [0, 0, 1]
-    #   Rotation: ~28° misalignment → rotvec [-0.015586, 0.489293, 0.0] rad
+    # LiDAR: Z-up confirmed (diagnose_coordinate_frames.py) - rotation [0,0,0] is correct.
+    # IMU: 154.5° rotation from gravity alignment tool. UNDER INVESTIGATION - there may be
+    #      sign convention issues elsewhere in the pipeline that need to be resolved first.
+    # See: tools/estimate_imu_base_extrinsic_rotation.py
     T_base_lidar: [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]
+    # IMU extrinsic: 28° rotation to align IMU gravity with base +Z
+    # (Previous 154.5° rotation was inverting both gravity and yaw axis)
+    # Restored to match good run (2026-01-26 22:06:57) values
     T_base_imu:   [0.0,   0.0, 0.0,   -0.015586, 0.489293, 0.0]
 
     # Trajectory export

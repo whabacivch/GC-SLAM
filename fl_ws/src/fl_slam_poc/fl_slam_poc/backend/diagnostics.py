@@ -305,6 +305,7 @@ class DiagnosticsLog:
             "fusion_alpha": np.array([s.fusion_alpha for s in self.scans]),
             "total_trigger_magnitude": np.array([s.total_trigger_magnitude for s in self.scans]),
             "conditioning_number": np.array([s.conditioning_number for s in self.scans]),
+            "conditioning_pose6": np.array([s.conditioning_pose6 for s in self.scans]),
             "accel_dir_dot_mu0": np.array([s.accel_dir_dot_mu0 for s in self.scans]),
             "accel_mag_mean": np.array([s.accel_mag_mean for s in self.scans]),
         }
@@ -377,6 +378,7 @@ class DiagnosticsLog:
                 fusion_alpha=float(data["fusion_alpha"][i]),
                 total_trigger_magnitude=float(data["total_trigger_magnitude"][i]),
                 conditioning_number=float(data["conditioning_number"][i]),
+                conditioning_pose6=float(data["conditioning_pose6"][i]) if "conditioning_pose6" in data else 1.0,
                 accel_dir_dot_mu0=float(data["accel_dir_dot_mu0"][i]) if "accel_dir_dot_mu0" in data else 0.0,
                 accel_mag_mean=float(data["accel_mag_mean"][i]) if "accel_mag_mean" in data else 0.0,
             )

@@ -190,25 +190,21 @@ class LivoxConverterNode(Node):
         tag = np.array([int(getattr(p, "tag", 0)) for p in points_valid], dtype=np.uint8)
 
         # Per-point time offset: ALWAYS include (required by GC v2 backend)
-        # For livox_ros_driver2, offset_time is not in CustomPoint, so we compute synthetic offsets
-        # assuming uniform time spacing within the scan (typical for non-repetitive scanning)
+        # CRITICAL: livox_ros_driver2 CustomPoint does NOT have offset_time field.
+        # The MID-360 uses a NON-REPETITIVE rosette scanning pattern, meaning
+        # point index has NO correlation with capture time order!
+        #
+        # DO NOT synthesize fake timestamps based on point index - this corrupts deskewing.
+        # Instead, set all offsets to 0 (effectively disabling deskewing for this sensor).
+        # This is correct behavior: better to skip deskewing than apply wrong corrections.
         has_time_offset_field = hasattr(points_valid[0], "offset_time") if points_valid else False
         if has_time_offset_field:
-            # Use actual offset_time from message (e.g., livox_ros_driver)
+            # Use actual offset_time from message (e.g., livox_ros_driver v1)
             time_offset = np.array([int(getattr(p, "offset_time", 0)) for p in points_valid], dtype=np.uint32)
         else:
-            # For livox_ros_driver2: compute synthetic time_offset from point index
-            # Assuming uniform time spacing: offset = point_index * (scan_duration_ns / num_points)
-            # For MID-360, typical scan duration is ~100ms = 100e6 ns
-            # This allows per-point timestamp reconstruction in the backend
-            n_points = len(points_valid)
-            if n_points > 0:
-                # Estimate: 100ms scan duration distributed uniformly across points
-                scan_duration_ns = 100_000_000  # 100ms in nanoseconds
-                point_indices = np.arange(n_points, dtype=np.uint32)
-                time_offset = (point_indices * scan_duration_ns // n_points).astype(np.uint32)
-            else:
-                time_offset = np.array([], dtype=np.uint32)
+            # No per-point timestamps available - set all to 0 to disable deskewing
+            # This is intentional: Livox MID-360 rosette pattern has no index→time mapping
+            time_offset = np.zeros(len(points_valid), dtype=np.uint32)
         
         # Always include time_offset field (required by GC v2)
         has_time_offset = True
@@ -293,8 +289,8 @@ class LivoxConverterNode(Node):
             )
             if not has_time_offset_field:
                 self.get_logger().info(
-                    "Livox converter: per-point time offset computed synthetically from point index "
-                    "(uniform spacing assumption for livox_ros_driver2)."
+                    "Livox converter: per-point time offset unavailable (livox_ros_driver2). "
+                    "All offsets set to 0 (deskewing disabled for non-repetitive rosette pattern)."
                 )
 
         self.publisher.publish(cloud_msg)

@@ -5,9 +5,27 @@ The BeliefGaussianInfo dataclass represents a Gaussian belief
 in information form on the augmented tangent space.
 
 Uses JAX for all math operations.
-Pose is represented as 6D vector: [translation(3), rotation_vector(3)]
 
+=============================================================================
+ORDERING CONVENTIONS (CRITICAL - two different orderings are used!)
+=============================================================================
+
+1. SE(3) POSE (se3_jax format):
+   6D vector: [trans(3), rot(3)] = [x, y, z, rx, ry, rz]
+   Used by: se3_compose, se3_inverse, X_anchor, mean_world_pose()
+
+2. GC STATE VECTOR (tangent space):
+   22D vector: [rot(3), trans(3), vel(3), bg(3), ba(3), dt(1), ex(6)]
+   Pose slice: [0:3] = rotation, [3:6] = translation
+   Used by: L, h, z_lin, all evidence operators
+
+CONVERSION FUNCTIONS:
+   pose_se3_to_z_delta(): [trans, rot] → [rot, trans] (SE3 → GC)
+   pose_z_to_se3_delta(): [rot, trans] → [trans, rot] (GC → SE3)
+
+Reference: docs/FRAME_AND_QUATERNION_CONVENTIONS.md
 Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 2.1
+=============================================================================
 """
 
 from __future__ import annotations

@@ -265,6 +265,65 @@ def compute_ate_full(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.
     return ate_trans, ate_rot, gt_sync, est_sync
 
 
+def diagnose_constant_rotation_offset(
+    gt_aligned: trajectory.PoseTrajectory3D,
+    est_aligned: trajectory.PoseTrajectory3D,
+    *,
+    mean_deg_threshold: float = 150.0,
+    std_deg_threshold: float = 10.0,
+) -> dict | None:
+    """
+    Detect the common failure mode where translation aligns well but rotation ATE is ~180deg
+    with low variance, indicating a near-constant frame offset (e.g., exporting LiDAR/IMU
+    orientation while GT is base frame, or axis convention mismatch).
+    """
+    if len(gt_aligned.poses_se3) == 0 or len(est_aligned.poses_se3) == 0:
+        return None
+
+    angles = []
+    rel_rots = []
+    for i in range(min(len(gt_aligned.poses_se3), len(est_aligned.poses_se3))):
+        Rg = gt_aligned.poses_se3[i][:3, :3]
+        Re = est_aligned.poses_se3[i][:3, :3]
+        R_rel = Re.T @ Rg
+        rel_rots.append(R_rel)
+        angles.append(Rotation.from_matrix(R_rel).magnitude() * 180.0 / np.pi)
+
+    angles = np.asarray(angles, dtype=float)
+    mean_deg = float(np.mean(angles))
+    std_deg = float(np.std(angles))
+    if not (mean_deg >= mean_deg_threshold and std_deg <= std_deg_threshold):
+        return None
+
+    # Markley quaternion average for a stable "best" constant rotation estimate.
+    rots = Rotation.from_matrix(np.stack(rel_rots, axis=0))
+    quats = rots.as_quat()  # x,y,z,w
+    A = np.zeros((4, 4), dtype=float)
+    for q in quats:
+        q = q / (np.linalg.norm(q) + 1e-12)
+        A += np.outer(q, q)
+    A /= max(len(quats), 1)
+    vals, vecs = np.linalg.eigh(A)
+    q_avg = vecs[:, int(np.argmax(vals))]
+    rot_avg = Rotation.from_quat(q_avg)
+    angle_avg_deg = float(rot_avg.magnitude() * 180.0 / np.pi)
+    rotvec = rot_avg.as_rotvec().astype(float)
+    axis = (rotvec / (np.linalg.norm(rotvec) + 1e-12)).tolist()
+
+    return {
+        "kind": "constant_rotation_offset_suspected",
+        "mean_rel_angle_deg": mean_deg,
+        "std_rel_angle_deg": std_deg,
+        "avg_rel_angle_deg": angle_avg_deg,
+        "avg_rel_rotvec": rotvec.tolist(),
+        "avg_rel_axis": axis,
+        "note": (
+            "Likely frame mismatch (e.g., base vs IMU/LiDAR) or axis convention flip. "
+            "This is not necessarily a SLAM divergence; fix/export the intended frame."
+        ),
+    }
+
+
 def compute_rpe_multi_scale(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D):
     """
     Compute RPE at multiple scales: 1m, 5m, 10m.
@@ -713,7 +772,7 @@ def plot_cumulative_error(ate_metric, timestamps, output_path):
     print(f"  Cumulative error plot saved: {output_path}")
 
 
-def save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_path):
+def save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_path, eval_diagnostics: dict | None = None):
     """Save metrics in human-readable text format."""
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write("FL-SLAM Evaluation Metrics\n")
@@ -761,7 +820,20 @@ def save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_path
         f.write(f"    IQR:          {rot_dist['iqr']:.6f} deg\n")
         if 'normality_p_value' in rot_dist and rot_dist['normality_p_value'] is not None:
             f.write(f"    Normality:    {rot_dist['normality_test']} (p={rot_dist['normality_p_value']:.6f})\n")
-        
+
+        if eval_diagnostics:
+            f.write("\nEVALUATION DIAGNOSTICS\n")
+            f.write("-" * 40 + "\n")
+            f.write(f"  kind: {eval_diagnostics.get('kind', 'unknown')}\n")
+            f.write(f"  mean_rel_angle_deg: {eval_diagnostics.get('mean_rel_angle_deg', 0.0):.6f}\n")
+            f.write(f"  std_rel_angle_deg:  {eval_diagnostics.get('std_rel_angle_deg', 0.0):.6f}\n")
+            f.write(f"  avg_rel_angle_deg:  {eval_diagnostics.get('avg_rel_angle_deg', 0.0):.6f}\n")
+            f.write(f"  avg_rel_rotvec:     {eval_diagnostics.get('avg_rel_rotvec')}\n")
+            f.write(f"  avg_rel_axis:       {eval_diagnostics.get('avg_rel_axis')}\n")
+            note = eval_diagnostics.get("note")
+            if note:
+                f.write(f"  note: {note}\n")
+
         f.write("\n\nPER-AXIS ERRORS\n")
         f.write("-" * 40 + "\n")
         
@@ -933,7 +1005,7 @@ def save_metrics_csv(ate_trans, ate_rot, rpe_results, per_axis_data, output_path
     print(f"  Metrics (csv) saved: {output_path}")
 
 
-def save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_path):
+def save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_path, eval_diagnostics: dict | None = None):
     """Save all metrics to structured JSON format."""
     from datetime import datetime
     
@@ -941,7 +1013,8 @@ def save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_pat
     metrics_dict = {
         'metadata': {
             'timestamp': datetime.now().isoformat(),
-            'evaluation_tool': 'evaluate_slam.py'
+            'evaluation_tool': 'evaluate_slam.py',
+            'diagnostics': eval_diagnostics or None,
         },
         'ate': {
             'translation': {
@@ -1063,6 +1136,7 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     # Compute ATE (translation + rotation)
     print("\n4. Computing Absolute Trajectory Error (ATE)...")
     ate_trans, ate_rot, gt_aligned, est_aligned = compute_ate_full(gt_traj, est_traj)
+    eval_diag = diagnose_constant_rotation_offset(gt_aligned, est_aligned)
     
     ate_t_stats = ate_trans.get_all_statistics()
     print("   Translation ATE:")
@@ -1085,6 +1159,13 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     rot_percentiles = compute_percentiles(ate_rot.error)
     print(f"     P95:  {rot_percentiles['p95']:.4f} deg")
     print(f"     P99:  {rot_percentiles['p99']:.4f} deg")
+
+    if eval_diag:
+        print("\n   WARNING: Rotation looks like a near-constant frame offset:")
+        print(f"     mean_rel_angle: {eval_diag['mean_rel_angle_deg']:.2f} deg (std: {eval_diag['std_rel_angle_deg']:.2f})")
+        print(f"     avg_rel_angle:  {eval_diag['avg_rel_angle_deg']:.2f} deg")
+        print(f"     avg_rel_rotvec: {eval_diag['avg_rel_rotvec']}")
+        print(f"     note: {eval_diag['note']}")
     
     # Compute per-axis errors
     print("\n5. Computing per-axis errors...")
@@ -1122,9 +1203,9 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     
     # Save metrics
     print("\n8. Saving metrics...")
-    save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.txt")
+    save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.txt", eval_diagnostics=eval_diag)
     save_metrics_csv(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.csv")
-    save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.json")
+    save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.json", eval_diagnostics=eval_diag)
     
     print("\n" + "=" * 60)
     print("Evaluation complete!")

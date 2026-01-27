@@ -4,17 +4,81 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-27: Fix Critical T_base_imu Mismatch Causing Yaw Drift
+
+### Summary
+
+- **CRITICAL FIX**: Resolved `T_base_imu` rotation mismatch between `gc_unified.yaml` and `gc_rosbag.launch.py`. Launch file was using wrong rotation `[1.475086, -0.813463, -0.957187]` (111.01°) instead of correct `[0.169063, -2.692032, 0.0]` (154.5°). This wrong rotation was being applied to gyro measurements, causing constant yaw drift that cannot be corrected by gyro alone.
+- **Root cause analysis**: Created `docs/YAW_DRIFT_ROOT_CAUSE_ANALYSIS.md` documenting how wrong `T_base_imu` causes rotated angular velocity → constant yaw drift, and how odom limitations prevent correction.
+- **Frame conventions verified**: Created `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` as canonical reference for all coordinate frame and quaternion conventions throughout the codebase.
+
+### Root Cause
+
+The launch file parameters override config file parameters. The launch file had an incorrect `T_base_imu` rotation (111.01° instead of 154.5°), which was being applied to gyro measurements via `gyro_base = R_base_imu @ gyro_imu`. This rotated angular velocity into the wrong frame, causing constant yaw drift that accumulates over time. Since gyro only measures relative yaw change (not absolute yaw), this drift cannot be corrected by gyro alone. Odom can help, but only if:
+1. Odom frame is correctly defined
+2. Yaw covariance is reasonable
+3. Odom is in the same base frame we're estimating
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`: Fixed `T_base_imu` to match `gc_unified.yaml`: `[0.169063, -2.692032, 0.0]` (154.5°).
+- `docs/YAW_DRIFT_ROOT_CAUSE_ANALYSIS.md`: Comprehensive analysis of yaw drift root causes (gyro rotation error, odom limitations, frame mismatches).
+- `docs/FRAME_AND_QUATERNION_CONVENTIONS.md`: Canonical reference for all frame and quaternion conventions.
+
+## 2026-01-27: Fix Rosette Pattern Accumulation Window + IMU Extrinsic Rotation
+
+### Summary
+
+- **Fixed Livox MID-360 rosette pattern accumulation window**: When all `time_offset = 0` (non-repetitive pattern), scan bounds now use `timebase_sec` (accumulation start) to `header.stamp` (publish time) instead of treating scan as instantaneous. This captures the ~100ms accumulation window for proper deskew timing.
+- **Fixed critical IMU misalignment** by updating `T_base_imu` rotation from `[-0.015586, 0.489293, 0.0]` (~28°) to `[0.169063, -2.692032, 0.0]` (154.5°) based on actual gravity direction analysis from rosbag data.
+- **Verified LiDAR frame convention**: Confirmed Z-up convention via ground plane analysis; `T_base_lidar` rotation `[0, 0, 0]` is correct.
+- **Created comprehensive coordinate frame diagnostic tool** (`tools/diagnose_coordinate_frames.py`) to verify frame conventions from first principles (no guessing).
+
+### Root Cause
+
+Previous IMU rotation estimate (~28°) was incorrect. Actual IMU gravity direction in sensor frame is `[-0.429, -0.027, 0.903]` (normalized), which is 154.5° misaligned from expected `[0, 0, -1]` in base_footprint (Z-up). This large misalignment was causing severe rotation errors in SLAM estimates.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`: Fixed scan bounds computation for rosette pattern. When all timestamps are identical (time_offset=0), use `timebase_sec` as `scan_start_time` and `header.stamp` as `scan_end_time` to capture the accumulation window (~100ms for 10Hz scans).
+- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`: Updated `T_base_imu` rotation to `[0.169063, -2.692032, 0.0]` from gravity analysis.
+- `tools/diagnose_coordinate_frames.py`: New diagnostic tool that analyzes raw rosbag data to determine:
+  - LiDAR Z-convention (Z-up vs Z-down) from ground plane normal
+  - IMU gravity direction vs expected base frame
+  - Odom covariance ordering (ROS vs GC convention)
+- `tools/DIAGNOSTIC_TOOLS.md`: Documentation of all available diagnostic tools.
+
+## 2026-01-27: Stabilize Gyro Σg IW Update + Fix Pose6 Conditioning Reporting
+
+### Summary
+
+- **Fixed Σg IW blow-ups** by redefining `omega_avg` as the weighted mean of debiased gyro measurements (rad/s), instead of `so3_log(ΔR)/dt` which is only valid in the small-angle limit and was destabilizing measurement-noise updates.
+- **Removed a physically-implausible omega gate** (`||omega_avg|| > 100 rad/s`) to preserve the “no heuristics / no gating” invariant; we now fail-fast only on non-finite values.
+- **Fixed diagnostics export + dashboard conditioning**: `conditioning_pose6` is now saved in `diagnostics.npz`, and the Plotly dashboard prefers pose6 conditioning over the full 22×22 condition number.
+- **Reverted an unverified LiDAR π-about-X rotation tweak** in no-TF extrinsics; keep `T_base_lidar` rotation identity unless a frame convention correction is confirmed.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py`: compute `omega_avg` from gyro measurements; remove `||omega_avg||` heuristic; pass masked IMU weights into Σg/Σa IW suffstats.
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/diagnostics.py`: include `conditioning_pose6` in NPZ save/load.
+- `tools/slam_dashboard.py`: prefer `conditioning_pose6` (if present) for the `log10 κ_pose6` plot; keep full conditioning available as `conditioning_number`.
+- `fl_ws/src/fl_slam_poc/config/gc_unified.yaml`: revert `T_base_lidar` rotation to identity.
+- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`: revert `T_base_lidar` rotation to identity.
+
 ## 2026-01-26: Fix Pose6 Conditioning Robustness + Fail-Fast Run Script
 
 ### Summary
 
 - **Fixed early-run crashes in GC backend** caused by `np.linalg.eigvalsh()` nonconvergence during the pose6 conditioning estimate used for fusion trust scaling.
 - **Hardened the evaluation runner** to fail fast when `gc_backend_node` dies, avoiding misleading “SLAM complete” reports with only a handful of poses.
+- **Improved diagnostics reporting** so Plotly and evaluation outputs surface pose6 conditioning and likely frame-offset rotation failures.
 
 ### Changes
 
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py`: make the pose6 conditioning computation robust to non-finite matrices and eigen solver failures (fallback to SVD; final fallback to `eps_psd`).
 - `tools/run_and_evaluate_gc.sh`: detect backend death/pipeline errors from logs and abort; enforce a minimum pose count before evaluation.
+- `tools/slam_dashboard.py`: add pose6 conditioning + rotation-binding plots and display fields.
+- `tools/evaluate_slam.py`: emit an explicit warning/diagnostic when rotation ATE indicates a near-constant frame offset (~180°).
 
 ## 2026-01-26: LiDAR Evidence Fix — Apply SE(3) Residual (Not Absolute Pose)
 

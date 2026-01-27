@@ -36,7 +36,7 @@ class OdomEvidenceResult:
 def odom_quadratic_evidence(
     belief_pred_pose: jnp.ndarray,   # (6,) [trans, rotvec]
     odom_pose: jnp.ndarray,          # (6,) [trans, rotvec]
-    odom_cov_se3: jnp.ndarray,       # (6,6) covariance in [trans, rotvec] coords
+    odom_cov_se3: jnp.ndarray,       # (6,6) covariance in ROS [x,y,z,roll,pitch,yaw] order
     eps_psd: float = constants.GC_EPS_PSD,
     eps_lift: float = constants.GC_EPS_LIFT,
     chart_id: str = constants.GC_CHART_ID,
@@ -52,10 +52,13 @@ def odom_quadratic_evidence(
     Then embed into the 22D chart pose slice ([rot, trans]) and build:
       L = Σ^{-1}
       h = L * delta_z_star
+
+    CRITICAL: ROS odom covariance is in [x,y,z,roll,pitch,yaw] = [trans,rot] order,
+    but GC tangent is in [rot,trans] order. We reorder here.
     """
     belief_pred_pose = jnp.asarray(belief_pred_pose, dtype=jnp.float64).reshape(-1)
     odom_pose = jnp.asarray(odom_pose, dtype=jnp.float64).reshape(-1)
-    cov = jnp.asarray(odom_cov_se3, dtype=jnp.float64)
+    cov_ros = jnp.asarray(odom_cov_se3, dtype=jnp.float64)
 
     # Pose error as a twist in se3 ordering
     T_err = se3_jax.se3_relative(odom_pose, belief_pred_pose)  # belief^{-1} ∘ odom
@@ -65,6 +68,13 @@ def odom_quadratic_evidence(
     delta_pose_z = pose_se3_to_z_delta(xi_err)  # [rot, trans]
     delta_z_star = jnp.zeros((D_Z,), dtype=jnp.float64)
     delta_z_star = delta_z_star.at[0:6].set(delta_pose_z)
+
+    # Permute covariance from ROS [trans,rot] to GC [rot,trans] ordering.
+    # ROS pose covariance: [x, y, z, roll, pitch, yaw] = [trans(0:3), rot(3:6)]
+    # GC pose ordering:    [rx, ry, rz, tx, ty, tz]    = [rot(0:3), trans(3:6)]
+    # Permutation: GC[0:3] <- ROS[3:6] (rot), GC[3:6] <- ROS[0:3] (trans)
+    perm = jnp.array([3, 4, 5, 0, 1, 2], dtype=jnp.int32)
+    cov = cov_ros[perm, :][:, perm]
 
     cov_psd = domain_projection_psd(cov, eps_psd).M_psd
     L_pose, lift_strength = spd_cholesky_inverse_lifted(cov_psd, eps_lift)

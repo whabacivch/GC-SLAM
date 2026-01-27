@@ -17,6 +17,7 @@ import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 
 import tf2_ros
 from geometry_msgs.msg import PoseStamped, TransformStamped
@@ -335,8 +336,11 @@ class GoldenChildBackend(Node):
         self.first_odom_pose = None  # (6,) SE3 pose [trans, rotvec]
         
         # IMU buffer for high-rate prediction
+        # CRITICAL: Must be large enough to cover scan-to-scan intervals.
+        # At 200Hz IMU and up to 20s scan intervals, need ~4000 samples.
+        # Previous value of 200 only covered 1s, causing dt_int ≈ 0 for most scans!
         self.imu_buffer: List[Tuple[float, jnp.ndarray, jnp.ndarray]] = []
-        self.max_imu_buffer = 200
+        self.max_imu_buffer = 4000  # Covers ~20s at 200Hz IMU rate
         
         # Tracking
         self.imu_count = 0
@@ -363,7 +367,7 @@ class GoldenChildBackend(Node):
         qos_sensor = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=100,  # Increased from 10 for better IMU burst handling
             durability=DurabilityPolicy.VOLATILE,
         )
         
@@ -378,14 +382,23 @@ class GoldenChildBackend(Node):
         odom_topic = str(self.get_parameter("odom_topic").value)
         imu_topic = str(self.get_parameter("imu_topic").value)
         
+        # Separate callback groups so IMU/odom can be buffered while lidar pipeline runs.
+        # Without this, single-threaded or MutuallyExclusive groups would block IMU during
+        # the ~1-2s pipeline processing, causing 200Hz IMU messages to overflow the queue.
+        self.cb_group_lidar = MutuallyExclusiveCallbackGroup()
+        self.cb_group_sensors = ReentrantCallbackGroup()  # IMU + odom can run concurrently
+        
         self.sub_lidar = self.create_subscription(
-            PointCloud2, lidar_topic, self.on_lidar, qos_sensor
+            PointCloud2, lidar_topic, self.on_lidar, qos_sensor,
+            callback_group=self.cb_group_lidar
         )
         self.sub_odom = self.create_subscription(
-            Odometry, odom_topic, self.on_odom, qos_reliable
+            Odometry, odom_topic, self.on_odom, qos_reliable,
+            callback_group=self.cb_group_sensors
         )
         self.sub_imu = self.create_subscription(
-            Imu, imu_topic, self.on_imu, qos_sensor
+            Imu, imu_topic, self.on_imu, qos_sensor,
+            callback_group=self.cb_group_sensors
         )
         
         self.get_logger().info(f"LiDAR: {lidar_topic} (PIPELINE ACTIVE)")
@@ -585,10 +598,27 @@ class GoldenChildBackend(Node):
         # This must be captured BEFORE updating self.last_scan_stamp.
         t_prev_scan = float(self.last_scan_stamp) if self.last_scan_stamp > 0.0 else 0.0
         
-        # Derive scan bounds from per-point timestamps for deskew (within-scan only)
+        # Derive scan bounds for deskew (within-scan only).
+        # CRITICAL: For Livox MID-360 rosette pattern (non-repetitive, densifies over time):
+        # - timebase_sec = start of accumulation window
+        # - header.stamp = end of accumulation window (when message published)
+        # - All time_offset = 0 (no per-point timestamps available)
+        # So we MUST use timebase_sec as scan_start_time and header.stamp as scan_end_time
+        # to capture the accumulation window, even though we can't deskew individual points.
         stamp_j = jnp.array(stamp_sec, dtype=jnp.float64)
-        scan_start_time = float(jnp.minimum(stamp_j, jnp.min(timestamps)))
-        scan_end_time = float(jnp.maximum(stamp_j, jnp.max(timestamps)))
+        timestamps_min = float(jnp.min(timestamps))
+        timestamps_max = float(jnp.max(timestamps))
+        
+        # If all timestamps are the same (rosette pattern with time_offset=0),
+        # use timebase_sec (from timestamps) as scan_start and header.stamp as scan_end.
+        if jnp.abs(timestamps_max - timestamps_min) < 1e-9:  # All timestamps identical
+            # Rosette pattern: use accumulation window
+            scan_start_time = timestamps_min  # = timebase_sec
+            scan_end_time = float(stamp_j)    # = header.stamp
+        else:
+            # Per-point timestamps available: use actual min/max
+            scan_start_time = float(jnp.minimum(stamp_j, timestamps_min))
+            scan_end_time = float(jnp.maximum(stamp_j, timestamps_max))
 
         # Compute dt since last scan (using t_scan, not scan_end_time)
         dt_raw = (
@@ -958,8 +988,15 @@ def main():
     node = GoldenChildBackend()
     node.get_logger().info("Backend node created, entering spin loop...")
     
+    # Use MultiThreadedExecutor to allow IMU callbacks to run while lidar pipeline processes.
+    # With single-threaded spin, IMU callbacks can't run during the ~1-2s pipeline processing,
+    # causing 200Hz IMU messages to overflow the depth=10 queue.
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

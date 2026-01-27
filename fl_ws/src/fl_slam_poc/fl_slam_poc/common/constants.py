@@ -3,6 +3,33 @@ Golden Child SLAM v2 constants only.
 
 Legacy constants have been moved to:
   archive/legacy_common/constants_legacy.py
+
+=============================================================================
+CONVENTION QUICK REFERENCE (see docs/FRAME_AND_QUATERNION_CONVENTIONS.md)
+=============================================================================
+
+STATE VECTOR (22D):
+  [rot(0:3), trans(3:6), vel(6:9), bg(9:12), ba(12:15), dt(15:16), ex(16:22)]
+  Note: GC state uses [rot, trans] ordering (opposite of se3_jax [trans, rot])
+
+SE(3) POSES:
+  Internal 6D: [trans(3), rotvec(3)] = [x, y, z, rx, ry, rz]
+  Use pose_se3_to_z_delta() / pose_z_to_se3_delta() for conversion
+
+GRAVITY:
+  World: Z-UP convention, gravity points DOWN = [0, 0, -9.81] m/s²
+  Accelerometer measures reaction to gravity (pointing UP when level)
+  Expected accel direction (mu0) = R_body^T @ [0, 0, +1]
+
+IMU UNITS:
+  Livox raw: acceleration in g's (1g ≈ 9.81 m/s²)
+  Internal: all accelerations in m/s² (scaled by GC_IMU_ACCEL_SCALE)
+  Gyro: angular velocity in rad/s
+
+EXTRINSICS:
+  T_base_sensor = [tx, ty, tz, rx, ry, rz] where rotation is rotvec (radians)
+  Transform: p_base = R_base_sensor @ p_sensor + t_base_sensor
+=============================================================================
 """
 
 # =============================================================================

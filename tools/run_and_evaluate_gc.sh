@@ -462,11 +462,11 @@ fi
 
 echo ""
 echo -e "  ${BOLD}Outputs:${NC}"
-ls "$RESULTS_DIR"/*.png 2>/dev/null | while read f; do
-    echo -e "    ${GREEN}✓${NC} $(basename $f)"
+ls "$RESULTS_DIR"/*.png 2>/dev/null | while IFS= read -r f; do
+    echo -e "    ${GREEN}✓${NC} $(basename "$f")"
 done
-ls "$RESULTS_DIR"/*.txt "$RESULTS_DIR"/*.csv 2>/dev/null | while read f; do
-    echo -e "    ${GREEN}✓${NC} $(basename $f)"
+ls "$RESULTS_DIR"/*.txt "$RESULTS_DIR"/*.csv 2>/dev/null | while IFS= read -r f; do
+    echo -e "    ${GREEN}✓${NC} $(basename "$f")"
 done
 
 # ============================================================================
@@ -529,5 +529,20 @@ if [ -f "$RESULTS_DIR/diagnostics.npz" ]; then
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}Launching Diagnostics Dashboard...${NC}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/slam_dashboard.py" "$RESULTS_DIR/diagnostics.npz"
+    DASHBOARD_OUT="$RESULTS_DIR/dashboard.html"
+    env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/slam_dashboard.py" \
+        "$RESULTS_DIR/diagnostics.npz" \
+        --output "$DASHBOARD_OUT"
+    print_ok "Dashboard written: ${CYAN}$DASHBOARD_OUT${NC}"
+    
+    # Open dashboard in browser
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$DASHBOARD_OUT" 2>/dev/null &
+        print_ok "Dashboard opened in browser"
+    elif [ -n "$BROWSER" ]; then
+        "$BROWSER" "$DASHBOARD_OUT" 2>/dev/null &
+        print_ok "Dashboard opened in browser"
+    else
+        print_warn "Could not auto-open browser. Open manually: ${CYAN}$DASHBOARD_OUT${NC}"
+    fi
 fi

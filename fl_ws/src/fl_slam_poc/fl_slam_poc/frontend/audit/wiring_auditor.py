@@ -174,8 +174,8 @@ class WiringAuditorNode(Node):
             "╠══════════════════════════════════════════════════════════════════════╣",
             "║  PROCESSED (received by backend):                                    ║",
             f"║    LiDAR scans:  {s.scan_count:>6}  → pipeline runs: {s.pipeline_runs:>6}                 ║",
-            f"║    Odom msgs:    {s.odom_count:>6}  [buffered, NOT FUSED into belief]         ║",
-            f"║    IMU msgs:     {s.imu_count:>6}  [buffered, NOT FUSED into belief]         ║",
+            f"║    Odom msgs:    {s.odom_count:>6}  [FUSED via odom_evidence]                 ║",
+            f"║    IMU msgs:     {s.imu_count:>6}  [FUSED via imu_evidence + gyro_evidence] ║",
             "╠══════════════════════════════════════════════════════════════════════╣",
             "║  DEAD-ENDED (received but not processed):                            ║",
         ]
@@ -194,8 +194,7 @@ class WiringAuditorNode(Node):
 
         # Add warnings/notes
         if s.odom_count > 0 or s.imu_count > 0:
-            lines.append("║    ⚠ Odom/IMU subscribed but NOT YET FUSED into belief             ║")
-            lines.append("║      (see docs/Fusion_issues.md for status)                        ║")
+            lines.append("║    ✓ Odom/IMU fused into belief via evidence operators              ║")
         
         if s.pipeline_runs == 0:
             lines.append("║    ⚠ NO PIPELINE RUNS - check LiDAR topic wiring!                  ║")
@@ -224,8 +223,8 @@ class WiringAuditorNode(Node):
                 "pipeline_runs": self._state.pipeline_runs,
                 "odom_msgs": self._state.odom_count,
                 "imu_msgs": self._state.imu_count,
-                "odom_fused": False,  # Currently not fused
-                "imu_fused": False,   # Currently not fused
+                "odom_fused": True,   # Fused via odom_evidence operator
+                "imu_fused": True,    # Fused via imu_evidence + imu_gyro_evidence operators
             },
             "dead_ended": self._state.dead_end_counts,
             "map_bins_active": self._state.map_bins_active,
