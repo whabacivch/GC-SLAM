@@ -51,7 +51,7 @@ digraph G {
         BAG_AVIA_IMU [label="/livox/avia/imu", 
                       fillcolor="#2a0e0e", style="filled,rounded,dashed", 
                       color="#ff4444", fontcolor="#ffcccc"];
-        BAG_ODOM [label="/odom\nOdometry\n(1 Hz)", 
+        BAG_ODOM [label="/odom\nOdometry\n(20 Hz)", 
                  fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];
         BAG_MID_LIDAR [label="/livox/mid360/lidar\nCustomMsg\n(10 Hz)", 
                        fillcolor="#0f3d0f", color="#00ff00", fontcolor="#ffffff"];

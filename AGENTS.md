@@ -39,7 +39,13 @@ The current pipeline is LiDAR-only with fixed noise parameters. The target endst
 - Golden Child strict interface/spec anchor: `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`
 - Self-adaptive constraints: `docs/Self-Adaptive Systems Guide.md`
 - Math reference: `docs/Comprehensive Information Geometry.md`
+- **Build-by-construction anchors** (conventions and pipeline written first; implementation and tracing must align):
+  - Frame and quaternion conventions: `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` (single source of truth for frames, quat order, SE(3) semantics).
+  - Pipeline and data flow: `docs/IMU_BELIEF_MAP_AND_FUSION.md` (rosbag → frontend → backend, 14-step pipeline, evidence and fusion).
 - Development log (required): `CHANGELOG.md`
+
+## Build by construction
+Conventions and pipeline docs are written **before** or alongside code so behavior is knowable by construction. When implementing or tracing: align with the canonical docs above; do not improvise frame semantics, pipeline order, or evidence flow. Use `FRAME_AND_QUATERNION_CONVENTIONS.md` for frames/quat/SE(3); use `IMU_BELIEF_MAP_AND_FUSION.md` (and related dataflow docs) for topic flow and pipeline steps. When in doubt, cite the doc and the code location that satisfies it.
 
 ## Quickstart and Validation
 - Workspace: `fl_ws/` (ROS 2), package: `fl_ws/src/fl_slam_poc/`, tools: `tools/`
@@ -96,8 +102,25 @@ The root failure mode to prevent is: *multiple math paths silently coexist*, mak
 - Compute budgeting is allowed only via explicit approximation operators; any mass drop must be preserved by renormalization or explicitly logged.
 - Expected vs realized benefit is logged only in internal objectives (divergence/ELBO/etc.), never external metrics (ATE/RPE).
 
+## Rigor and validation (mandatory)
+
+A single convention slip, frame mix-up, or ordering error can invalidate the whole stack. Rigor is non-negotiable.
+
+**Critical: docs can be wrong.** The code is what actually runs. We must always identify **what the code is ACTUALLY doing** vs **what we thought or designed** (the docs). The docs are intended design; the code is observed behavior. When they disagree, **report first, then fix**: state the mismatch clearly (code does X at file:line; doc says Y) and only then propose or apply a fix (fix code or update doc). Do not fix without reporting the mismatch. Never assume the doc is correct without verifying against the code.
+
+**When implementing or reviewing any change:**
+
+1. **Establish actual behavior from the code** — Read the code to determine what it does (frame direction, quat order, block indices, pipeline order, evidence terms). Cite file:line. Then compare to the docs. If they match, say so. If they disagree: **report first** — "Code does X at file:line; doc says Y" — then propose or apply a fix (fix code or update doc). Do not fix without reporting.
+2. **Explicit convention checks** — For anything touching frames, transforms, or state layout: verify in the code: frame direction (who is parent/child), quat order (xyzw vs wxyz), block indices (GC state order), which topic/callback feeds which pipeline step. One wrong index or transposed rotation is a silent bug; the code is the source of truth for what is currently running.
+3. **Flag mismatches and ambiguities** — If code and doc disagree, or something is underspecified, **report first**: "Code does X at file:line; doc says Y." Do not paper over with "probably" or "usually". Only after reporting, propose or apply a fix (fix code or update doc). Do not fix without reporting.
+4. **TF and extrinsics** — We do not rely on `/tf` at runtime; extrinsics are parameters. When checking or adding transform usage: read the code to see what it actually does; compare to `FRAME_AND_QUATERNION_CONVENTIONS.md`; if they differ, flag and fix code or update doc.
+5. **Pipeline and evidence flow** — Trace the data path in the code (pipeline, evidence sum, block layout). Compare to the pipeline doc. Report actual vs documented; reconcile by fixing code or updating doc.
+
+**Principle:** We maintain extremely high rigor so that a small detail or convention never throws the whole thing off. **Actual behavior comes from the code; docs are design.** Always identify actual vs intended; when they diverge, **report the mismatch first**, then fix code or update doc. Prefer reporting prior to fixing.
+
 ## Review Checklist (Use Before Merging Changes)
 - Does the change preserve the non-negotiable invariants?
+- **Rigor:** Have we established what the code actually does (frames, quat order, state block order, pipeline step order, evidence terms) and compared to the docs? Any code–doc mismatch flagged and resolved (fix code or update doc)?
 - Did the change introduce any new backend/operator variant or fallback path? If yes, remove it or move it under `archive/` and enforce explicit selection + fail-fast.
 - Did the change introduce any approximation? If yes, is Frobenius correction applied and logged?
 - Is evidence fusion performed by barycenters (closed-form when available)?

@@ -504,20 +504,35 @@ class GoldenChildBackend(Node):
         ori = msg.pose.pose.orientation
         
         quat = [ori.x, ori.y, ori.z, ori.w]
-        R = Rotation.from_quat(quat)
-        rotvec = R.as_rotvec()
-        
+        R_parent_child = Rotation.from_quat(quat)
+        rotvec = R_parent_child.as_rotvec()
+
         # Convert to SE3 pose [trans, rotvec]
+        #
+        # IMPORTANT (frame convention, by construction):
+        # - msg.header.frame_id is the parent frame (e.g., odom_combined)
+        # - msg.child_frame_id is the child frame (e.g., base_footprint)
+        # - ROS Odometry pose encodes T_{parent<-child} in the usual rigid-transform form:
+        #       p_parent = R_parent_child * p_child + t_parent_child
+        #   This matches se3_jax/se3_compose convention (t_out = t_a + R_a @ t_b).
+        #
+        # Therefore: DO NOT invert here. Downstream code treats odom_pose as a pose in the
+        # parent/world frame of the body, consistent with LiDAR/Wahba and IMU operators.
         odom_pose_absolute = se3_from_rotvec_trans(
             jnp.array(rotvec, dtype=jnp.float64),
-            jnp.array([pos.x, pos.y, pos.z], dtype=jnp.float64)
+            jnp.array([pos.x, pos.y, pos.z], dtype=jnp.float64),
         )
         
         # Store first odom pose as reference (makes it effectively at origin)
         if self.first_odom_pose is None:
             self.first_odom_pose = odom_pose_absolute
+            # One-shot log to audit frame semantics and yaw sign.
+            yaw_deg = float(R_parent_child.as_euler("xyz", degrees=True)[2])
             self.get_logger().info(
-                f"First odom pose stored as reference: trans=({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f})"
+                "First odom pose stored as reference: "
+                f"frame_id='{msg.header.frame_id}' child_frame_id='{msg.child_frame_id}' "
+                f"trans=({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}) yaw={yaw_deg:+.2f}deg "
+                "(interpreting pose as T_parent<-child; no inversion)"
             )
         
         # Transform odom to be relative to first odom pose

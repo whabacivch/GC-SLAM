@@ -4,6 +4,72 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-28: Critical Fix - Wahba Sign Flip (First Scan Frame Mismatch)
+
+### Summary
+
+- **CRITICAL BUG FIX**: Resolved systematic Wahba sign flip where LiDAR rotation estimates had opposite sign from gyro/odom on 98.7% of scans.
+- Root cause: First scan map initialization used END-of-scan pose (`belief_recomposed`) to transform directions, but scan directions were in START-of-scan body frame (from deskew).
+- This introduced a rotation offset equal to within-scan motion that corrupted all subsequent Wahba matching.
+
+### Root Cause Analysis
+
+The pipeline has these steps for first scan:
+1. Deskew brings points to START-of-scan body frame
+2. Binning computes `scan_bins.s_dir` in START-of-scan frame
+3. Map update was using `belief_recomposed` (END-of-scan pose) to transform directions
+4. This mismatch caused rotation offset = within-scan motion
+
+Example from diagnostics:
+- Scan 1: gyro +16.5°, odom +85°, belief_recomposed ~+49°
+- Scan directions at START (≈identity), but map stored them rotated by END (+49°)
+- Scan 2+: Wahba matched against corrupted map → opposite sign
+
+### Fix
+
+Changed `pipeline.py` line ~970 from:
+```python
+pose_for_map = belief_recomposed.mean_world_pose(...)  # END-of-scan (WRONG)
+```
+to:
+```python
+pose_for_map = belief_pred.mean_world_pose(...)  # START-of-scan (CORRECT)
+```
+
+### Diagnostic Tools Created
+
+- `tools/diagnose_wahba_sign.py`: Unit test for Wahba SVD sign convention
+- `tools/diagnose_yaw_mismatch.py`: Runtime analysis of gyro/odom/wahba sign agreement
+- `tools/trace_wahba_runtime.py`: Trace Wahba inputs with realistic scenario
+
+### Key Insight
+
+**Deskewed points are in START-of-scan body frame. Map update must use START-of-scan pose, not END-of-scan pose.**
+
+## 2026-01-27: IMU, Belief, Map, and Fusion Clarification Doc
+
+### Summary
+
+- Added and expanded `docs/IMU_BELIEF_MAP_AND_FUSION.md` as the **pipeline reference**: end-to-end flow from raw rosbag topics through frontend (gc_sensor_hub) and backend (gc_backend_node) to outputs; pipeline step reference (1–14) with inputs/outputs and where each topic feeds in; sensor roles (IMU/gyro/accel/odom/LiDAR); frontend/backend topic-by-topic handling (LiDAR, IMU, odom); evidence types (Gaussians vs vMF); fusion (excitation scaling, α, InfoFusionAdditive); belief/bins/map and how IMU fits in.
+
+### Changes
+
+- `docs/IMU_BELIEF_MAP_AND_FUSION.md`: New/expanded doc: (1) From Rosbag to Output (raw topics, gc_sensor_hub canonical topics, backend subscriptions and outputs); (2) Pipeline step reference table (steps 1–14 + excitation); (3) Sensor breakdown; (4) Frontend and backend topic-by-topic (LiDAR converter + T_base_lidar, IMU normalizer + backend g→m/s² and R_base_imu, odom normalizer + first-odom reference); (5) Evidence types (Gaussian vs vMF); (6) Fusion; (7) Belief, bins, map; (8) Summary table; (9) References.
+
+## 2026-01-28: Empirical Frame/Unit Convention Validation (Dynamic01_ros2)
+
+### Summary
+
+- Added deterministic, bag-based validation outputs to empirically confirm frame semantics, accel units, and odom twist consistency for the Dynamic01_ros2 dataset.
+- Updated the canonical conventions doc to clearly distinguish **confirmed** vs **assumed** vs **to-confirm** items, and promoted many items to **CONFIRMED (Dynamic01_ros2)** with audit artifacts.
+- Fixed `tools/diagnose_coordinate_frames.py` IMU section to use the correct accelerometer *specific force* convention (expected +Z when stationary in a Z-up base), avoiding a misleading ~180° interpretation.
+
+### Changes
+
+- `tools/validate_frame_conventions.py`: New validation script that produces `results/frame_validation_dynamic01.json`.
+- `docs/FRAME_AND_QUATERNION_CONVENTIONS.md`: Added status labels and an "Empirical Validation Artifacts" section; promoted items confirmed by the report.
+- `tools/diagnose_coordinate_frames.py`: Corrected accelerometer convention and refreshed `results/frame_diagnose_dynamic01.txt` usage.
+
 ## 2026-01-27: Yaw Increment Invariant Test for Sign Mismatch Diagnosis
 
 ### Summary
@@ -23,6 +89,18 @@ This file tracks all significant changes, design decisions, and implementation m
 This diagnostic helps pinpoint the root cause of yaw sign mismatches that cause trajectory spiraling:
 - **Gyro ↔ Wahba mismatch**: Indicates sign error in gyro processing (A: IMU→base rotation, B: axis sign flip, C: left/right convention)
 - **Odom ↔ Wahba mismatch**: Indicates sign error in LiDAR extrinsic (D: T_base_lidar rotation)
+
+## 2026-01-27: Enforce Odom Pose Convention (Body→World)
+
+### Summary
+
+- Reverted the prior odom inversion: ROS Odometry pose already encodes `T_{parent<-child}` (e.g., `T_{odom<-base}`),
+  which matches the SE(3) composition convention used by `se3_compose` and the rest of the pipeline.
+- Added explicit frame-convention logging so the runtime records the chosen interpretation.
+
+### Changes
+
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`: Treat `/odom` pose as `T_{parent<-child}` (no inversion); log `frame_id`, `child_frame_id`, and initial yaw for audit.
 
 ## 2026-01-27: IMU Propagation Diagnostics + Gravity Scale Hook
 

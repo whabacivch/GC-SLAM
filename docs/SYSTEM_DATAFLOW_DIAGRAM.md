@@ -66,13 +66,13 @@ cd docs && dot -Tsvg system_dataflow.dot -o system_dataflow.svg
    - Frame: `odom_combined` → `base_footprint`
 
 2. **`/livox/mid360/lidar`** → `livox_converter` → **`/gc/sensors/lidar_points`** → Backend
-   - Status: ✅ **FUSED via `LidarQuadraticEvidence`** (15-step pipeline)
+   - Status: ✅ **FUSED via `LidarQuadraticEvidence`** (14-step pipeline)
    - Message: `livox_ros_driver2/CustomMsg` → `sensor_msgs/PointCloud2`
    - Frame: `livox_frame`
 
 3. **`/livox/mid360/imu`** → `imu_normalizer` → **`/gc/sensors/imu`** → Backend
-   - Status: ✅ **FUSED via `ImuVMFGravityEvidence` + `ImuGyroRotationEvidence`**
-   - Used for: Deskew (IMU preintegration), gravity direction evidence, rotation evidence
+   - Status: ✅ **FUSED via `ImuVMFGravityEvidence` + `ImuGyroRotationEvidence` + `imu_preintegration_factor`**
+   - Used for: Deskew (IMU preintegration), gravity direction evidence, gyro rotation evidence, preintegration (velocity/position) evidence
    - Message: `sensor_msgs/Imu`
    - Frame: `livox_frame`
 
@@ -102,7 +102,7 @@ These topics are present in the rosbag but are **explicitly not consumed** by th
 
 1. **`/gc/state`** - `nav_msgs/Odometry`
    - Posterior pose estimate with 6×6 covariance
-   - Frame: `odom_frame` → `base_link`
+   - Frame: `header.frame_id` = odom_frame (param default `"odom"`), `child_frame_id` = base_frame (param default `"base_link"`)
 
 2. **`/gc/trajectory`** - `nav_msgs/Path`
    - Trajectory path built from state estimates
@@ -132,7 +132,7 @@ These topics are present in the rosbag but are **explicitly not consumed** by th
 
 ### gc_backend_node
 - Subscribes **ONLY** to canonical topics (`/gc/sensors/*`)
-- Runs 15-step fixed-cost pipeline per scan
+- Runs 14-step fixed-cost pipeline per scan (LiDAR-triggered; IMU and odom consumed per scan)
 - Manages state: BeliefGaussianInfo, MapStats, Hypotheses
 - Publishes state, trajectory, status, and runtime manifest
 
@@ -149,7 +149,7 @@ These topics are present in the rosbag but are **explicitly not consumed** by th
 - **IMU**: `ImuVMFGravityEvidence` (vMF Laplace on rotation) + `ImuGyroRotationEvidence` (Gaussian SO(3))
 - **Odom**: `OdomQuadraticEvidence` (Gaussian SE(3) pose factor)
 
-The evidence terms are combined additively: `L_evidence = L_lidar + L_odom + L_imu + L_gyro`
+The evidence terms are combined additively: `L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint` (and same for h).
 
 ✅ **Dead-end topics are explicitly tracked** for accountability - no data is silently ignored.
 
@@ -164,7 +164,8 @@ Canonical topic mappings are configured in:
 ## References
 
 - **Topic usage**: `docs/BAG_TOPICS_AND_USAGE.md`
-- **Dataflow details**: `docs/DATAFLOW_AND_SELF_ADAPTIVE_COMPLIANCE_2026-01-23.md`
-- **Wiring audit**: `AUDIT_WIRING_REPORT.md`
-- **Fusion status**: All sensors (LiDAR + IMU + Odom) are fused. (Historical notes: `archive/docs/Fusion_issues.md`)
+- **Pipeline reference** (raw topics → frontend → backend → fusion): `docs/IMU_BELIEF_MAP_AND_FUSION.md`
+- **Sigma_g and fusion**: `docs/SIGMA_G_AND_FUSION_EXPLAINED.md`
+- **Wiring audit**: wiring auditor produces end-of-run summary (see launch)
+- **Fusion status**: All sensors (LiDAR + IMU + Odom) are fused; evidence sum includes L_imu_preint.
 - **Golden Child spec**: `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`

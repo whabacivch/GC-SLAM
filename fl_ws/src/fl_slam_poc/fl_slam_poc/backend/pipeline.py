@@ -966,10 +966,14 @@ def process_scan_single_hypothesis(
     map_is_empty = map_total_mass < config.eps_mass
 
     if map_is_empty:
-        # First scan: use belief pose (conditioned on IMU/odom) for map placement
-        pose_for_map = belief_recomposed.mean_world_pose(eps_lift=config.eps_lift)
-        R_for_map = se3_jax.so3_exp(pose_for_map[3:6])  # Rotation from belief
-        t_for_map = pose_for_map[:3]  # Translation from belief
+        # First scan: use PREDICTED belief pose (START-of-scan) for map placement.
+        # CRITICAL: scan_bins.s_dir is in start-of-scan body frame (from deskew),
+        # so we must use belief_pred (start-of-scan pose), NOT belief_recomposed
+        # (end-of-scan pose). Using end-of-scan introduces a rotation offset equal
+        # to within-scan motion, which corrupts the map and flips Wahba sign.
+        pose_for_map = belief_pred.mean_world_pose(eps_lift=config.eps_lift)
+        R_for_map = se3_jax.so3_exp(pose_for_map[3:6])  # Rotation from start-of-scan belief
+        t_for_map = pose_for_map[:3]  # Translation from start-of-scan belief
     else:
         # Subsequent scans: use Wahba/WLS alignment (scan-to-map matching)
         R_for_map = R_hat

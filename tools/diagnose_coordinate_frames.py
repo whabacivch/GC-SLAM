@@ -82,10 +82,13 @@ def analyze_lidar_z_convention(points: np.ndarray) -> dict:
 
 def analyze_imu_gravity(accel_samples: np.ndarray) -> dict:
     """
-    Analyze IMU accelerometer data to determine gravity direction in sensor frame.
-    
-    When stationary, accel should point opposite to gravity.
-    In base_footprint (Z-up): gravity = [0, 0, -9.81] m/s²
+    Analyze IMU accelerometer data to determine the *specific force* direction in sensor frame.
+
+    IMPORTANT (by physics, not convention):
+      - IMU accelerometers measure specific force (reaction to gravity), not gravity itself.
+      - When stationary and level in a Z-up world, the expected *specific force* is +Z:
+            gravity = [0, 0, -g]
+            specific_force = -gravity = [0, 0, +g]
     """
     if accel_samples.shape[0] < 10:
         return None
@@ -100,18 +103,18 @@ def analyze_imu_gravity(accel_samples: np.ndarray) -> dict:
     else:
         return None
     
-    # Expected gravity direction in base_footprint (Z-up)
-    expected_gravity_base = np.array([0, 0, -1])  # Down = -Z
+    # Expected specific force direction in base_footprint (Z-up): +Z
+    expected_specific_force_base = np.array([0, 0, 1])
     
     # Compare with actual
-    dot_with_expected = np.dot(accel_dir, expected_gravity_base)
+    dot_with_expected = np.dot(accel_dir, expected_specific_force_base)
     angle_to_expected = np.arccos(np.clip(dot_with_expected, -1, 1)) * 180 / np.pi
     
     return {
         'accel_mean': accel_mean,
         'accel_dir': accel_dir,
         'accel_magnitude': accel_norm,
-        'expected_gravity_base': expected_gravity_base,
+        'expected_specific_force_base': expected_specific_force_base,
         'dot_with_expected': dot_with_expected,
         'angle_to_expected_deg': angle_to_expected,
     }
@@ -337,16 +340,16 @@ def main() -> int:
                         print(f"  Average accel vector (m/s²): {stats['accel_mean']}")
                         print(f"  Accel magnitude: {stats['accel_magnitude']:.4f} m/s² = {stats['accel_magnitude']/9.81:.4f} g")
                         print(f"  Accel direction (normalized): {stats['accel_dir']}")
-                        print(f"  Expected gravity in base_footprint (Z-up): {stats['expected_gravity_base']}")
+                        print(f"  Expected specific force in base_footprint (Z-up): {stats['expected_specific_force_base']}")
                         print(f"  Angle to expected: {stats['angle_to_expected_deg']:.2f}°")
                         print()
                         
                         # Interpretation
                         if stats['angle_to_expected_deg'] < 10:
-                            print("  → INTERPRETATION: IMU gravity matches Z-up base_footprint")
+                            print("  → INTERPRETATION: IMU specific force matches Z-up base_footprint")
                             print("     (No rotation needed, or current T_base_imu is correct)")
                         elif stats['angle_to_expected_deg'] > 170:
-                            print("  → INTERPRETATION: IMU gravity is opposite to Z-up")
+                            print("  → INTERPRETATION: IMU specific force is opposite to Z-up")
                             print("     (Requires 180° rotation)")
                         else:
                             print(f"  → INTERPRETATION: IMU has {stats['angle_to_expected_deg']:.1f}° misalignment")
@@ -354,7 +357,7 @@ def main() -> int:
                             
                             # Estimate rotation
                             accel_dir = stats['accel_dir']
-                            expected = stats['expected_gravity_base']
+                            expected = stats['expected_specific_force_base']
                             
                             # Find rotation that aligns accel_dir to expected
                             # Using cross product to find axis
