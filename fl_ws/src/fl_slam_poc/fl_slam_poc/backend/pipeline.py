@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict
 
+import time
 from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.geometry import se3_jax
@@ -101,7 +102,7 @@ from fl_slam_poc.backend.operators.map_update import (
 )
 from fl_slam_poc.backend.operators.anchor_drift import anchor_drift_update
 from fl_slam_poc.backend.operators.hypothesis import hypothesis_barycenter_projection
-from fl_slam_poc.backend.diagnostics import ScanDiagnostics
+from fl_slam_poc.backend.diagnostics import ScanDiagnostics, MinimalScanTape
 
 
 # =============================================================================
@@ -171,6 +172,12 @@ class PipelineConfig:
     odom_twist_vel_sigma: float = constants.GC_ODOM_TWIST_VEL_SIGMA  # Velocity std dev (m/s)
     odom_twist_wz_sigma: float = constants.GC_ODOM_TWIST_WZ_SIGMA  # Yaw rate std dev (rad/s)
 
+    # Profiling / timing
+    enable_timing: bool = False  # If True, record per-stage timings (ms) in diagnostics
+
+    # Diagnostics: minimal tape (default) vs full ScanDiagnostics per scan
+    save_full_diagnostics: bool = False  # If True, build full ScanDiagnostics; else minimal tape only
+
     def __post_init__(self):
         if self.Sigma_meas is None:
             # Default measurement noise (3x3 isotropic)
@@ -206,6 +213,7 @@ class ScanPipelineResult:
     aggregated_cert: CertBundle
     # Per-scan diagnostics for dashboard (Stage-0 schema)
     diagnostics: Optional[ScanDiagnostics] = None
+    diagnostics_tape: Optional[MinimalScanTape] = None  # When save_full_diagnostics is False
 
 
 # =============================================================================
@@ -329,10 +337,25 @@ def process_scan_single_hypothesis(
         ScanPipelineResult with updated belief and certificates
     """
     all_certs = []
+    timing_ms = {} if config.enable_timing else None
+    t_total_start = time.perf_counter() if config.enable_timing else None
+
+    def _record_timing(label: str, start: float, out):
+        if not config.enable_timing:
+            return
+        try:
+            jax.tree_util.tree_map(
+                lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+                out,
+            )
+        except Exception:
+            pass
+        timing_ms[label] = (time.perf_counter() - start) * 1000.0
     
     # =========================================================================
     # Step 1: PointBudgetResample
     # =========================================================================
+    t0 = time.perf_counter() if config.enable_timing else None
     budget_result, budget_cert, budget_effect = point_budget_resample(
         points=raw_points,
         timestamps=raw_timestamps,
@@ -343,6 +366,8 @@ def process_scan_single_hypothesis(
         chart_id=belief_prev.chart_id,
         anchor_id=belief_prev.anchor_id,
     )
+    if config.enable_timing:
+        _record_timing("point_budget_ms", t0, budget_result)
     all_certs.append(budget_cert)
     
     points = budget_result.points
@@ -396,6 +421,7 @@ def process_scan_single_hypothesis(
     gravity_W = jnp.array(constants.GC_GRAVITY_W, dtype=jnp.float64) * float(config.imu_gravity_scale)
 
     # Preintegration for deskew (within-scan).
+    t0 = time.perf_counter() if config.enable_timing else None
     delta_pose_scan, _R_end_scan, _p_end_scan, _v_end_scan, ess_imu_scan, _, _, _, _ = preintegrate_imu_relative_pose_jax(
         imu_stamps=imu_stamps,
         imu_gyro=imu_gyro,
@@ -406,6 +432,8 @@ def process_scan_single_hypothesis(
         accel_bias=accel_bias,
         gravity_W=gravity_W,
     )
+    if config.enable_timing:
+        _record_timing("imu_preint_scan_ms", t0, delta_pose_scan)
     xi_body = se3_jax.se3_log(delta_pose_scan)  # (6,) twist over scan (used for deskew)
     # Rotation-only deskew: zero out translation component [rho, phi] -> [0, phi]
     # This removes the hidden IMU translation leak through deskew → LiDAR evidence.
@@ -426,6 +454,7 @@ def process_scan_single_hypothesis(
     )
 
     # Preintegration for scan-to-scan interval (used for gyro evidence + IMU noise updates).
+    t0 = time.perf_counter() if config.enable_timing else None
     (
         delta_pose_int,
         _R_end_int,
@@ -446,6 +475,8 @@ def process_scan_single_hypothesis(
         accel_bias=accel_bias,
         gravity_W=gravity_W,
     )
+    if config.enable_timing:
+        _record_timing("imu_preint_int_ms", t0, delta_pose_int)
     
     # IMU measurement-noise IW sufficient stats (Σg, Σa) from commutative residuals
     # Average IMU sampling period for PSD mapping (Var * dt -> PSD).
@@ -530,6 +561,7 @@ def process_scan_single_hypothesis(
         eps_mass=config.eps_mass,
     )
 
+    t0 = time.perf_counter() if config.enable_timing else None
     deskew_twist_result, deskew_cert, deskew_effect = deskew_constant_twist(
         points=points,
         timestamps=timestamps,
@@ -541,6 +573,8 @@ def process_scan_single_hypothesis(
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
+    if config.enable_timing:
+        _record_timing("deskew_ms", t0, deskew_twist_result.points)
     all_certs.append(deskew_cert)
 
     deskewed_points = deskew_twist_result.points
@@ -557,6 +591,7 @@ def process_scan_single_hypothesis(
     # =========================================================================
     # Step 4: BinSoftAssign
     # =========================================================================
+    t0 = time.perf_counter() if config.enable_timing else None
     assign_result, assign_cert, assign_effect = bin_soft_assign(
         point_directions=point_directions,
         bin_directions=bin_atlas.dirs,
@@ -564,6 +599,8 @@ def process_scan_single_hypothesis(
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
+    if config.enable_timing:
+        _record_timing("bin_assign_ms", t0, assign_result.responsibilities)
     all_certs.append(assign_cert)
     responsibilities = assign_result.responsibilities
     
@@ -571,6 +608,7 @@ def process_scan_single_hypothesis(
     # Step 5: ScanBinMomentMatch
     # =========================================================================
     point_lambda = lidar_point_reliability_from_buckets_jax(lidar_bucket_state, ring=ring, tag=tag)
+    t0 = time.perf_counter() if config.enable_timing else None
     scan_bins, scan_cert, scan_effect = scan_bin_moment_match(
         points=deskewed_points,
         point_covariances=deskewed_covs,
@@ -583,6 +621,8 @@ def process_scan_single_hypothesis(
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
+    if config.enable_timing:
+        _record_timing("bin_moment_ms", t0, scan_bins.N)
     all_certs.append(scan_cert)
     
     # =========================================================================
@@ -604,6 +644,7 @@ def process_scan_single_hypothesis(
     # =========================================================================
     # Uses full scatter tensors for principled rotation estimation with
     # Fisher-derived information matrix. No heuristic kappa weighting.
+    t0 = time.perf_counter() if config.enable_timing else None
     mf_result, mf_cert, mf_effect = matrix_fisher_rotation_evidence(
         belief_pred=belief_pred,
         scan_s_dir=scan_bins.s_dir,
@@ -616,6 +657,8 @@ def process_scan_single_hypothesis(
         eps_lift=config.eps_lift,
         eps_mass=config.eps_mass,
     )
+    if config.enable_timing:
+        _record_timing("matrix_fisher_ms", t0, mf_result.R_mf)
     all_certs.append(mf_cert)
     R_hat = mf_result.R_mf  # ML rotation from Matrix Fisher
 
@@ -624,6 +667,7 @@ def process_scan_single_hypothesis(
     # =========================================================================
     # Uses WLS translation but scales down z information for planar robots.
     # The planar prior handles z estimation, not scan matching.
+    t0 = time.perf_counter() if config.enable_timing else None
     planar_trans_result, planar_trans_cert, planar_trans_effect = planar_translation_evidence(
         belief_pred=belief_pred,
         scan_p_bar=scan_bins.p_bar,
@@ -640,6 +684,8 @@ def process_scan_single_hypothesis(
         eps_lift=config.eps_lift,
         eps_mass=config.eps_mass,
     )
+    if config.enable_timing:
+        _record_timing("planar_translation_ms", t0, planar_trans_result.t_wls)
     all_certs.append(planar_trans_cert)
     t_hat = planar_trans_result.t_wls
 
@@ -659,6 +705,7 @@ def process_scan_single_hypothesis(
     iw_meas_dnu = iw_meas_dnu + iw_meas_gyro_dnu + iw_meas_accel_dnu
 
     # LiDAR bucket IW sufficient stats from translation residuals apportioned by responsibilities.
+    t0 = time.perf_counter() if config.enable_timing else None
     iw_lidar_bucket_dPsi, iw_lidar_bucket_dnu = lidar_bucket_iw_suffstats_from_bin_residuals_jax(
         residuals_bin=residuals_t,
         responsibilities=responsibilities,
@@ -667,6 +714,8 @@ def process_scan_single_hypothesis(
         tag=tag,
         eps_mass=config.eps_mass,
     )
+    if config.enable_timing:
+        _record_timing("lidar_bucket_iw_ms", t0, iw_lidar_bucket_dPsi)
     
     # =========================================================================
     # Step 9: Odom + IMU + LiDAR evidence (no moment matching)
@@ -996,42 +1045,26 @@ def process_scan_single_hypothesis(
     evidence_cert = aggregate_certificates([deskew_cert, assign_cert, scan_cert, mf_cert, planar_trans_cert])
     combined_evidence_cert = aggregate_certificates([evidence_cert, odom_cert, imu_cert, gyro_cert])
 
-    # Effective conditioning for trust alpha should be evaluated on the subspace we intend to update.
-    # Using the full 22x22 conditioning can be dominated by physically-null directions (e.g., yaw under gravity,
-    # weak bias/extrinsic blocks), pinning alpha at floor even when pose evidence is strong.
-    import numpy as np
-
+    # Effective conditioning for trust alpha: evaluated on pose block (6x6) in JAX; no host round-trip.
+    # Full 22x22 would be dominated by physically-null directions (yaw under gravity, weak bias/extrinsic).
     eps_cond = float(config.eps_psd)
-    L_pose = np.array(L_evidence[0:6, 0:6], dtype=np.float64)
-    L_pose = 0.5 * (L_pose + L_pose.T)
-
-    eig_pose: np.ndarray | None = None
-    if np.all(np.isfinite(L_pose)) and float(np.trace(np.abs(L_pose))) > 1e-12:
-        try:
-            eig_pose = np.linalg.eigvalsh(L_pose)
-        except (np.linalg.LinAlgError, ValueError):
-            # Fall back to singular values: robust proxy for "strength" and conditioning.
-            try:
-                eig_pose = np.linalg.svd(L_pose, compute_uv=False)
-            except (np.linalg.LinAlgError, ValueError):
-                eig_pose = None
-
-    if eig_pose is None or eig_pose.shape != (6,) or (not np.all(np.isfinite(eig_pose))):
-        eig_pose = np.full((6,), eps_cond, dtype=np.float64)
-    eig_pose = np.sort(eig_pose)
-
-    eig_pose_clipped = np.maximum(eig_pose, eps_cond)
-    eig_min_pose = float(eig_pose_clipped[0])
-    eig_max_pose = float(eig_pose_clipped[-1])
-    cond_pose6 = float(eig_max_pose / eig_min_pose)
+    L_pose = 0.5 * (L_evidence[0:6, 0:6] + L_evidence[0:6, 0:6].T)
+    L_pose = jnp.nan_to_num(L_pose, nan=0.0, posinf=0.0, neginf=0.0)
+    eigvals_pose = jnp.linalg.eigvalsh(L_pose)
+    eigvals_safe = jnp.nan_to_num(eigvals_pose, nan=eps_cond, posinf=eps_cond, neginf=eps_cond)
+    eigvals_clipped = jnp.maximum(eigvals_safe, eps_cond)
+    eig_min_pose = eigvals_clipped[0]
+    eig_max_pose = eigvals_clipped[-1]
+    cond_pose6 = eig_max_pose / eig_min_pose
+    near_null_count = jnp.sum(eigvals_pose <= eps_cond).astype(jnp.int32)
 
     combined_evidence_cert.conditioning = ConditioningCert(
-        eig_min=eig_min_pose,
-        eig_max=eig_max_pose,
-        cond=cond_pose6,
-        near_null_count=int(np.sum(eig_pose <= eps_cond)),
+        eig_min=float(eig_min_pose),
+        eig_max=float(eig_max_pose),
+        cond=float(cond_pose6),
+        near_null_count=int(near_null_count),
     )
-    combined_evidence_cert.approximation_triggers.append("FusionScaleConditioningPose6")
+    combined_evidence_cert.approximation_triggers.append("FusionScaleConditioningPose6")  # pose6 block only
 
     fusion_scale_result, fusion_scale_cert, fusion_scale_effect = fusion_scale_from_certificates(
         cert_evidence=combined_evidence_cert,
@@ -1130,6 +1163,7 @@ def process_scan_single_hypothesis(
         R_for_map = R_hat
         t_for_map = t_hat
 
+    t0 = time.perf_counter() if config.enable_timing else None
     map_update_result, map_update_cert, map_update_effect = pos_cov_inflation_pushforward(
         belief_post=belief_recomposed,
         scan_N=scan_bins.N,
@@ -1142,6 +1176,8 @@ def process_scan_single_hypothesis(
         eps_psd=config.eps_psd,
         eps_lift=config.eps_lift,
     )
+    if config.enable_timing:
+        _record_timing("map_update_ms", t0, map_update_result.delta_S_dir)
     all_certs.append(map_update_cert)
     
     # =========================================================================
@@ -1158,185 +1194,223 @@ def process_scan_single_hypothesis(
     # Aggregate certificates
     # =========================================================================
     aggregated_cert = aggregate_certificates(all_certs)
-
-    # =========================================================================
-    # Build diagnostics (Stage-0 schema for dashboard)
-    # =========================================================================
-    import numpy as np
-
-    # Extract pose from final belief
-    pose_final = belief_final.mean_world_pose(eps_lift=config.eps_lift)
-    trans_final = np.array(pose_final[:3])
-    rotvec_final = np.array(pose_final[3:6])
-
-    # Convert rotvec to rotation matrix
-    from scipy.spatial.transform import Rotation as R_scipy
-    R_final = R_scipy.from_rotvec(rotvec_final).as_matrix()
-
-    # Rotation-binding diagnostics: verify residuals decrease after fusion.
-    pose_pred_np = np.array(belief_pred.mean_world_pose(eps_lift=config.eps_lift))
-    R_pred = R_scipy.from_rotvec(pose_pred_np[3:6]).as_matrix()
-
-    odom_pose_np = np.array(odom_pose)
-    R_odom = R_scipy.from_rotvec(odom_pose_np[3:6]).as_matrix()
-
-    R_lidar = np.array(R_hat)
-
-    # Compute rotation errors robustly (handle non-orthogonal matrices from numerical issues)
-    def _safe_rotation_error_deg(R1: np.ndarray, R2: np.ndarray) -> float:
-        """Compute rotation error in degrees, handling numerical edge cases."""
-        try:
-            R_diff = R1.T @ R2
-            # Force orthogonality via SVD projection
-            U, _, Vt = np.linalg.svd(R_diff)
-            R_diff_ortho = U @ Vt
-            # Ensure proper rotation (det = +1)
-            if np.linalg.det(R_diff_ortho) < 0:
-                R_diff_ortho = -R_diff_ortho
-            return float(np.linalg.norm(R_scipy.from_matrix(R_diff_ortho).as_rotvec()) * (180.0 / np.pi))
-        except Exception:
-            return float("nan")
-
-    rot_err_lidar_deg_pred = _safe_rotation_error_deg(R_pred, R_lidar)
-    rot_err_lidar_deg_post = _safe_rotation_error_deg(R_final, R_lidar)
-    rot_err_odom_deg_pred = _safe_rotation_error_deg(R_pred, R_odom)
-    rot_err_odom_deg_post = _safe_rotation_error_deg(R_final, R_odom)
-
-    # IMU gravity direction coherence probe (in body frame).
-    imu_accel_np = np.array(imu_accel, dtype=np.float64)
-    w_imu_np = np.array(w_imu_int, dtype=np.float64).reshape(-1)
-    accel_bias_np = np.array(accel_bias, dtype=np.float64).reshape(-1)
-    a_corr = imu_accel_np - accel_bias_np[None, :]
-    a_norm = np.linalg.norm(a_corr, axis=1)
-    accel_mag_mean = float(np.sum(w_imu_np * a_norm) / (np.sum(w_imu_np) + 1e-12))
-    x = a_corr / (a_norm[:, None] + 1e-12)
-    S = np.sum(w_imu_np[:, None] * x, axis=0)
-    xbar = S / (np.linalg.norm(S) + 1e-12)
-    g = np.array(constants.GC_GRAVITY_W, dtype=np.float64).reshape(-1)
-    g_hat = g / (np.linalg.norm(g) + 1e-12)
-    mu0 = R_pred.T @ (-g_hat)
-    accel_dir_dot_mu0 = float(np.dot(xbar, mu0))
-
-    # Compute evidence diagnostics
-    L_total_np = np.array(L_evidence)
-    h_total_np = np.array(h_evidence)
-
-    # Diagnostic: check for non-finite values before eigvalsh (deterministic check, not a gate)
-    if not np.all(np.isfinite(L_total_np)):
-        nan_count = np.sum(~np.isfinite(L_total_np))
-        max_abs = np.nanmax(np.abs(L_total_np))
-        # Identify which block has the issue
-        block_info = []
-        for name, sl in [("trans", slice(0, 3)), ("rot", slice(3, 6)), ("vel", slice(6, 9)),
-                         ("bg", slice(9, 12)), ("ba", slice(12, 15)), ("dt", slice(15, 16)),
-                         ("ex", slice(16, 22))]:
-            block = L_total_np[sl, sl]
-            if not np.all(np.isfinite(block)):
-                block_info.append(f"{name}:NaN")
-        raise ValueError(
-            f"L_total contains {nan_count} non-finite values (max_abs={max_abs:.2e}). "
-            f"Blocks with NaN: {block_info}. Check evidence operators for source."
-        )
-
-    # Safe logdet computation (handle near-singular matrices)
-    eigvals = np.linalg.eigvalsh(L_total_np)
-    eigvals_pos = np.maximum(eigvals, 1e-12)
-    logdet_L = float(np.sum(np.log(eigvals_pos)))
-    trace_L = float(np.trace(L_total_np))
-    L_dt_val = float(L_total_np[15, 15])
-    trace_L_ex = float(np.trace(L_total_np[16:22, 16:22]))
-
-    # PSD diagnostics from aggregated certificate
-    psd_delta = 0.0
-    psd_min_eig_before = 0.0
-    psd_min_eig_after = float(np.min(eigvals))
-    if aggregated_cert.influence is not None:
-        psd_delta = aggregated_cert.influence.psd_projection_delta
-    if aggregated_cert.conditioning is not None:
-        psd_min_eig_before = aggregated_cert.conditioning.eig_min
-        cond_number = aggregated_cert.conditioning.cond
-    else:
-        cond_number = 1.0
-
-    # Total trigger magnitude
     total_trigger_mag = sum(c.total_trigger_magnitude() for c in all_certs)
-
-    # Matrix Fisher and scatter sentinels for the dashboard
-    mf_svd_np = np.array(mf_result.svd_singular_values, dtype=np.float64).reshape(3,)
-    scan_scatter_eigs = np.linalg.eigvalsh(np.array(scan_bins.S_dir_scatter, dtype=np.float64))  # (B, 3)
-    map_scatter_eigs = np.linalg.eigvalsh(np.array(map_stats.S_dir_scatter, dtype=np.float64))  # (B, 3)
-
-    diagnostics = ScanDiagnostics(
-        scan_number=0,  # Will be set by backend_node
-        timestamp=scan_end_time,
-        dt_sec=dt_sec,
-        dt_scan=float(scan_end_time - scan_start_time),
-        dt_int=dt_int,  # IMU integration time: sum of sample intervals in (t_last_scan, t_scan)
-        num_imu_samples=int(
-            np.sum(
-                (np.asarray(imu_stamps, dtype=np.float64) > (float(t_last_scan) - 1e-9))
-                & (np.asarray(imu_stamps, dtype=np.float64) <= (float(t_scan) + 1e-9))
-                & (np.asarray(imu_stamps, dtype=np.float64) > 0.0)
-            )
-        ),
-        n_points_raw=int(raw_points.shape[0]),
-        n_points_budget=int(points.shape[0]),
-        p_W=trans_final,
-        R_WL=R_final,
-        N_bins=np.array(scan_bins.N),
-        S_bins=np.array(scan_bins.s_dir),
-        kappa_bins=np.array(scan_bins.kappa_scan),
-        kappa_map_bins=np.array(kappa_map),
-        L_total=L_total_np,
-        h_total=h_total_np,
-        L_lidar=np.array(L_lidar),
-        L_odom=np.array(odom_result.L_odom),
-        L_imu=np.array(imu_result.L_imu),
-        L_gyro=np.array(gyro_result.L_gyro),
-        L_imu_preint=np.array(preint_result.L_imu_preint),
-        logdet_L_total=logdet_L,
-        trace_L_total=trace_L,
-        L_dt=L_dt_val,
-        trace_L_ex=trace_L_ex,
-        s_dt=float(s_dt),
-        s_ex=float(s_ex),
-        psd_delta_fro=psd_delta,
-        psd_min_eig_before=psd_min_eig_before,
-        psd_min_eig_after=psd_min_eig_after,
-        wahba_cost=float(jnp.sum(mf_result.svd_singular_values)),  # MF cost proxy (SVD sum)
-        mf_svd=mf_svd_np,
-        scan_scatter_eigs=scan_scatter_eigs,
-        map_scatter_eigs=map_scatter_eigs,
-        translation_residual_norm=float(jnp.linalg.norm(planar_trans_result.delta_trans)),
-        rot_err_lidar_deg_pred=rot_err_lidar_deg_pred,
-        rot_err_lidar_deg_post=rot_err_lidar_deg_post,
-        rot_err_odom_deg_pred=rot_err_odom_deg_pred,
-        rot_err_odom_deg_post=rot_err_odom_deg_post,
-        accel_dir_dot_mu0=accel_dir_dot_mu0,
-        accel_mag_mean=accel_mag_mean,
-        imu_a_body_mean=np.array(imu_a_body_mean),
-        imu_a_world_nog_mean=np.array(imu_a_world_nog_mean),
-        imu_a_world_mean=np.array(imu_a_world_mean),
-        imu_dt_eff_sum=float(imu_dt_eff_sum),
-        imu_dt_valid_min=imu_dt_valid_min,
-        imu_dt_valid_max=imu_dt_valid_max,
-        imu_dt_valid_mean=imu_dt_valid_mean,
-        imu_dt_valid_median=imu_dt_valid_median,
-        imu_dt_valid_std=imu_dt_valid_std,
-        imu_dt_valid_nonpos=imu_dt_valid_nonpos,
-        imu_dt_weighted_mean=imu_dt_weighted_mean,
-        imu_dt_weighted_std=imu_dt_weighted_std,
-        imu_dt_weighted_sum=imu_dt_weighted_sum,
-        fusion_alpha=float(alpha),
-        total_trigger_magnitude=total_trigger_mag,
-        conditioning_number=cond_number,
-        conditioning_pose6=float(cond_pose6),
-        preint_r_vel=np.array(preint_result.r_vel),
-        preint_r_pos=np.array(preint_result.r_pos),
-        dyaw_gyro=float(dyaw_gyro),
-        dyaw_odom=float(dyaw_odom),
-        dyaw_wahba=float(dyaw_mf),  # Now Matrix Fisher, kept field name for compatibility
+    cond_number = (
+        aggregated_cert.conditioning.cond
+        if aggregated_cert.conditioning is not None
+        else 1.0
     )
+
+    diagnostics = None
+    diagnostics_tape = None
+    if config.save_full_diagnostics:
+        # =========================================================================
+        # Build full diagnostics (Stage-0 schema for dashboard)
+        # =========================================================================
+        import numpy as np
+
+        # Extract pose from final belief
+        pose_final = belief_final.mean_world_pose(eps_lift=config.eps_lift)
+        trans_final = np.array(pose_final[:3])
+        rotvec_final = np.array(pose_final[3:6])
+
+        # Convert rotvec to rotation matrix
+        from scipy.spatial.transform import Rotation as R_scipy
+        R_final = R_scipy.from_rotvec(rotvec_final).as_matrix()
+
+        # Rotation-binding diagnostics: verify residuals decrease after fusion.
+        pose_pred_np = np.array(belief_pred.mean_world_pose(eps_lift=config.eps_lift))
+        R_pred = R_scipy.from_rotvec(pose_pred_np[3:6]).as_matrix()
+
+        odom_pose_np = np.array(odom_pose)
+        R_odom = R_scipy.from_rotvec(odom_pose_np[3:6]).as_matrix()
+
+        R_lidar = np.array(R_hat)
+
+        # Compute rotation errors robustly (handle non-orthogonal matrices from numerical issues)
+        def _safe_rotation_error_deg(R1: np.ndarray, R2: np.ndarray) -> float:
+            """Compute rotation error in degrees, handling numerical edge cases."""
+            try:
+                R_diff = R1.T @ R2
+                # Force orthogonality via SVD projection
+                U, _, Vt = np.linalg.svd(R_diff)
+                R_diff_ortho = U @ Vt
+                # Ensure proper rotation (det = +1)
+                if np.linalg.det(R_diff_ortho) < 0:
+                    R_diff_ortho = -R_diff_ortho
+                return float(np.linalg.norm(R_scipy.from_matrix(R_diff_ortho).as_rotvec()) * (180.0 / np.pi))
+            except Exception:
+                return float("nan")
+
+        rot_err_lidar_deg_pred = _safe_rotation_error_deg(R_pred, R_lidar)
+        rot_err_lidar_deg_post = _safe_rotation_error_deg(R_final, R_lidar)
+        rot_err_odom_deg_pred = _safe_rotation_error_deg(R_pred, R_odom)
+        rot_err_odom_deg_post = _safe_rotation_error_deg(R_final, R_odom)
+
+        # IMU gravity direction coherence probe (in body frame).
+        imu_accel_np = np.array(imu_accel, dtype=np.float64)
+        w_imu_np = np.array(w_imu_int, dtype=np.float64).reshape(-1)
+        accel_bias_np = np.array(accel_bias, dtype=np.float64).reshape(-1)
+        a_corr = imu_accel_np - accel_bias_np[None, :]
+        a_norm = np.linalg.norm(a_corr, axis=1)
+        accel_mag_mean = float(np.sum(w_imu_np * a_norm) / (np.sum(w_imu_np) + 1e-12))
+        x = a_corr / (a_norm[:, None] + 1e-12)
+        S = np.sum(w_imu_np[:, None] * x, axis=0)
+        xbar = S / (np.linalg.norm(S) + 1e-12)
+        g = np.array(constants.GC_GRAVITY_W, dtype=np.float64).reshape(-1)
+        g_hat = g / (np.linalg.norm(g) + 1e-12)
+        mu0 = R_pred.T @ (-g_hat)
+        accel_dir_dot_mu0 = float(np.dot(xbar, mu0))
+
+        # Compute evidence diagnostics
+        L_total_np = np.array(L_evidence)
+        h_total_np = np.array(h_evidence)
+
+        # Diagnostic: check for non-finite values before eigvalsh (deterministic check, not a gate)
+        if not np.all(np.isfinite(L_total_np)):
+            nan_count = np.sum(~np.isfinite(L_total_np))
+            max_abs = np.nanmax(np.abs(L_total_np))
+            # Identify which block has the issue
+            block_info = []
+            for name, sl in [("trans", slice(0, 3)), ("rot", slice(3, 6)), ("vel", slice(6, 9)),
+                             ("bg", slice(9, 12)), ("ba", slice(12, 15)), ("dt", slice(15, 16)),
+                             ("ex", slice(16, 22))]:
+                block = L_total_np[sl, sl]
+                if not np.all(np.isfinite(block)):
+                    block_info.append(f"{name}:NaN")
+            raise ValueError(
+                f"L_total contains {nan_count} non-finite values (max_abs={max_abs:.2e}). "
+                f"Blocks with NaN: {block_info}. Check evidence operators for source."
+            )
+
+        # Safe logdet computation (handle near-singular matrices)
+        eigvals = np.linalg.eigvalsh(L_total_np)
+        eigvals_pos = np.maximum(eigvals, 1e-12)
+        logdet_L = float(np.sum(np.log(eigvals_pos)))
+        trace_L = float(np.trace(L_total_np))
+        L_dt_val = float(L_total_np[15, 15])
+        trace_L_ex = float(np.trace(L_total_np[16:22, 16:22]))
+
+        # PSD diagnostics from aggregated certificate
+        psd_delta = 0.0
+        psd_min_eig_before = 0.0
+        psd_min_eig_after = float(np.min(eigvals))
+        if aggregated_cert.influence is not None:
+            psd_delta = aggregated_cert.influence.psd_projection_delta
+        if aggregated_cert.conditioning is not None:
+            psd_min_eig_before = aggregated_cert.conditioning.eig_min
+
+        # Matrix Fisher and scatter sentinels for the dashboard
+        mf_svd_np = np.array(mf_result.svd_singular_values, dtype=np.float64).reshape(3,)
+        scan_scatter_eigs = np.linalg.eigvalsh(np.array(scan_bins.S_dir_scatter, dtype=np.float64))  # (B, 3)
+        map_scatter_eigs = np.linalg.eigvalsh(np.array(map_stats.S_dir_scatter, dtype=np.float64))  # (B, 3)
+
+        if config.enable_timing:
+            timing_ms["total_ms"] = (time.perf_counter() - t_total_start) * 1000.0
+
+        diagnostics = ScanDiagnostics(
+            scan_number=0,  # Will be set by backend_node
+            timestamp=scan_end_time,
+            dt_sec=dt_sec,
+            dt_scan=float(scan_end_time - scan_start_time),
+            dt_int=dt_int,  # IMU integration time: sum of sample intervals in (t_last_scan, t_scan)
+            num_imu_samples=int(
+                np.sum(
+                    (np.asarray(imu_stamps, dtype=np.float64) > (float(t_last_scan) - 1e-9))
+                    & (np.asarray(imu_stamps, dtype=np.float64) <= (float(t_scan) + 1e-9))
+                    & (np.asarray(imu_stamps, dtype=np.float64) > 0.0)
+                )
+            ),
+            n_points_raw=int(raw_points.shape[0]),
+            n_points_budget=int(points.shape[0]),
+            p_W=trans_final,
+            R_WL=R_final,
+            N_bins=np.array(scan_bins.N),
+            S_bins=np.array(scan_bins.s_dir),
+            kappa_bins=np.array(scan_bins.kappa_scan),
+            kappa_map_bins=np.array(kappa_map),
+            L_total=L_total_np,
+            h_total=h_total_np,
+            L_lidar=np.array(L_lidar),
+            L_odom=np.array(odom_result.L_odom),
+            L_imu=np.array(imu_result.L_imu),
+            L_gyro=np.array(gyro_result.L_gyro),
+            L_imu_preint=np.array(preint_result.L_imu_preint),
+            logdet_L_total=logdet_L,
+            trace_L_total=trace_L,
+            L_dt=L_dt_val,
+            trace_L_ex=trace_L_ex,
+            s_dt=float(s_dt),
+            s_ex=float(s_ex),
+            psd_delta_fro=psd_delta,
+            psd_min_eig_before=psd_min_eig_before,
+            psd_min_eig_after=psd_min_eig_after,
+            wahba_cost=float(jnp.sum(mf_result.svd_singular_values)),  # MF cost proxy (SVD sum)
+            mf_svd=mf_svd_np,
+            scan_scatter_eigs=scan_scatter_eigs,
+            map_scatter_eigs=map_scatter_eigs,
+            translation_residual_norm=float(jnp.linalg.norm(planar_trans_result.delta_trans)),
+            rot_err_lidar_deg_pred=rot_err_lidar_deg_pred,
+            rot_err_lidar_deg_post=rot_err_lidar_deg_post,
+            rot_err_odom_deg_pred=rot_err_odom_deg_pred,
+            rot_err_odom_deg_post=rot_err_odom_deg_post,
+            accel_dir_dot_mu0=accel_dir_dot_mu0,
+            accel_mag_mean=accel_mag_mean,
+            imu_a_body_mean=np.array(imu_a_body_mean),
+            imu_a_world_nog_mean=np.array(imu_a_world_nog_mean),
+            imu_a_world_mean=np.array(imu_a_world_mean),
+            imu_dt_eff_sum=float(imu_dt_eff_sum),
+            imu_dt_valid_min=imu_dt_valid_min,
+            imu_dt_valid_max=imu_dt_valid_max,
+            imu_dt_valid_mean=imu_dt_valid_mean,
+            imu_dt_valid_median=imu_dt_valid_median,
+            imu_dt_valid_std=imu_dt_valid_std,
+            imu_dt_valid_nonpos=imu_dt_valid_nonpos,
+            imu_dt_weighted_mean=imu_dt_weighted_mean,
+            imu_dt_weighted_std=imu_dt_weighted_std,
+            imu_dt_weighted_sum=imu_dt_weighted_sum,
+            fusion_alpha=float(alpha),
+            total_trigger_magnitude=total_trigger_mag,
+            conditioning_number=cond_number,
+            conditioning_pose6=float(cond_pose6),
+            preint_r_vel=np.array(preint_result.r_vel),
+            preint_r_pos=np.array(preint_result.r_pos),
+            dyaw_gyro=float(dyaw_gyro),
+            dyaw_odom=float(dyaw_odom),
+            dyaw_wahba=float(dyaw_mf),  # Now Matrix Fisher, kept field name for compatibility
+            t_total_ms=timing_ms.get("total_ms", 0.0) if timing_ms is not None else 0.0,
+            t_point_budget_ms=timing_ms.get("point_budget_ms", 0.0) if timing_ms is not None else 0.0,
+            t_imu_preint_scan_ms=timing_ms.get("imu_preint_scan_ms", 0.0) if timing_ms is not None else 0.0,
+            t_imu_preint_int_ms=timing_ms.get("imu_preint_int_ms", 0.0) if timing_ms is not None else 0.0,
+            t_deskew_ms=timing_ms.get("deskew_ms", 0.0) if timing_ms is not None else 0.0,
+            t_bin_assign_ms=timing_ms.get("bin_assign_ms", 0.0) if timing_ms is not None else 0.0,
+            t_bin_moment_ms=timing_ms.get("bin_moment_ms", 0.0) if timing_ms is not None else 0.0,
+            t_matrix_fisher_ms=timing_ms.get("matrix_fisher_ms", 0.0) if timing_ms is not None else 0.0,
+            t_planar_translation_ms=timing_ms.get("planar_translation_ms", 0.0) if timing_ms is not None else 0.0,
+            t_lidar_bucket_iw_ms=timing_ms.get("lidar_bucket_iw_ms", 0.0) if timing_ms is not None else 0.0,
+            t_map_update_ms=timing_ms.get("map_update_ms", 0.0) if timing_ms is not None else 0.0,
+        )
+    else:
+        # Minimal tape only (crash-tolerant, low overhead)
+        import numpy as np
+        diagnostics_tape = MinimalScanTape(
+            scan_number=0,
+            timestamp=scan_end_time,
+            dt_sec=dt_sec,
+            n_points_raw=int(raw_points.shape[0]),
+            n_points_budget=int(points.shape[0]),
+            fusion_alpha=float(alpha),
+            cond_pose6=float(cond_pose6),
+            conditioning_number=cond_number,
+            eigmin_pose6=float(eig_min_pose),
+            L_pose6=np.array(L_evidence[0:6, 0:6], dtype=np.float64),
+            total_trigger_magnitude=total_trigger_mag,
+            t_total_ms=timing_ms.get("total_ms", 0.0) if timing_ms is not None else 0.0,
+            t_point_budget_ms=timing_ms.get("point_budget_ms", 0.0) if timing_ms is not None else 0.0,
+            t_deskew_ms=timing_ms.get("deskew_ms", 0.0) if timing_ms is not None else 0.0,
+            t_bin_moment_ms=timing_ms.get("bin_moment_ms", 0.0) if timing_ms is not None else 0.0,
+            t_map_update_ms=timing_ms.get("map_update_ms", 0.0) if timing_ms is not None else 0.0,
+        )
 
     return ScanPipelineResult(
         belief_updated=belief_final,
@@ -1350,6 +1424,7 @@ def process_scan_single_hypothesis(
         all_certs=all_certs,
         aggregated_cert=aggregated_cert,
         diagnostics=diagnostics,
+        diagnostics_tape=diagnostics_tape,
     )
 
 

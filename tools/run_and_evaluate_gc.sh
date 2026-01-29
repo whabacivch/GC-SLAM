@@ -22,7 +22,7 @@ EST_BODY="/tmp/gc_slam_trajectory_body.tum"
 GT_ALIGNED="/tmp/m3dgr_ground_truth_aligned.tum"
 BODY_CALIB="${BODY_CALIB:-$PROJECT_ROOT/config/m3dgr_body_T_wheel.yaml}"
 WIRING_SUMMARY="/tmp/gc_wiring_summary.json"
-DIAGNOSTICS_FILE="/tmp/gc_slam_diagnostics.npz"
+DIAGNOSTICS_FILE="$PROJECT_ROOT/results/gc_slam_diagnostics.npz"
 RESULTS_DIR="$PROJECT_ROOT/results/gc_$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$RESULTS_DIR/slam_run.log"
 # Source common venv detection

@@ -68,7 +68,7 @@ def generate_launch_description():
 
     diagnostics_path_arg = DeclareLaunchArgument(
         "diagnostics_export_path",
-        default_value="/tmp/gc_slam_diagnostics.npz",
+        default_value="results/gc_slam_diagnostics.npz",
         description="Path to export per-scan diagnostics for dashboard.",
     )
 
@@ -82,6 +82,12 @@ def generate_launch_description():
         "deskew_rotation_only",
         default_value="false",
         description="Use rotation-only deskew (removes hidden IMU translation leak).",
+    )
+
+    enable_timing_arg = DeclareLaunchArgument(
+        "enable_timing",
+        default_value="true",
+        description="Record per-stage timings (ms) in diagnostics for bottleneck analysis.",
     )
 
     # =========================================================================
@@ -154,6 +160,7 @@ def generate_launch_description():
                 "forgetting_factor": 0.99,
                 "imu_gravity_scale": LaunchConfiguration("imu_gravity_scale"),
                 "deskew_rotation_only": LaunchConfiguration("deskew_rotation_only"),
+                "enable_timing": LaunchConfiguration("enable_timing"),
             }
         ],
     )
@@ -185,6 +192,7 @@ def generate_launch_description():
         diagnostics_path_arg,
         imu_gravity_scale_arg,
         deskew_rotation_only_arg,
+        enable_timing_arg,
         # Sensor Hub (single process)
         gc_sensor_hub,
         # Audit / observability

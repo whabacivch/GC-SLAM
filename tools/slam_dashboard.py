@@ -64,9 +64,9 @@ def load_diagnostics_npz(path: str) -> dict:
 
 def load_tum_positions(path: str):
     """
-    Load x, y, z positions from a TUM trajectory file.
+    Load x, y, z positions and timestamps from a TUM trajectory file.
     TUM format: timestamp x y z qx qy qz qw (space-separated, # for comments).
-    Returns (x, y, z) as 1D numpy arrays, or None if file missing/unreadable.
+    Returns (x, y, z, timestamps) as 1D numpy arrays, or None if file missing/unreadable.
     """
     try:
         rows = []
@@ -77,14 +77,30 @@ def load_tum_positions(path: str):
                     continue
                 parts = line.split()
                 if len(parts) >= 7:
-                    rows.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                    rows.append((float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])))
         if not rows:
             return None
         arr = np.array(rows, dtype=np.float64)
-        return arr[:, 0], arr[:, 1], arr[:, 2]
+        return arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 0]  # x, y, z, timestamps
     except (OSError, ValueError) as e:
         print(f"Warning: Could not load ground truth from {path}: {e}")
         return None
+
+
+def interpolate_gt_at_times(gt_x: np.ndarray, gt_y: np.ndarray, gt_z: np.ndarray, gt_ts: np.ndarray, query_ts: np.ndarray):
+    """
+    Linear interpolation of GT trajectory at query timestamps.
+    gt_* and gt_ts are 1D arrays (same length); query_ts is 1D.
+    Returns (x, y, z) at query_ts, clipped to GT time range.
+    """
+    if gt_ts.size < 2 or query_ts.size == 0:
+        if gt_ts.size == 1 and query_ts.size > 0:
+            return np.full_like(query_ts, gt_x[0]), np.full_like(query_ts, gt_y[0]), np.full_like(query_ts, gt_z[0])
+        return np.array([]), np.array([]), np.array([])
+    x_out = np.interp(query_ts, gt_ts, gt_x)
+    y_out = np.interp(query_ts, gt_ts, gt_y)
+    z_out = np.interp(query_ts, gt_ts, gt_z)
+    return x_out, y_out, z_out
 
 
 def numpy_to_json(obj):
@@ -309,6 +325,21 @@ def create_full_dashboard(
     timeline_data["log10_eigmin_L_pose6"] = np.log10(np.maximum(np.asarray(pose6_eigmin_list), 1e-12)).tolist()
     timeline_data["log10_eigmin_L_xy_yaw"] = np.log10(np.maximum(np.asarray(xy_yaw_eigmin_list), 1e-12)).tolist()
 
+    # MF row (Panel A row 1) log-scale range so all three singular values are visible and nothing clips
+    mf_vals = np.concatenate([
+        np.asarray(timeline_data["mf_s1_f"]),
+        np.asarray(timeline_data["mf_s2_f"]),
+        np.asarray(timeline_data["mf_s3_f"]),
+    ])
+    mf_finite = mf_vals[np.isfinite(mf_vals) & (mf_vals > 0)]
+    if mf_finite.size > 0:
+        mf_lo = max(1e-12, float(np.percentile(mf_finite, 0.5)))
+        mf_hi = float(np.percentile(mf_finite, 99.5))
+        mf_hi = max(mf_hi, mf_lo * 10)
+        timeline_data["mf_svd_y_range"] = [mf_lo, mf_hi]
+    else:
+        timeline_data["mf_svd_y_range"] = [1e-12, 1.0]
+
     # Scatter health signals (anisotropy/planarity proxies)
     # Eigenvalues are expected in ascending order from eigvalsh: [λ1<=λ2<=λ3].
     # For metrics we use l1=max, l2=mid, l3=min.
@@ -376,24 +407,41 @@ def create_full_dashboard(
     est_y = (p_W[:, 1] - origin[1]).tolist()
     est_z = (p_W[:, 2] - origin[2]).tolist()
     has_ground_truth = False
+    scan_timestamps = np.array(data.get("timestamps", np.zeros(n_scans)), dtype=np.float64)
+    if scan_timestamps.size != n_scans:
+        scan_timestamps = np.zeros(n_scans)
     if ground_truth_path:
         gt_xyz = load_tum_positions(ground_truth_path)
         if gt_xyz is not None:
-            gt_x_arr = gt_xyz[0] - origin[0]
-            gt_y_arr = gt_xyz[1] - origin[1]
-            gt_z_arr = gt_xyz[2] - origin[2]
+            gt_x_arr = np.array(gt_xyz[0], dtype=np.float64) - origin[0]
+            gt_y_arr = np.array(gt_xyz[1], dtype=np.float64) - origin[1]
+            gt_z_arr = np.array(gt_xyz[2], dtype=np.float64) - origin[2]
+            gt_ts_arr = np.array(gt_xyz[3], dtype=np.float64)
             has_ground_truth = True
+            # GT positions at scan timestamps (for alignment display)
+            gt_at_scan_x, gt_at_scan_y, gt_at_scan_z = interpolate_gt_at_times(
+                np.array(gt_xyz[0], dtype=np.float64) - origin[0],
+                np.array(gt_xyz[1], dtype=np.float64) - origin[1],
+                np.array(gt_xyz[2], dtype=np.float64) - origin[2],
+                gt_ts_arr,
+                scan_timestamps,
+            )
     trajectory_data = {
         "x": est_x,
         "y": est_y,
         "z": est_z,
         "logdet": timeline_data["logdet_L_total"],
         "has_ground_truth": has_ground_truth,
+        "scan_timestamps": scan_timestamps.tolist(),
     }
     if has_ground_truth:
         trajectory_data["gt_x"] = gt_x_arr.tolist()
         trajectory_data["gt_y"] = gt_y_arr.tolist()
         trajectory_data["gt_z"] = gt_z_arr.tolist()
+        trajectory_data["gt_timestamps"] = gt_ts_arr.tolist()
+        trajectory_data["gt_at_scan_x"] = gt_at_scan_x.tolist()
+        trajectory_data["gt_at_scan_y"] = gt_at_scan_y.tolist()
+        trajectory_data["gt_at_scan_z"] = gt_at_scan_z.tolist()
 
     # L matrices for heatmap (all scans)
     L_total = data.get("L_total", np.zeros((n_scans, 22, 22)))
@@ -614,53 +662,58 @@ def create_full_dashboard(
 	    // Panel A: MF + degeneracy + posterior subspace health
 	    // =====================================================================
 	    const TIMELINE_ROWS = 5;
+	    const PANEL_A_COLORS = [
+	        '#00d4ff', '#4ecdc4', '#45aaf2', '#f7b731', '#26de81', '#a55eea', '#ff6b6b',
+	        '#fd9644', '#2bcbba', '#a29bfe', '#55efc4', '#ffeaa7', '#fab1a0', '#81ecec', '#74b9ff', '#fd79a8', '#00b894'
+	    ];
 		    function createTimeline() {{
 		        const traces = [
             // Row 1: Matrix Fisher singular values (log scale; MF health)
-            {{ x: timelineData.scan_idx, y: timelineData.mf_s1_f, name: 'MF s1', line: {{color: '#00d4ff'}}, xaxis: 'x', yaxis: 'y' }},
-            {{ x: timelineData.scan_idx, y: timelineData.mf_s2_f, name: 'MF s2', line: {{color: '#4ecdc4'}}, xaxis: 'x', yaxis: 'y' }},
-            {{ x: timelineData.scan_idx, y: timelineData.mf_s3_f, name: 'MF s3', line: {{color: '#45aaf2'}}, xaxis: 'x', yaxis: 'y' }},
+            {{ x: timelineData.scan_idx, y: timelineData.mf_s1_f, name: 'MF s1', line: {{color: PANEL_A_COLORS[0]}}, xaxis: 'x', yaxis: 'y' }},
+            {{ x: timelineData.scan_idx, y: timelineData.mf_s2_f, name: 'MF s2', line: {{color: PANEL_A_COLORS[1]}}, xaxis: 'x', yaxis: 'y' }},
+            {{ x: timelineData.scan_idx, y: timelineData.mf_s3_f, name: 'MF s3', line: {{color: PANEL_A_COLORS[2]}}, xaxis: 'x', yaxis: 'y' }},
 
             // Row 2: Scatter observability (0..1 proxies)
-            {{ x: timelineData.scan_idx, y: timelineData.median_map_aniso, name: 'median(map aniso)', line: {{color: '#f7b731'}}, xaxis: 'x2', yaxis: 'y2' }},
-            {{ x: timelineData.scan_idx, y: timelineData.median_map_planarity, name: 'median(map planarity)', line: {{color: '#26de81'}}, xaxis: 'x2', yaxis: 'y2' }},
-            {{ x: timelineData.scan_idx, y: timelineData.bins_strong_frac, name: '%bins strong (mass)', line: {{color: '#a55eea'}}, xaxis: 'x2', yaxis: 'y2' }},
-            {{ x: timelineData.scan_idx, y: timelineData.bins_planar_frac, name: '%bins planar (map)', line: {{color: '#ff6b6b'}}, xaxis: 'x2', yaxis: 'y2' }},
+            {{ x: timelineData.scan_idx, y: timelineData.median_map_aniso, name: 'median(map aniso)', line: {{color: PANEL_A_COLORS[3]}}, xaxis: 'x2', yaxis: 'y2' }},
+            {{ x: timelineData.scan_idx, y: timelineData.median_map_planarity, name: 'median(map planarity)', line: {{color: PANEL_A_COLORS[4]}}, xaxis: 'x2', yaxis: 'y2' }},
+            {{ x: timelineData.scan_idx, y: timelineData.bins_strong_frac, name: '%bins strong (mass)', line: {{color: PANEL_A_COLORS[5]}}, xaxis: 'x2', yaxis: 'y2' }},
+            {{ x: timelineData.scan_idx, y: timelineData.bins_planar_frac, name: '%bins planar (map)', line: {{color: PANEL_A_COLORS[6]}}, xaxis: 'x2', yaxis: 'y2' }},
 
             // Row 3: Conditioning sentinels (log10)
-            {{ x: timelineData.scan_idx, y: timelineData.log10_mf_cond, name: 'log10(MF cond)', line: {{color: '#00d4ff'}}, xaxis: 'x3', yaxis: 'y3' }},
-            {{ x: timelineData.scan_idx, y: timelineData.log10_cond_pose6, name: 'log10(cond pose6)', line: {{color: '#f7b731'}}, xaxis: 'x3', yaxis: 'y3' }},
-            {{ x: timelineData.scan_idx, y: timelineData.log10_cond_xy_yaw, name: 'log10(cond xy_yaw)', line: {{color: '#4ecdc4'}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_mf_cond, name: 'log10(MF cond)', line: {{color: PANEL_A_COLORS[7]}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_cond_pose6, name: 'log10(cond pose6)', line: {{color: PANEL_A_COLORS[8]}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_cond_xy_yaw, name: 'log10(cond xy_yaw)', line: {{color: PANEL_A_COLORS[9]}}, xaxis: 'x3', yaxis: 'y3' }},
 
             // Row 4: Rotation / yaw agreement (degrees)
-            {{ x: timelineData.scan_idx, y: timelineData.rot_err_lidar_deg_pred, name: '||Log(R_predᵀ R_MF)|| (deg)', line: {{color: '#00d4ff'}}, xaxis: 'x4', yaxis: 'y4' }},
-            {{ x: timelineData.scan_idx, y: timelineData.dyaw_gyro, name: 'Δyaw gyro', line: {{color: '#f7b731'}}, xaxis: 'x4', yaxis: 'y4' }},
-            {{ x: timelineData.scan_idx, y: timelineData.dyaw_odom, name: 'Δyaw odom', line: {{color: '#4ecdc4'}}, xaxis: 'x4', yaxis: 'y4' }},
-            {{ x: timelineData.scan_idx, y: timelineData.dyaw_wahba, name: 'Δyaw MF', line: {{color: '#ff6b6b'}}, xaxis: 'x4', yaxis: 'y4' }},
+            {{ x: timelineData.scan_idx, y: timelineData.rot_err_lidar_deg_pred, name: '||Log(R_predᵀ R_MF)|| (deg)', line: {{color: PANEL_A_COLORS[10]}}, xaxis: 'x4', yaxis: 'y4' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dyaw_gyro, name: 'Δyaw gyro', line: {{color: PANEL_A_COLORS[11]}}, xaxis: 'x4', yaxis: 'y4' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dyaw_odom, name: 'Δyaw odom', line: {{color: PANEL_A_COLORS[12]}}, xaxis: 'x4', yaxis: 'y4' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dyaw_wahba, name: 'Δyaw MF', line: {{color: PANEL_A_COLORS[13]}}, xaxis: 'x4', yaxis: 'y4' }},
 
             // Row 5: Posterior health (log sentinels)
-            {{ x: timelineData.scan_idx, y: timelineData.log10_eigmin_L_pose6, name: 'log10(λmin pose6)', line: {{color: '#00d4ff'}}, xaxis: 'x5', yaxis: 'y5' }},
-            {{ x: timelineData.scan_idx, y: timelineData.log10_eigmin_L_xy_yaw, name: 'log10(λmin xy_yaw)', line: {{color: '#4ecdc4'}}, xaxis: 'x5', yaxis: 'y5' }},
-            {{ x: timelineData.scan_idx, y: timelineData.logdet_L_pose6, name: 'log|L_pose6|', line: {{color: '#26de81'}}, xaxis: 'x5', yaxis: 'y5' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_eigmin_L_pose6, name: 'log10(λmin pose6)', line: {{color: PANEL_A_COLORS[14]}}, xaxis: 'x5', yaxis: 'y5' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_eigmin_L_xy_yaw, name: 'log10(λmin xy_yaw)', line: {{color: PANEL_A_COLORS[15]}}, xaxis: 'x5', yaxis: 'y5' }},
+            {{ x: timelineData.scan_idx, y: timelineData.logdet_L_pose6, name: 'log|L_pose6|', line: {{color: PANEL_A_COLORS[16]}}, xaxis: 'x5', yaxis: 'y5' }},
         ];
 
+        const mfRange = timelineData.mf_svd_y_range || [1e-12, 1];
         const layout = {{
             ...darkLayout,
             height: 720,
             showlegend: true,
-            legend: {{ orientation: 'h', y: 1.08, x: 0.5, xanchor: 'center' }},
+            legend: {{ orientation: 'v', x: 1.02, y: 1, xanchor: 'left', yanchor: 'top', bgcolor: 'rgba(22, 33, 62, 0.9)', font: {{ size: 10 }} }},
             grid: {{ rows: TIMELINE_ROWS, columns: 1, pattern: 'independent', roworder: 'top to bottom' }},
             xaxis: {{ ...darkLayout.xaxis, anchor: 'y', domain: [0, 1], showticklabels: false }},
             xaxis2: {{ ...darkLayout.xaxis, anchor: 'y2', domain: [0, 1], showticklabels: false }},
             xaxis3: {{ ...darkLayout.xaxis, anchor: 'y3', domain: [0, 1], showticklabels: false }},
             xaxis4: {{ ...darkLayout.xaxis, anchor: 'y4', domain: [0, 1], showticklabels: false }},
             xaxis5: {{ ...darkLayout.xaxis, anchor: 'y5', domain: [0, 1], title: 'Scan Index' }},
-            yaxis: {{ ...darkLayout.yaxis, title: 'MF svd (log)', type: 'log' }},
+            yaxis: {{ ...darkLayout.yaxis, title: 'MF svd (log)', type: 'log', range: mfRange }},
             yaxis2: {{ ...darkLayout.yaxis, title: 'scatter proxies', range: [0, 1.05] }},
             yaxis3: {{ ...darkLayout.yaxis, title: 'log10(cond)' }},
             yaxis4: {{ ...darkLayout.yaxis, title: 'deg' }},
             yaxis5: {{ ...darkLayout.yaxis, title: 'log sentinels' }},
-            margin: {{ t: 50, b: 40, l: 70, r: 40 }},
+            margin: {{ t: 50, b: 40, l: 70, r: 220 }},
             shapes: createVerticalLines(currentScan, TIMELINE_ROWS),
         }};
 
@@ -794,16 +847,37 @@ def create_full_dashboard(
         const traces = [];
         // Ground truth (if present; draw first so it appears behind estimated)
         if (trajectoryData.gt_x && trajectoryData.gt_y && trajectoryData.gt_z) {{
+            const gtHover = trajectoryData.gt_timestamps
+                ? 'Ground truth<br>t=%{{customdata:.3f}} s<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>'
+                : 'Ground truth<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>';
             traces.push({{
                 x: trajectoryData.gt_x,
                 y: trajectoryData.gt_y,
                 z: trajectoryData.gt_z,
+                customdata: trajectoryData.gt_timestamps || trajectoryData.gt_x.map((_, i) => i),
                 mode: 'lines',
                 type: 'scatter3d',
                 line: {{ color: '#4ecdc4', width: 5 }},
                 name: 'Ground truth',
-                hovertemplate: 'Ground truth<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>'
+                hovertemplate: gtHover
             }});
+            // GT at scan timestamps (markers aligned with our scans)
+            if (trajectoryData.gt_at_scan_x && trajectoryData.gt_at_scan_x.length > 0) {{
+                const scanTs = trajectoryData.scan_timestamps || trajectoryData.gt_at_scan_x.map((_, i) => i);
+                const scanLabels = trajectoryData.gt_at_scan_x.map((_, i) =>
+                    'scan ' + i + ' | t=' + (typeof scanTs[i] === 'number' ? scanTs[i].toFixed(3) : i) + ' s');
+                traces.push({{
+                    x: trajectoryData.gt_at_scan_x,
+                    y: trajectoryData.gt_at_scan_y,
+                    z: trajectoryData.gt_at_scan_z,
+                    mode: 'markers',
+                    type: 'scatter3d',
+                    marker: {{ size: 5, color: '#26de81', symbol: 'circle' }},
+                    name: 'GT at scan times',
+                    text: scanLabels,
+                    hovertemplate: '%{{text}}<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>'
+                }});
+            }}
         }}
         // Estimated trajectory (bright color so visible next to ground truth on dark background)
         traces.push({{

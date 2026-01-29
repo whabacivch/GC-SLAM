@@ -127,7 +127,67 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 
 ---
 
-### 5.5 Frame or axis convention mismatch (investigation)
+### 5.4.2 “Huge trajectory changes at first, then tiny later” and constant frame shift (investigation)
+
+**Observation (dashboard + 3D plot):** Trajectory shows large corrections in the first few scans (e.g. ||Log(R_pred^T R_MF)|| up to ~80°, condition numbers high then dropping, ΔI_rot/ΔI_xy huge at scan 0 then negligible). Later, the estimated path roughly follows ground-truth shape but with a persistent spatial/rotational offset.
+
+**Why “huge first, then tiny later” (code and data):**
+
+1. **Empty map on first scan** — When `map_is_empty` (`pipeline.py:1102`), we do **not** use Matrix Fisher scan-to-map alignment for map placement; we use the **posterior** belief (odom + IMU + LiDAR evidence fused) to place the map (`pipeline.py:1108–1122`). So scan 0 adds a large amount of LiDAR evidence to an **ill-conditioned** state (high cond(MF), high cond(pose6)); the information gain ΔI_rot and ΔI_xy is huge because we’re constraining an under-determined system. By scans 1–3 the map exists, MF alignment kicks in, and the state is better conditioned, so subsequent ΔI drops.
+
+2. **Conditioning** — Dashboard shows `log10(MF cond)` and `log10(cond pose6)` starting high (~3–4) and dropping to ~1 within a few scans. Ill-conditioning implies large updates for the same residual; once well-conditioned, updates become smaller. So “huge then tiny” is consistent with the estimator going from ill- to well-conditioned.
+
+3. **Anchor timing** — Export is `pose_export = anchor_correction ∘ pose_6d` (`backend_node.py:1001`). `anchor_correction` is identity until we have K odom messages, then it is set to `inv(A_smoothed) ∘ A0`. We do **not** retroactively rewrite already-exported TUM poses. So if the first LiDAR scan occurs **before** we have K odom, the first few poses in the TUM file are in A0 frame and later poses are in A_smoothed frame — i.e. a **one-time frame jump** in the trajectory file. If the first scan occurs **after** K odom (typical when odom/IMU start before LiDAR), every published pose already has `anchor_correction` applied; the “huge first” is then purely from (1) and (2). To confirm which case applies, check whether `Anchor smoothed: K=...` is logged before or after the first `on_lidar` callback in a run.
+
+4. **Scan-0 feature quality** — Dashboard “Top-12 bins (scan 0)” shows variable `k_scan` and near-zero `k_map` / planarity / aniso (map not yet formed). Weak or inconsistent geometric constraints at scan 0 can contribute to large initial corrections.
+
+**Does the data indicate a constant frame shift?**
+
+- **No pure constant shift** — The evaluator uses evo’s SE(3) Umeyama alignment (`evaluate_slam.py`: `est_sync.align(gt_sync, correct_scale=False)`). A **constant** SE(3) error would be absorbed by that alignment; the reported ATE is the **residual** after best-fit SE(3). So the ~2 m translation and ~134° rotation ATE we see are **non-constant** residuals (drift, or initial-phase vs later-phase structure).
+
+- **What the 3D plot suggests** — After the chaotic start, the estimated trajectory (orange) follows the ground-truth (cyan) shape but with a **consistent offset**. That can be (a) residual after Umeyama (so the error is not exactly constant), (b) **initial anchor bias**: first poses in A0, then switch to A_smoothed, leaving an unresolved offset, or (c) **residual frame/calibration**: e.g. `body_T_wheel` inexact or GT in a slightly different frame (see `docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`).
+
+- **Odom drift vs frame** — Dashboard “deg” panel shows Δyaw odom with a **sawtooth** (drift then sharp correction) and Δyaw MF tracking it. So odom yaw **drifts** and the SLAM system **corrects** it; that is not an uncorrected constant frame shift. A **constant** frame error would appear as a persistent bias in rotation/translation that Umeyama would largely remove; the fact that we still have large ATE after alignment means the error has time-varying or structurally varying components.
+
+**Summary:** “Huge first, tiny later” is explained by empty map + ill-conditioning on scan 0, then MF alignment and better conditioning; anchor timing can add a one-time frame jump in the export if the first scan is before K odom. The data does **not** show a single constant frame shift that we could remove with one fixed transform; it shows corrected odom drift and a residual error (ATE) that is partly initial/anchor and partly residual frame or drift. Next steps: (1) Confirm in logs whether anchor smoothing completes before or after first LiDAR. (2) If before: consider strengthening first-scan observability (e.g. planar prior, or slightly larger initial pose uncertainty) to reduce overshoot. (3) Revisit `body_T_wheel` and GT frame definition if residual rotation/translation bias remains after alignment.
+
+---
+
+### 5.5 Z leakage and rotation (roll) — brainstorm
+
+**Observation:** We still see z drift/leakage in some runs and a **dominant rotation error (roll ~125°)** in ATE. Below: root causes and improvement ideas.
+
+#### Why z might still leak
+
+1. **Process noise Q treats z like x,y** — `create_datasheet_process_noise_state()` in `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/structures/inverse_wishart_jax.py` uses a **single** scalar per block: trans block gets `GC_PROCESS_TRANS_DIFFUSION` (1e-4 m²/s) for **all three** diagonal entries. So **Q[2,2] = Q[0,0] = 1e-4**. We have `GC_PROCESS_Z_DIFFUSION = 1e-8` in `constants.py` but it is **never used**. So every prediction step adds the same diffusion to z as to x,y; the planar prior has to fight that. **Fix:** Build the trans block of Q with x,y = `GC_PROCESS_TRANS_DIFFUSION` and z = `GC_PROCESS_Z_DIFFUSION` (e.g. diagonal [1e-4, 1e-4, 1e-8]). That requires changing the IW process-noise structure from one scalar per block to either (a) a 3-vector for trans (x, y, z) or (b) a separate 1D “z” block. Option (a) is minimal: initialize trans Psi so that the IW mean has diag(trans) = [TRANS, TRANS, Z_DIFFUSION].
+
+2. **Planar translation still injects z when map has vertical structure** — `z_precision_scale = lambda3 / lambda1` is self-adaptive; when the map has vertical structure (walls), lambda3 > 0 and we add LiDAR z information. If that conflicts with the planar prior (e.g. map built with wrong z or drift), z can move. **Mitigation:** Cap `z_precision_scale` from above (e.g. min(z_precision_scale, 0.1)) so LiDAR never dominates z; or add an explicit “planar robot” mode that forces z_precision_scale = 0 for the trans evidence and relies only on planar prior + odom (with odom z variance already loose).
+
+3. **Fusion scale α** — If conditioning-based or excitation-based α scales down **all** evidence (including planar prior), the prior’s pull on z weakens and prediction (with isotropic Q) can dominate. **Check:** Log L[2,2] from planar prior vs L[2,2] from planar translation and from odom; ensure planar prior remains the dominant z constraint after α.
+
+#### Why rotation (especially roll) is wrong
+
+1. **Gravity / T_base_imu** — Roll and pitch are driven by **IMU vMF gravity evidence** (tilt: “R^T @ (-g_world) ≈ accel_body”) and by **Matrix Fisher** (LiDAR directions). If `GC_GRAVITY_W` or the IMU extrinsic `T_base_imu` is wrong (sign, axis, or angle), we get a **systematic tilt error** (roll/pitch). The config notes “28° rotation to align IMU gravity with base +Z” and “Previous 154.5° was inverting both gravity and yaw.” So we’ve had convention/sign issues before. **Actions:** (a) **Audit:** Log at startup the predicted gravity direction in body frame (R_base_imu @ [0,0,-1] or equivalent) and the mean accel direction over the first N samples; they should align. (b) **Validate:** Run `tools/estimate_imu_base_extrinsic_rotation.py` (or equivalent) and compare to current `T_base_imu`; if they differ, fix the extrinsic or the gravity constant. (c) **Fail-fast:** If xbar @ mu0 (gravity alignment) is strongly negative on the first few seconds, emit a hard error or warning that gravity/IMU frame is likely wrong.
+
+2. **Odom 6D pose includes roll/pitch** — We use the full 6×6 odom covariance. If the bag publishes **tight** roll/pitch variance (e.g. 0.001), we’d trust odom tilt; if **loose** (1e6), we don’t. For planar wheel odom, roll/pitch are usually **unobservable** and should be very loose. **Check:** Inspect `last_odom_cov_se3[3:5, 3:5]` (roll, pitch) in the bag; if they’re tight, consider **inflating** roll/pitch variance (e.g. max(cov, 1e2)) so we don’t trust odom tilt and rely on IMU + LiDAR instead.
+
+3. **First-scan map at wrong tilt** — On the first scan we place the map using the **posterior** pose (odom + IMU + LiDAR). If that pose has wrong roll/pitch (e.g. from one bad odom or wrong IMU tilt), the map is built tilted and subsequent Matrix Fisher alignment locks onto that tilt. **Mitigation:** (a) Use a **stronger tilt prior** on the first scan (e.g. roll ≈ 0, pitch ≈ 0 with small sigma) when we know the robot is planar. (b) Or delay “committing” the map orientation until we have K scans and then use a smoothed tilt (similar to anchor smoothing).
+
+4. **Planar robot = roll ≈ 0, pitch ≈ 0** — We don’t have an explicit **tilt prior**. For a planar base, we could add a soft prior: roll ≈ 0, pitch ≈ 0 (rad), with a small sigma (e.g. 0.01 rad ≈ 0.6°), and only yaw free. That would pull tilt toward level and reduce the chance that wrong IMU/odom tilt dominates. **Implementation:** New evidence block (or extend planar prior): inject L[3,3] and L[4,4] (roll, pitch) with precision 1/sigma_tilt^2 and h[3], h[4] toward 0; leave yaw (index 5) unconstrained.
+
+5. **body_T_wheel residual** — We already apply `body_T_wheel` at evaluation time. If the residual rotation error is **constant** in the wheel frame, it could be a residual error in that transform or GT being in a slightly different frame. Re-check M3DGR calibration.md and the exact frame that GT uses; if needed, re-estimate or refine `body_T_wheel`.
+
+#### Suggested order of work
+
+1. **Z:** Use `GC_PROCESS_Z_DIFFUSION` in Q (trans block z entry) so prediction doesn’t add full trans diffusion to z.  
+2. **Rotation:** Audit gravity/IMU alignment at startup (log xbar @ mu0, predicted vs mean accel direction); validate T_base_imu and GC_GRAVITY_W.  
+3. **Rotation:** Inflate odom roll/pitch variance if the bag publishes tight tilt (so we don’t trust odom tilt).  
+4. **Rotation (optional):** Add soft tilt prior (roll ≈ 0, pitch ≈ 0) for planar robot.  
+5. **Rotation (optional):** First-scan tilt: stronger tilt prior or delayed map-orientation commit.
+
+---
+
+### 5.6 Frame or axis convention mismatch (investigation)
 
 **Report first (code vs docs):**
 
@@ -143,7 +203,7 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 
 ---
 
-### 5.6 Compute bottleneck on scan throughput
+### 5.7 Compute bottleneck on scan throughput
 
 **What limits how many scans we can process per second:**
 
@@ -162,6 +222,115 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
    - Binning and soft assignment are vectorized over N points (e.g. 10k–50k). Cost is O(N × B_BINS). Typically secondary to the 4000-step IMU scan unless N is very large.
 
 **Summary:** The main compute bottleneck was the **fixed 4000-step IMU preintegration scan**. **Fixed:** IMU is now sliced to the integration window `[min(t_last_scan, scan_start), max(t_scan, scan_end)]`, capped at `GC_MAX_IMU_PREINT_LEN = 512`, and padded to 512; preintegration runs over 512 steps instead of 4000 (`backend_node.py`, `constants.GC_MAX_IMU_PREINT_LEN`). **Wahba removed:** Pipeline uses Matrix Fisher only; `wahba.py` moved to `archive/legacy_operators/`, removed from operators `__init__` and tests.
+
+---
+
+### 5.8 Future: Replace per-point deskew with bin-level motion marginalization (natural-parameter “deskew”)
+
+**Report first (actual behavior today):**
+
+- The backend currently performs **per-point deskew** via a constant-twist model:
+  - Operator: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/deskew_constant_twist.py:1` (per-point warp `p0 = Exp(alpha*xi)^{-1} ⊙ p` with `alpha=(t - scan_start)/(scan_end-scan_start)`).
+  - Pipeline callsite: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:561`, producing `deskewed_points` used for binning and moment match.
+
+**Design goal:** Keep fixed-cost, single-path behavior but remove the expensive per-point SE(3) warp by marginalizing within-scan motion into a **bin-local covariance inflation** term:
+
+- Do not transform points (no per-point `Exp` / inverse action).
+- Inflate the LiDAR likelihood covariance in information form: `Σ_eff,b = Σ_sensor + Σ_motion,b`.
+- Treat this as an explicit approximation operator (series truncation + independence assumptions) and apply Frobenius correction when triggered.
+
+#### 5.8.1 Closed-form 2nd-order rotational smear (constant ω)
+
+Assume constant angular velocity `ω` over the scan interval. Let `A = [ω]×` and approximate:
+
+- `R(Δt) p ≈ p + (A p) Δt + (1/2)(A² p) Δt²`
+- Rotation-induced displacement: `δp_rot(Δt) ≈ (A p) Δt + (1/2)(A² p) Δt²`
+
+For bin `b`, define:
+
+- Point second moment: `M_b = E[p pᵀ]`
+- Time moments: `μ_k = E[Δt^k]` for `k = 1..4`
+- Central scalars:
+  - `Var(Δt) = μ_2 − μ_1²`
+  - `Var(Δt²) = μ_4 − μ_2²`
+  - `Cov(Δt, Δt²) = μ_3 − μ_1 μ_2`
+
+Under the bin-local approximation that `(p ⟂ Δt)` (optional refinement below), a symmetric 2nd-order rotational smear covariance is:
+
+```
+Σ_motion,rot,b
+  ≈ Var(Δt)       · A  M_b  Aᵀ
+   + 1/4 Var(Δt²) · A² M_b (A²)ᵀ
+   + 1/2 Cov(Δt,Δt²) · ( A M_b (A²)ᵀ + A² M_b Aᵀ )
+```
+
+This stays bin-level: a handful of 3×3 matrix products per bin (e.g. B=48).
+
+#### 5.8.2 Required per-bin sufficient statistics
+
+Let per-point weights be `w_i` and responsibilities be `r_{i,b}` from `BinSoftAssign`.
+
+Define bin mass `N_b = Σ_i w_i r_{i,b}` (no hard thresholds; use `eps_mass` for stability).
+
+To compute `M_b` and `μ_1..μ_4`, you need (per bin):
+
+- `Σ w r`  (mass)
+- `Σ w r p pᵀ`  (point second moment)
+- `Σ w r Δt`, `Σ w r Δt²`, `Σ w r Δt³`, `Σ w r Δt⁴`  (time moments)
+
+**Optional refinement (reduce the (p ⟂ Δt) error):**
+
+- `Σ w r (Δt p)` and `Σ w r (Δt² p)` (fixed-cost; helps with time-skewed sampling patterns).
+
+#### 5.8.3 Δt definition (must match current deskew conventions)
+
+To align with the current deskew operator’s `alpha=(t−t0)/(t1−t0)` (`deskew_constant_twist.py:46`), define:
+
+- `t0 = scan_start_time`, `t1 = scan_end_time`
+- `Δt_i = (timestamp_i − t0)` in seconds (and optionally also store `dt_scan = t1 − t0` for scale checks)
+
+#### 5.8.4 Pipeline integration (explicit operator, no fallbacks)
+
+**Where it fits:**
+
+- Keep Step 4 (`BinSoftAssign`) unchanged.
+- Add a new operator between Steps 4 and 5:
+  - **Step 4.5 (BinMotionSmearCovariance)** consumes `{points, timestamps, weights, responsibilities, ω}` and emits `Σ_motion,b` for each bin.
+- Step 5 (`ScanBinMomentMatch`) adds `Σ_motion,b` into each bin covariance before evidence extraction:
+  - `Σ_bin,eff = Σ_bin,geom + Σ_sensor + Σ_motion,b` (then SPD-project as a DomainProjection if needed).
+
+**Single-path selection (non-negotiable):**
+
+- Introduce an explicit config selection, e.g. `deskew_model: per_point | bin_smear_2nd_order` (no implicit fallbacks).
+- Fail-fast at startup if the selected model cannot be executed (missing timestamps, missing ω estimate, etc.).
+
+#### 5.8.5 ω source (deterministic plug-in, logged)
+
+Rotation smear needs a scan-local `ω` (rad/s). Candidate sources already computed:
+
+- IMU: `omega_avg` from debiased, windowed gyro mean (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:531`).
+- Odom: yaw-rate `wz` from odom twist (if used as an explicit competing hypothesis; otherwise keep as diagnostics only).
+
+No gating: if multiple candidates are used, handle them as explicit hypotheses with soft responsibilities (declared model), or pick one declared plug-in and log IMU↔odom disagreement.
+
+#### 5.8.6 Certification + Frobenius correction
+
+This operator introduces approximation triggers by construction:
+
+- `series_truncation` (2nd-order expansion of `Exp([ω]× Δt)`),
+- `p_dt_independence_assumption` (if using the simplified factorization),
+- optional `moment_correction` / `psd_projection` (if enforcing SPD).
+
+Per policy: `approximation_triggers != ∅` ⇒ `frobenius_applied == True` (no accept/reject branching).
+
+#### 5.8.7 Interaction with self-adaptive LiDAR IW noise
+
+If `Σ_eff,b = Σ_sensor + Σ_motion,b` is used in the likelihood, decide explicitly how LiDAR IW noise is updated:
+
+- Conservative (simple): update IW on residuals under `Σ_eff,b` (can over-inflate sensor noise).
+- Better (explicit approximation + certified): treat `Σ_motion,b` as known additive covariance and update IW for `Σ_sensor` using a corrected sufficient statistic (with a DomainProjection to SPD).
+
+This choice changes the model class and must be documented in `docs/GOLDEN_CHILD_INTERFACE_SPEC.md` terms (family in/out, approximation triggers, Frobenius applied).
 
 ---
 
@@ -303,6 +472,7 @@ Use 2nd/3rd derivatives of accel (ḟ, f̈, f⃛) to detect wheel slip, impacts,
 |------|--------|
 | **Step 2 (PredictDiffusion)** | Make Q anisotropic for planar vehicle: constrain z, optionally v_z. If keeping SE(3), enforce a gauge (z prior or v_z = 0 soft factor). |
 | **Step 3 (DeskewConstantTwist)** | Use odom twist as alternative or complementary deskew twist when IMU is inconsistent. In MHT: branch via **soft responsibilities** (no hard thresholds) based on IMU↔odom twist disagreement. |
+| **Step 4.5 (BinMotionSmearCovariance)** | **Future:** Replace per-point deskew with bin-level motion marginalization: compute `Σ_motion,b` from per-bin time moments (`Σ Δt^k`) and point moments (`Σ p pᵀ`) using 2nd-order rotational smear; add into bin covariance in info-form evidence (see §5.8). |
 | **Step 8 (PlanarTranslationEvidence)** | **DONE:** planarized z precision (self-adaptive) in LiDAR translation evidence (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/matrix_fisher_evidence.py:502`). |
 | **Step 9 (Evidence)** | **DONE:** odom twist factors, time-resolved tilt evidence, and planar priors are present. **Remaining:** add explicit cross-sensor consistency likelihoods (beyond diagnostics) and use IMU message covariances / LiDAR intensity. |
 | **Steps 10–11 (α + additive fusion)** | Keep additive fusion; compute α per-subspace (translation vs rotation) so one weak axis does not nuke everything; replace PSD projection “repair” with robust weighting upstream (Student-t weights per factor/per bin). |

@@ -142,6 +142,19 @@ class ScanDiagnostics:
     dyaw_odom: float = 0.0   # Odom yaw change
     dyaw_wahba: float = 0.0  # Wahba (LiDAR) yaw change
 
+    # Timing diagnostics (milliseconds)
+    t_total_ms: float = 0.0
+    t_point_budget_ms: float = 0.0
+    t_imu_preint_scan_ms: float = 0.0
+    t_imu_preint_int_ms: float = 0.0
+    t_deskew_ms: float = 0.0
+    t_bin_assign_ms: float = 0.0
+    t_bin_moment_ms: float = 0.0
+    t_matrix_fisher_ms: float = 0.0
+    t_planar_translation_ms: float = 0.0
+    t_lidar_bucket_iw_ms: float = 0.0
+    t_map_update_ms: float = 0.0
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -212,6 +225,17 @@ class ScanDiagnostics:
             "dyaw_gyro": self.dyaw_gyro,
             "dyaw_odom": self.dyaw_odom,
             "dyaw_wahba": self.dyaw_wahba,
+            "t_total_ms": self.t_total_ms,
+            "t_point_budget_ms": self.t_point_budget_ms,
+            "t_imu_preint_scan_ms": self.t_imu_preint_scan_ms,
+            "t_imu_preint_int_ms": self.t_imu_preint_int_ms,
+            "t_deskew_ms": self.t_deskew_ms,
+            "t_bin_assign_ms": self.t_bin_assign_ms,
+            "t_bin_moment_ms": self.t_bin_moment_ms,
+            "t_matrix_fisher_ms": self.t_matrix_fisher_ms,
+            "t_planar_translation_ms": self.t_planar_translation_ms,
+            "t_lidar_bucket_iw_ms": self.t_lidar_bucket_iw_ms,
+            "t_map_update_ms": self.t_map_update_ms,
         }
 
     @classmethod
@@ -285,7 +309,43 @@ class ScanDiagnostics:
             dyaw_gyro=float(d.get("dyaw_gyro", 0.0)),
             dyaw_odom=float(d.get("dyaw_odom", 0.0)),
             dyaw_wahba=float(d.get("dyaw_wahba", 0.0)),
+            t_total_ms=float(d.get("t_total_ms", 0.0)),
+            t_point_budget_ms=float(d.get("t_point_budget_ms", 0.0)),
+            t_imu_preint_scan_ms=float(d.get("t_imu_preint_scan_ms", 0.0)),
+            t_imu_preint_int_ms=float(d.get("t_imu_preint_int_ms", 0.0)),
+            t_deskew_ms=float(d.get("t_deskew_ms", 0.0)),
+            t_bin_assign_ms=float(d.get("t_bin_assign_ms", 0.0)),
+            t_bin_moment_ms=float(d.get("t_bin_moment_ms", 0.0)),
+            t_matrix_fisher_ms=float(d.get("t_matrix_fisher_ms", 0.0)),
+            t_planar_translation_ms=float(d.get("t_planar_translation_ms", 0.0)),
+            t_lidar_bucket_iw_ms=float(d.get("t_lidar_bucket_iw_ms", 0.0)),
+            t_map_update_ms=float(d.get("t_map_update_ms", 0.0)),
         )
+
+
+@dataclass
+class MinimalScanTape:
+    """
+    Minimal per-scan tape for crash-tolerant, low-overhead diagnostics.
+    Hot path stores only this; full ScanDiagnostics is optional at config.
+    """
+    scan_number: int
+    timestamp: float
+    dt_sec: float
+    n_points_raw: int
+    n_points_budget: int
+    fusion_alpha: float
+    cond_pose6: float
+    conditioning_number: float
+    eigmin_pose6: float
+    L_pose6: np.ndarray  # (6, 6) pose block of L_evidence
+    total_trigger_magnitude: float
+    # Optional timing (when enable_timing)
+    t_total_ms: float = 0.0
+    t_point_budget_ms: float = 0.0
+    t_deskew_ms: float = 0.0
+    t_bin_moment_ms: float = 0.0
+    t_map_update_ms: float = 0.0
 
 
 @dataclass
@@ -293,6 +353,7 @@ class DiagnosticsLog:
     """Container for all per-scan diagnostics from a run."""
 
     scans: List[ScanDiagnostics] = field(default_factory=list)
+    tape: List[MinimalScanTape] = field(default_factory=list)
 
     # Run metadata
     run_id: str = ""
@@ -301,9 +362,14 @@ class DiagnosticsLog:
     total_scans: int = 0
 
     def append(self, diag: ScanDiagnostics):
-        """Add a scan's diagnostics."""
+        """Add a scan's full diagnostics."""
         self.scans.append(diag)
         self.total_scans = len(self.scans)
+
+    def append_tape(self, entry: MinimalScanTape):
+        """Add a scan's minimal tape entry (hot path)."""
+        self.tape.append(entry)
+        self.total_scans = len(self.tape)
 
     def save_jsonl(self, path: str):
         """Save as JSON Lines (one JSON object per line for streaming)."""
@@ -341,15 +407,48 @@ class DiagnosticsLog:
         return log
 
     def save_npz(self, path: str):
-        """Save as compressed NumPy archive (more efficient for large runs)."""
+        """Save as compressed NumPy archive (more efficient for large runs).
+        If only tape entries exist, saves minimal format; otherwise full ScanDiagnostics format.
+        """
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-        n = len(self.scans)
-        if n == 0:
+        n_full = len(self.scans)
+        n_tape = len(self.tape)
+        if n_full > 0:
+            self._save_npz_full(path, n_full)
+        elif n_tape > 0:
+            self._save_npz_tape(path, n_tape)
+        else:
             np.savez_compressed(path, n_scans=0)
-            return
 
-        # Stack arrays for efficient storage
+    def _save_npz_tape(self, path: str, n: int):
+        """Save minimal tape format (crash-tolerant, low overhead)."""
+        data = {
+            "format": "minimal_tape",
+            "n_scans": n,
+            "run_id": self.run_id,
+            "start_time": self.start_time,
+            "scan_numbers": np.array([t.scan_number for t in self.tape]),
+            "timestamps": np.array([t.timestamp for t in self.tape]),
+            "dt_secs": np.array([t.dt_sec for t in self.tape]),
+            "n_points_raw": np.array([t.n_points_raw for t in self.tape]),
+            "n_points_budget": np.array([t.n_points_budget for t in self.tape]),
+            "fusion_alpha": np.array([t.fusion_alpha for t in self.tape]),
+            "cond_pose6": np.array([t.cond_pose6 for t in self.tape]),
+            "conditioning_number": np.array([t.conditioning_number for t in self.tape]),
+            "eigmin_pose6": np.array([t.eigmin_pose6 for t in self.tape]),
+            "L_pose6": np.stack([t.L_pose6 for t in self.tape]),
+            "total_trigger_magnitude": np.array([t.total_trigger_magnitude for t in self.tape]),
+            "t_total_ms": np.array([t.t_total_ms for t in self.tape]),
+            "t_point_budget_ms": np.array([t.t_point_budget_ms for t in self.tape]),
+            "t_deskew_ms": np.array([t.t_deskew_ms for t in self.tape]),
+            "t_bin_moment_ms": np.array([t.t_bin_moment_ms for t in self.tape]),
+            "t_map_update_ms": np.array([t.t_map_update_ms for t in self.tape]),
+        }
+        np.savez_compressed(path, **data)
+
+    def _save_npz_full(self, path: str, n: int):
+        """Save full ScanDiagnostics format (legacy)."""
         data = {
             "n_scans": n,
             "run_id": self.run_id,
@@ -415,6 +514,17 @@ class DiagnosticsLog:
             "dyaw_gyro": np.array([s.dyaw_gyro for s in self.scans]),
             "dyaw_odom": np.array([s.dyaw_odom for s in self.scans]),
             "dyaw_wahba": np.array([s.dyaw_wahba for s in self.scans]),
+            "t_total_ms": np.array([s.t_total_ms for s in self.scans]),
+            "t_point_budget_ms": np.array([s.t_point_budget_ms for s in self.scans]),
+            "t_imu_preint_scan_ms": np.array([s.t_imu_preint_scan_ms for s in self.scans]),
+            "t_imu_preint_int_ms": np.array([s.t_imu_preint_int_ms for s in self.scans]),
+            "t_deskew_ms": np.array([s.t_deskew_ms for s in self.scans]),
+            "t_bin_assign_ms": np.array([s.t_bin_assign_ms for s in self.scans]),
+            "t_bin_moment_ms": np.array([s.t_bin_moment_ms for s in self.scans]),
+            "t_matrix_fisher_ms": np.array([s.t_matrix_fisher_ms for s in self.scans]),
+            "t_planar_translation_ms": np.array([s.t_planar_translation_ms for s in self.scans]),
+            "t_lidar_bucket_iw_ms": np.array([s.t_lidar_bucket_iw_ms for s in self.scans]),
+            "t_map_update_ms": np.array([s.t_map_update_ms for s in self.scans]),
         }
 
         # Optional individual evidence components
@@ -508,6 +618,17 @@ class DiagnosticsLog:
                 dyaw_gyro=float(data["dyaw_gyro"][i]) if "dyaw_gyro" in data else 0.0,
                 dyaw_odom=float(data["dyaw_odom"][i]) if "dyaw_odom" in data else 0.0,
                 dyaw_wahba=float(data["dyaw_wahba"][i]) if "dyaw_wahba" in data else 0.0,
+                t_total_ms=float(data["t_total_ms"][i]) if "t_total_ms" in data else 0.0,
+                t_point_budget_ms=float(data["t_point_budget_ms"][i]) if "t_point_budget_ms" in data else 0.0,
+                t_imu_preint_scan_ms=float(data["t_imu_preint_scan_ms"][i]) if "t_imu_preint_scan_ms" in data else 0.0,
+                t_imu_preint_int_ms=float(data["t_imu_preint_int_ms"][i]) if "t_imu_preint_int_ms" in data else 0.0,
+                t_deskew_ms=float(data["t_deskew_ms"][i]) if "t_deskew_ms" in data else 0.0,
+                t_bin_assign_ms=float(data["t_bin_assign_ms"][i]) if "t_bin_assign_ms" in data else 0.0,
+                t_bin_moment_ms=float(data["t_bin_moment_ms"][i]) if "t_bin_moment_ms" in data else 0.0,
+                t_matrix_fisher_ms=float(data["t_matrix_fisher_ms"][i]) if "t_matrix_fisher_ms" in data else 0.0,
+                t_planar_translation_ms=float(data["t_planar_translation_ms"][i]) if "t_planar_translation_ms" in data else 0.0,
+                t_lidar_bucket_iw_ms=float(data["t_lidar_bucket_iw_ms"][i]) if "t_lidar_bucket_iw_ms" in data else 0.0,
+                t_map_update_ms=float(data["t_map_update_ms"][i]) if "t_map_update_ms" in data else 0.0,
             )
             log.scans.append(diag)
 

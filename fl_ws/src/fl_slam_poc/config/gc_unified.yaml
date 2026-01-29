@@ -81,6 +81,9 @@ gc_backend:
     # Restored to match good run (2026-01-26 22:06:57) values
     T_base_imu:   [0.0,   0.0, 0.0,   -0.015586, 0.489293, 0.0]
 
+    # Profiling / timing
+    enable_timing: false
+
     # Trajectory export
     trajectory_export_path: /tmp/gc_slam_trajectory.tum
 

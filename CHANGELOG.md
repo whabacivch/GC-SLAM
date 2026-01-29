@@ -4,6 +4,22 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-29: Fixed shapes + diagnostics doc + bin_atlas import
+
+- **Dynamic shapes:** Point budget now returns **fixed-size** arrays (N_POINTS_CAP) instead of slicing to n_selected; pipeline passes them to deskew → bin_soft_assign → scan_bin_moment_match so downstream JITs see static `n_points` and do not recompile per scan (point_budget.py, pipeline unchanged except uses full result).
+- **Docs:** PIPELINE_COMPUTE_BOTTLENECKS.md §3.3.1 documents cost of `save_full_diagnostics=True` (heavy per-scan host pulls; use for short debug only). Summary table and §6.3 updated for fixed-shape status.
+- **bin_atlas:** Moved `kappa_from_resultant_batch` import to module level (was inside JIT'd `_compute_map_derived_stats_core`).
+
+## 2026-01-29: Pipeline performance and async (JIT cores, minimal tape, deferred publish)
+
+- **compute_map_derived_stats:** Replaced 48-iteration Python loop with one JIT'd batched path; `domain_projection_psd_batch` in primitives; bin_atlas returns tuple from JIT core, wrapper builds MapDerivedStats.
+- **Conditioning:** JAX `eigvalsh` on device for pose6 block; pull only scalars for ConditioningCert; no NumPy in hot path (pipeline.py).
+- **Map delta accumulation:** Batched weighted sum with `jnp.einsum` over stacked increments; no Python loop, no per-iteration host pull (backend_node.py).
+- **JIT step-level operators:** predict_diffusion, scan_bin_moment_match, bin_soft_assign, odom_quadratic_evidence, point_budget_resample now have JIT'd cores returning arrays; Python wrappers build CertBundle/ExpectedEffect from single host pull. point_budget returns fixed-size (N_POINTS_CAP) arrays so downstream binning JITs see static n_points (see later 2026-01-29 entry for full fix).
+- **Diagnostics tape:** Minimal per-scan tape by default (`PipelineConfig.save_full_diagnostics=False`). Hot path appends `MinimalScanTape` (scalars + L_pose6); full `ScanDiagnostics` only when `save_full_diagnostics=True`. `DiagnosticsLog.save_npz()` writes minimal or full format; `append_tape()` for tape, `append()` for full.
+- **Async/deferred publish:** State, TF, path are published at the **start** of the next LiDAR callback (drain pending); pipeline hot path does not block on ROS publish. Last scan published on destroy_node.
+- **Docs:** PIPELINE_COMPUTE_BOTTLENECKS.md updated with "Addressed" items, §6 Async publishing and diagnostics, §6.3 Compilation and recompiles, summary table status.
+
 ## 2026-01-28: IMU preint window slice + Wahba removed
 
 - **IMU preintegration bottleneck fix (PIPELINE_DESIGN_GAPS §5.6):** Slice IMU buffer to integration window `[min(t_last_scan, scan_start), max(t_scan, scan_end)]`, cap at `GC_MAX_IMU_PREINT_LEN = 512`, pad to 512. Preintegration now runs over 512 steps instead of 4000 per call (~8× fewer scan iterations per LiDAR scan). `constants.GC_MAX_IMU_PREINT_LEN`, `backend_node.py` slice logic.
@@ -23,6 +39,10 @@ This file tracks all significant changes, design decisions, and implementation m
 
 - **docs/PIPELINE_DESIGN_GAPS.md**: Updated to match current backend behavior (odom twist factors, planar priors + planar map z, time-resolved IMU tilt evidence, planarized LiDAR translation, fixed K_HYP hypothesis container). Added explicit code anchors and marked “DONE vs remaining” gaps. Noted that some referenced trace docs may be stale relative to code.
 
+## 2026-01-29: Docs — bin-level motion smear plan (replace per-point deskew)
+
+- **docs/PIPELINE_DESIGN_GAPS.md**: Added a detailed future plan (§5.8) for replacing per-point constant-twist deskew with a bin-level, closed-form 2nd-order rotational smear covariance (`Σ_motion,b`) using per-bin time moments (`Σ Δt^k`) and point second moments (`Σ p pᵀ`), including certification + Frobenius-correction requirements and IW-noise interaction notes.
+
 ## 2026-01-29: Docs — pipeline and evidence references updated
 
 - Updated documentation to reflect current operators: Matrix Fisher rotation, planar translation evidence, time‑resolved IMU vMF, odom twist factors, and planar priors.
@@ -37,6 +57,10 @@ This file tracks all significant changes, design decisions, and implementation m
 ## 2026-01-29: README — project overview refresh
 
 - Expanded README with overview, novelty, goals, visuals, and updated code layout.
+
+## 2026-01-29: Pipeline timing instrumentation
+
+- Added optional per‑stage timing (ms) in diagnostics and a backend parameter `enable_timing`.
 
 ## 2026-01-29: Dashboard — MF/scatter sentinels + factor ledger readability
 

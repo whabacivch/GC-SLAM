@@ -42,16 +42,9 @@ This roadmap is organized around the **Golden Child SLAM v2** implementation and
   - Odometry: use real 2D-aware covariances from `/odom` message
 - **Files**: `backend/operators/predict.py`, `backend/backend_node.py`
 
-### Phase 2: Sensor Evidence (IMU + Odom)
-- **IMU evidence**: Build `ImuEvidence` operator producing `(L_imu, h_imu)` from IMU buffer
-  - Accelerometer direction as vMF likelihood with κ from resultant statistics
-  - Gyro as Gaussian likelihood with IW-adaptive Σg
-  - Soft time-offset kernel (no hard scan boundaries)
-- **Odom evidence**: Build `OdomEvidence` operator producing `(L_odom, h_odom)`
-  - Partial observation: constrain `[x, y, yaw]` strongly, `[z, roll, pitch]` weakly
-  - Use message covariance when available, IW-adaptive otherwise
-  - Keep separate from IMU (fuse additively, don't pre-combine)
-- **Files**: new `backend/operators/imu_evidence.py`, new `backend/operators/odom_evidence.py`, `backend/pipeline.py`
+### Phase 2: Sensor Evidence (IMU + Odom) **(Implemented)**
+- The IMU/odom evidence operators described above already exist in the pipeline (`backend/operators/imu_evidence.py`, `backend/operators/odom_evidence.py`, and `backend/pipeline.py:613-981`). IMU vMF direction, gyro Gaussian, odom velocity/yaw rate, and pose-twist consistency factors run with continuous covariances.
+- **Next focus:** tuning the IW prior weights, surfacing diagnostics (MF SVD, factor ledger, cross-sensor disagreements), and ensuring the evidence logging (certs) covers the new summary fields added to `ScanDiagnostics`.
 
 ### Phase 3: IW Conjugate Updates + Measurement Noise
 - Compute innovation residuals after `PoseUpdateFrobeniusRecompose`
@@ -60,15 +53,15 @@ This roadmap is organized around the **Golden Child SLAM v2** implementation and
 - Odometry covariance as hyper-evidence for trans/vel IW priors
 - **Files**: new `backend/operators/adaptive_noise.py`, `backend/pipeline.py`
 
-### Phase 4: Likelihood-Based LiDAR Evidence (Replace UT Regression)
-- Replace `lidar_quadratic_evidence` with explicit Laplace/I-projection
-- Build explicit likelihood terms: vMF directional + Gaussian translational per bin
-- Use JAX autodiff or closed-form exponential family Hessians
-  - Gaussian: H = Σ⁻¹
-  - vMF: H = κ(I - μμᵀ)
-- Project joint NLL Hessian to information form evidence (L, h)
-- Add LiDAR noise IW updates from residuals
-- **Files**: `backend/operators/lidar_evidence.py`
+### Phase 4: Likelihood-Based LiDAR Evidence (Matrix Fisher + planar translation)
+- The pipeline now runs `matrix_fisher_evidence.py` to supply Matrix Fisher rotation plus planarized translation evidence with IW self-adaptation and planar priors (`backend/pipeline.py:613-672`). The “replace Wahba/UT regression” work is legacy—diagnostics now focus on scatter eigenvalues, Z-leak sentinels, and per-bin conditioning.
+- **Next focus:** expand bin-level diagnostics (MF SVD, leak detectors) and integrate them with the dashboards/NPZ logs.
+
+### Phase 4.1: Bin-level Motion Smear & Timing Instrumentation (next focus)
+
+- **Replace per-point deskew:** The new `deskew_constant_twist` operator is still in use, but the future plan (see `docs/PIPELINE_DESIGN_GAPS.md` §5.8) is to compute `Σ_motion,b` per bin via per-bin time moments (`Σ Δt^k`) and point second moments (`Σ p pᵀ`). Implement a `BinMotionSmearCovariance` operator between `BinSoftAssign` and `ScanBinMomentMatch` and add the inflated covariance into the information-form bin update. The config should explicitly select `deskew_model: per_point | bin_smear_2nd_order`, and the operator must emit a certified Frobenius correction whenever any series approximation is triggered.
+- **Diagnostics:** Track `Σ_motion,b`, leak energy (rot/info injected into Z), and per-bin moment stats in the NPZ/logs so the dashboard can plot leak sentinels and expose the bin-level approximations.
+- **Timing instrumentation:** Continue using the `enable_timing` flag (`backend_node.py:309-365`, `config/gc_unified.yaml:85`, `gc_rosbag.launch.py`) and the per-stage timers in `backend/pipeline.py:176-717`/`backend/diagnostics.py:343`. Profile the new bin-smear operator to ensure the 4000→512 IMU slicing remains the bottleneck fix and document the timing results in evaluation runs.
 
 ### Phase 5: Integration and Validation
 - Full pipeline integration (updated 16-step sequence)

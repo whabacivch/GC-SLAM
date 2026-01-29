@@ -291,7 +291,7 @@ class GoldenChildBackend(Node):
         self.declare_parameter("odom_topic", "/gc/sensors/odom")
         self.declare_parameter("imu_topic", "/gc/sensors/imu")
         self.declare_parameter("trajectory_export_path", "/tmp/gc_slam_trajectory.tum")
-        self.declare_parameter("diagnostics_export_path", "/tmp/gc_slam_diagnostics.npz")
+        self.declare_parameter("diagnostics_export_path", "results/gc_slam_diagnostics.npz")
         self.declare_parameter("status_check_period_sec", 5.0)
         self.declare_parameter("forgetting_factor", 0.99)
         # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] rotvec (radians).
@@ -305,6 +305,8 @@ class GoldenChildBackend(Node):
         self.declare_parameter("imu_gravity_scale", 1.0)
         # Deskew rotation-only mode: removes hidden IMU translation leak through deskew
         self.declare_parameter("deskew_rotation_only", False)
+        # Timing/profiling
+        self.declare_parameter("enable_timing", False)
         # Smoothed initial reference: buffer first K odom, then set first_odom_pose = aggregate (PIPELINE_DESIGN_GAPS §5.4.1)
         self.declare_parameter("init_window_odom_count", 10)
 
@@ -358,6 +360,9 @@ class GoldenChildBackend(Node):
         self.config.imu_gravity_scale = float(self.get_parameter("imu_gravity_scale").value)
         self.get_logger().info(f"IMU gravity scale: {self.config.imu_gravity_scale:.6f}")
         self.config.deskew_rotation_only = bool(self.get_parameter("deskew_rotation_only").value)
+        _et = self.get_parameter("enable_timing").value
+        self.config.enable_timing = _et if isinstance(_et, bool) else (str(_et).lower() == "true")
+        self.get_logger().info(f"Timing diagnostics: {'enabled' if self.config.enable_timing else 'disabled'}")
         self.get_logger().info(f"Deskew rotation-only: {self.config.deskew_rotation_only}")
         self.init_window_odom_count = int(self.get_parameter("init_window_odom_count").value)
         self.get_logger().info(f"Init window: first_odom_pose = aggregate of first {self.init_window_odom_count} odom")
@@ -418,6 +423,9 @@ class GoldenChildBackend(Node):
             run_id=f"gc_slam_{int(self.node_start_time)}",
             start_time=self.node_start_time,
         )
+
+        # Deferred publish: drain at start of next callback so pipeline hot path doesn't block on ROS
+        self._pending_publish: Optional[Tuple[jnp.ndarray, float]] = None
 
     def _init_ros(self):
         """Initialize ROS interfaces."""
@@ -749,6 +757,12 @@ class GoldenChildBackend(Node):
             f"IMU_interval=({t_last_scan:.9f}, {t_scan:.9f})"
         )
 
+        # Drain deferred publish from previous scan (keeps pipeline hot path free of ROS publish)
+        if self._pending_publish is not None:
+            pose_6d, stamp = self._pending_publish
+            self._publish_state_from_pose(pose_6d, stamp)
+            self._pending_publish = None
+
         # Apply forgetting to map stats
         self.map_stats = apply_forgetting(self.map_stats, self.forgetting_factor)
 
@@ -907,21 +921,28 @@ class GoldenChildBackend(Node):
                 eps_psd=self.config.eps_psd,
             )
             
-            # Update map statistics with weighted increments
+            # Update map statistics with batched weighted sum (no Python loop, no host pull)
             delta_S_dir = jnp.zeros_like(self.map_stats.S_dir)
             delta_S_dir_scatter = jnp.zeros_like(self.map_stats.S_dir_scatter)
             delta_N_dir = jnp.zeros_like(self.map_stats.N_dir)
             delta_N_pos = jnp.zeros_like(self.map_stats.N_pos)
             delta_sum_p = jnp.zeros_like(self.map_stats.sum_p)
             delta_sum_ppT = jnp.zeros_like(self.map_stats.sum_ppT)
-            for i, result in enumerate(results):
-                w_h = float(self.hyp_weights[i])
-                delta_S_dir = delta_S_dir + w_h * result.map_increments.delta_S_dir
-                delta_S_dir_scatter = delta_S_dir_scatter + w_h * result.map_increments.delta_S_dir_scatter
-                delta_N_dir = delta_N_dir + w_h * result.map_increments.delta_N_dir
-                delta_N_pos = delta_N_pos + w_h * result.map_increments.delta_N_pos
-                delta_sum_p = delta_sum_p + w_h * result.map_increments.delta_sum_p
-                delta_sum_ppT = delta_sum_ppT + w_h * result.map_increments.delta_sum_ppT
+            if results:
+                n_hyp = len(results)
+                weights = self.hyp_weights[:n_hyp]
+                stack_delta_S_dir = jnp.stack([r.map_increments.delta_S_dir for r in results], axis=0)
+                stack_delta_S_dir_scatter = jnp.stack([r.map_increments.delta_S_dir_scatter for r in results], axis=0)
+                stack_delta_N_dir = jnp.stack([r.map_increments.delta_N_dir for r in results], axis=0)
+                stack_delta_N_pos = jnp.stack([r.map_increments.delta_N_pos for r in results], axis=0)
+                stack_delta_sum_p = jnp.stack([r.map_increments.delta_sum_p for r in results], axis=0)
+                stack_delta_sum_ppT = jnp.stack([r.map_increments.delta_sum_ppT for r in results], axis=0)
+                delta_S_dir = jnp.einsum("i,ijk->jk", weights, stack_delta_S_dir)
+                delta_S_dir_scatter = jnp.einsum("i,ijkl->jkl", weights, stack_delta_S_dir_scatter)
+                delta_N_dir = jnp.einsum("i,ij->j", weights, stack_delta_N_dir)
+                delta_N_pos = jnp.einsum("i,ij->j", weights, stack_delta_N_pos)
+                delta_sum_p = jnp.einsum("i,ijk->jk", weights, stack_delta_sum_p)
+                delta_sum_ppT = jnp.einsum("i,ijkl->jkl", weights, stack_delta_sum_ppT)
             self.map_stats = update_map_stats(
                 self.map_stats,
                 delta_S_dir,
@@ -968,10 +989,13 @@ class GoldenChildBackend(Node):
                 if len(self.cert_history) > 100:
                     self.cert_history.pop(0)
 
-            # Collect diagnostics for dashboard (from first hypothesis)
-            if results and results[0].diagnostics is not None:
+            # Collect diagnostics: minimal tape (default) or full ScanDiagnostics
+            if results and results[0].diagnostics_tape is not None:
+                from dataclasses import replace
+                entry = replace(results[0].diagnostics_tape, scan_number=self.scan_count)
+                self.diagnostics_log.append_tape(entry)
+            elif results and results[0].diagnostics is not None:
                 diag = results[0].diagnostics
-                # Update scan number and add noise trace info
                 diag.scan_number = self.scan_count
                 diag.trace_Q_mode = float(jnp.trace(self.Q))
                 diag.trace_Sigma_lidar_mode = float(jnp.trace(self.config.Sigma_meas))
@@ -979,9 +1003,9 @@ class GoldenChildBackend(Node):
                 diag.trace_Sigma_a_mode = float(jnp.trace(self.config.Sigma_a))
                 self.diagnostics_log.append(diag)
 
-            # Extract pose from belief and publish
+            # Defer publish to next callback (state/TF/path published when next scan starts)
             pose_6d = combined_belief.mean_world_pose()
-            self._publish_state_from_pose(pose_6d, stamp_sec)
+            self._pending_publish = (jnp.array(pose_6d), stamp_sec)
             
             if self.scan_count <= 10 or self.scan_count % 50 == 0:
                 self.get_logger().info(
@@ -1077,6 +1101,11 @@ class GoldenChildBackend(Node):
 
     def destroy_node(self):
         """Clean up."""
+        # Drain deferred publish so last scan state is written
+        if self._pending_publish is not None:
+            pose_6d, stamp = self._pending_publish
+            self._publish_state_from_pose(pose_6d, stamp)
+            self._pending_publish = None
         if self.trajectory_file:
             self.trajectory_file.flush()
             self.trajectory_file.close()
@@ -1087,6 +1116,10 @@ class GoldenChildBackend(Node):
         if diagnostics_path and self.diagnostics_log.total_scans > 0:
             self.diagnostics_log.end_time = time.time()
             try:
+                import os
+                parent = os.path.dirname(diagnostics_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
                 self.diagnostics_log.save_npz(diagnostics_path)
                 self.get_logger().info(
                     f"Diagnostics saved: {diagnostics_path} ({self.diagnostics_log.total_scans} scans)"

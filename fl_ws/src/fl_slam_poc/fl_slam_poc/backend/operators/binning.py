@@ -85,6 +85,29 @@ def create_bin_atlas(n_bins: int = constants.GC_B_BINS) -> jnp.ndarray:
 # =============================================================================
 
 
+@jax.jit(static_argnames=("n_points", "n_bins"))
+def _bin_soft_assign_core(
+    point_directions: jnp.ndarray,
+    bin_directions: jnp.ndarray,
+    tau: jnp.ndarray,
+    eps_mass: jnp.ndarray,
+    n_points: int,
+    n_bins: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    JIT'd core: returns (responsibilities, avg_entropy, max_resp) for wrapper to build cert.
+    """
+    similarities = point_directions @ bin_directions.T
+    responsibilities = jax.nn.softmax(similarities / tau, axis=1)
+    max_resp = jnp.max(responsibilities)
+    entropy_per_point = -jnp.sum(
+        responsibilities * jnp.log(responsibilities + eps_mass), axis=1
+    )
+    total_entropy = jnp.sum(entropy_per_point)
+    avg_entropy = total_entropy / (jnp.array(n_points, dtype=jnp.float64) + eps_mass)
+    return responsibilities, avg_entropy, max_resp
+
+
 def bin_soft_assign(
     point_directions: jnp.ndarray,
     bin_directions: jnp.ndarray,
@@ -111,48 +134,111 @@ def bin_soft_assign(
     """
     point_directions = jnp.asarray(point_directions, dtype=jnp.float64)
     bin_directions = jnp.asarray(bin_directions, dtype=jnp.float64)
-    
     n_points = point_directions.shape[0]
+    n_bins = bin_directions.shape[0]
 
-    # Compute similarities (dot products): (N, B)
-    similarities = point_directions @ bin_directions.T
-
-    # Batched soft assignment (no per-point Python loop)
-    responsibilities = jax.nn.softmax(similarities / tau, axis=1)
-
-    # Entropy-based quality metrics (continuous, branch-free)
-    max_resp = jnp.max(responsibilities)
-    entropy_per_point = -jnp.sum(
-        responsibilities * jnp.log(responsibilities + constants.GC_EPS_MASS), axis=1
+    responsibilities, avg_entropy, max_resp = _bin_soft_assign_core(
+        point_directions,
+        bin_directions,
+        jnp.array(tau, dtype=jnp.float64),
+        jnp.array(constants.GC_EPS_MASS, dtype=jnp.float64),
+        n_points=n_points,
+        n_bins=n_bins,
     )
-    total_entropy = jnp.sum(entropy_per_point)
-    avg_entropy = float(total_entropy / (n_points + constants.GC_EPS_MASS))
-    
-    # Build result
+
     result = BinSoftAssignResult(responsibilities=responsibilities)
-    
-    # Build certificate
     cert = CertBundle.create_exact(
         chart_id=chart_id,
         anchor_id=anchor_id,
         support=SupportCert(
-            ess_total=float(jnp.exp(avg_entropy)),  # Effective number of bins per point
+            ess_total=float(jnp.exp(avg_entropy)),
             support_frac=float(max_resp),
         ),
     )
-    
     expected_effect = ExpectedEffect(
         objective_name="predicted_assignment_entropy",
-        predicted=avg_entropy,
+        predicted=float(avg_entropy),
         realized=None,
     )
-    
     return result, cert, expected_effect
 
 
 # =============================================================================
 # Scan Bin Moment Match Operator
 # =============================================================================
+
+
+@jax.jit(static_argnames=("n_points", "n_bins"))
+def _scan_bin_moment_match_core(
+    points: jnp.ndarray,
+    point_covariances: jnp.ndarray,
+    weights: jnp.ndarray,
+    responsibilities: jnp.ndarray,
+    point_lambda: jnp.ndarray,
+    direction_origin: jnp.ndarray,
+    eps_psd: jnp.ndarray,
+    eps_mass: jnp.ndarray,
+    n_points: int,
+    n_bins: int,
+) -> Tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+]:
+    """
+    JIT'd core: array math only; returns (N, s_dir, S_dir_scatter, p_bar, Sigma_p, kappa_scan,
+    ess, support_frac, psd_projection_delta_total, max_eps_ratio_N) for wrapper to build cert.
+    """
+    w_eff = weights * point_lambda
+    w_r = w_eff[:, None] * responsibilities
+
+    rays = points - direction_origin[None, :]
+    norms = jnp.linalg.norm(rays, axis=1, keepdims=True)
+    d = rays / (norms + eps_mass)
+
+    N = jnp.sum(w_r, axis=0)
+    s_dir = w_r.T @ d
+    S_dir_scatter = jnp.einsum("nb,ni,nj->bij", w_r, d, d)
+    sum_p = w_r.T @ points
+
+    ppT = points[:, :, None] * points[:, None, :]
+    sum_ppT = jnp.einsum("nb,nij->bij", w_r, ppT)
+    sum_cov = jnp.einsum("nb,nij->bij", w_r, point_covariances)
+
+    inv_N, eps_ratio_N = inv_mass_core(N, eps_mass)
+    p_bar = sum_p * inv_N[:, None]
+
+    scatter = sum_ppT * inv_N[:, None, None] - jnp.einsum("bi,bj->bij", p_bar, p_bar)
+    meas_cov = sum_cov * inv_N[:, None, None]
+    Sigma_raw = scatter + meas_cov
+
+    def proj_one(S: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        S_psd, cert_vec = domain_projection_psd_core(S, eps_psd)
+        return S_psd, cert_vec
+
+    Sigma_p, Sigma_cert = jax.vmap(proj_one)(Sigma_raw)
+    psd_projection_delta_total = jnp.sum(Sigma_cert[:, 0])
+
+    S_norms = jnp.linalg.norm(s_dir, axis=1)
+    Rbar = S_norms * inv_N
+    kappa_scan = kappa_from_resultant_batch(Rbar, eps_r=constants.GC_EPS_R)
+
+    total_mass = jnp.sum(N)
+    ess = total_mass ** 2 / (jnp.sum(N ** 2) + eps_mass)
+    support_frac = jnp.mean(N / (N + eps_mass))
+    max_eps_ratio_N = jnp.max(eps_ratio_N)
+
+    return (
+        N,
+        s_dir,
+        S_dir_scatter,
+        p_bar,
+        Sigma_p,
+        kappa_scan,
+        ess,
+        support_frac,
+        psd_projection_delta_total,
+        max_eps_ratio_N,
+    )
 
 
 def scan_bin_moment_match(
@@ -202,64 +288,37 @@ def scan_bin_moment_match(
     n_points = points.shape[0]
     n_bins = responsibilities.shape[1]
 
-    # Noise-weighting (Contract 3): per-point reliability enters as a multiplicative weight.
     if point_lambda is None:
         point_lambda = jnp.ones((n_points,), dtype=jnp.float64)
     else:
         point_lambda = jnp.asarray(point_lambda, dtype=jnp.float64).reshape(-1)
         if point_lambda.shape[0] != n_points:
             raise ValueError(f"point_lambda must be (N,), got {point_lambda.shape} for N={n_points}")
-    
-    # Weighted responsibilities per bin: (N, B)
-    w_eff = weights * point_lambda
-    w_r = w_eff[:, None] * responsibilities
 
-    # Normalize point directions (batched, branch-free) from the sensor origin.
-    rays = points - direction_origin[None, :]
-    norms = jnp.linalg.norm(rays, axis=1, keepdims=True)
-    d = rays / (norms + eps_mass)  # (N,3)
+    (
+        N,
+        s_dir,
+        S_dir_scatter,
+        p_bar,
+        Sigma_p,
+        kappa_scan,
+        ess,
+        support_frac,
+        psd_projection_delta_total,
+        max_eps_ratio_N,
+    ) = _scan_bin_moment_match_core(
+        points,
+        point_covariances,
+        weights,
+        responsibilities,
+        point_lambda,
+        direction_origin,
+        jnp.array(eps_psd, dtype=jnp.float64),
+        jnp.array(eps_mass, dtype=jnp.float64),
+        n_points=n_points,
+        n_bins=n_bins,
+    )
 
-    # Sufficient statistics (batched; avoids O(N*B) Python loops)
-    N = jnp.sum(w_r, axis=0)  # (B,)
-    s_dir = w_r.T @ d  # (B,3)
-    # Second-order directional scatter: Σ w u u^T per bin
-    S_dir_scatter = jnp.einsum("nb,ni,nj->bij", w_r, d, d)  # (B,3,3)
-    sum_p = w_r.T @ points  # (B,3)
-
-    ppT = points[:, :, None] * points[:, None, :]  # (N,3,3)
-    sum_ppT = jnp.einsum("nb,nij->bij", w_r, ppT)  # (B,3,3)
-    sum_cov = jnp.einsum("nb,nij->bij", w_r, point_covariances)  # (B,3,3)
-    
-    # Compute derived quantities using batched operations (no per-bin Python loop)
-    # InvMass - batched (Contract: InvMass is always 1/(m+eps), spec Section 3.4)
-    inv_N, eps_ratio_N = inv_mass_core(N, eps_mass)  # (B,), (B,)
-    
-    # Centroids: p_bar = sum_p * inv_N
-    p_bar = sum_p * inv_N[:, None]  # (B, 3)
-    
-    # Scatter covariance: scatter = sum_ppT * inv_N - outer(p_bar, p_bar)
-    scatter = sum_ppT * inv_N[:, None, None] - jnp.einsum("bi,bj->bij", p_bar, p_bar)  # (B, 3, 3)
-    
-    # Measurement covariance (weighted average)
-    meas_cov = sum_cov * inv_N[:, None, None]  # (B, 3, 3)
-    
-    # Total covariance
-    Sigma_raw = scatter + meas_cov  # (B, 3, 3)
-    
-    # Project to PSD (batched; declared projection op).
-    def proj_one(S):
-        S_psd, cert_vec = domain_projection_psd_core(S, eps_psd)
-        return S_psd, cert_vec
-
-    Sigma_p, Sigma_cert = jax.vmap(proj_one)(Sigma_raw)  # (B,3,3), (B,6)
-    psd_projection_delta_total = jnp.sum(Sigma_cert[:, 0])
-    
-    # Kappa from resultant length (batched)
-    S_norms = jnp.linalg.norm(s_dir, axis=1)  # (B,)
-    Rbar = S_norms * inv_N  # R-bar in (0, 1) for each bin
-    kappa_scan = kappa_from_resultant_batch(Rbar, eps_r=constants.GC_EPS_R)  # (B,)
-    
-    # Build result
     result = ScanBinStats(
         N=N,
         s_dir=s_dir,
@@ -268,37 +327,30 @@ def scan_bin_moment_match(
         Sigma_p=Sigma_p,
         kappa_scan=kappa_scan,
     )
-    
-    # Compute ESS
-    total_mass = float(jnp.sum(N))
-    ess = total_mass ** 2 / (jnp.sum(N ** 2) + eps_mass)
-    
-    # Build certificate
-    # Continuous support fraction proxy in [0,1]: bins with mass contribute smoothly.
-    support_frac = float(jnp.mean(N / (N + eps_mass)))
+
     cert = CertBundle.create_approx(
         chart_id=chart_id,
         anchor_id=anchor_id,
         triggers=["ScanBinMomentMatch"],
         support=SupportCert(
             ess_total=float(ess),
-            support_frac=support_frac,
+            support_frac=float(support_frac),
         ),
         influence=InfluenceCert(
             lift_strength=0.0,
             psd_projection_delta=float(psd_projection_delta_total),
-            mass_epsilon_ratio=float(jnp.max(eps_ratio_N)),
+            mass_epsilon_ratio=float(max_eps_ratio_N),
             anchor_drift_rho=0.0,
             dt_scale=1.0,
             extrinsic_scale=1.0,
             trust_alpha=1.0,
         ),
     )
-    
+
     expected_effect = ExpectedEffect(
         objective_name="predicted_ess",
         predicted=float(ess),
         realized=None,
     )
-    
+
     return result, cert, expected_effect

@@ -47,10 +47,20 @@ def load_body_T_wheel(calib_path: Path) -> np.ndarray:
     """Load body_T_wheel 4x4. Supports: (1) calibration.md (!!opencv-matrix block), (2) m3dgr_body_T_wheel.yaml."""
     with open(calib_path, "r", encoding="utf-8") as f:
         body = f.read()
+    # Prefer format by extension so YAML comments (e.g. "!!opencv-matrix" in text) don't trigger MD parser
+    if calib_path.suffix.lower() == ".yaml" or calib_path.suffix.lower() == ".yml":
+        data = yaml.safe_load(body)
+        if "body_T_wheel_row_major_4x4" in data:
+            arr = np.array(data["body_T_wheel_row_major_4x4"], dtype=np.float64)
+        else:
+            raise ValueError(f"YAML calib missing body_T_wheel_row_major_4x4: {calib_path}")
+        if arr.size != 16:
+            raise ValueError(f"Expected 16 elements, got {arr.size}")
+        return arr.reshape(4, 4)
     # M3DGR calibration.md: markdown with body_T_wheel !!opencv-matrix
-    if "!!opencv-matrix" in body or (calib_path.suffix.lower() == ".md" and "body_T_wheel" in body):
+    if calib_path.suffix.lower() == ".md" and "body_T_wheel" in body:
         return _parse_calibration_md(body)
-    # Our plain YAML
+    # Fallback: try YAML
     data = yaml.safe_load(body)
     if "body_T_wheel_row_major_4x4" in data:
         arr = np.array(data["body_T_wheel_row_major_4x4"], dtype=np.float64)

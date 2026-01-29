@@ -22,7 +22,10 @@ from fl_slam_poc.common.certificates import (
     InfluenceCert,
     MismatchCert,
 )
-from fl_slam_poc.common.primitives import domain_projection_psd, spd_cholesky_inverse_lifted
+from fl_slam_poc.common.primitives import (
+    domain_projection_psd_core,
+    spd_cholesky_inverse_lifted_core,
+)
 from fl_slam_poc.common.geometry import se3_jax
 
 
@@ -31,6 +34,54 @@ class OdomEvidenceResult:
     L_odom: jnp.ndarray  # (22,22)
     h_odom: jnp.ndarray  # (22,)
     delta_z_star: jnp.ndarray  # (22,)
+
+
+@jax.jit
+def _odom_quadratic_evidence_core(
+    belief_pred_pose: jnp.ndarray,
+    odom_pose: jnp.ndarray,
+    cov_ros: jnp.ndarray,
+    eps_psd: jnp.ndarray,
+    eps_lift: jnp.ndarray,
+) -> Tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray,
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+]:
+    """
+    JIT'd core: returns (L_odom, h_odom, delta_z_star, lift_strength, nll_proxy,
+    eig_min, eig_max, cond, near_null_count) for wrapper to build cert.
+    """
+    T_err = se3_jax.se3_relative(odom_pose, belief_pred_pose)
+    xi_err = se3_jax.se3_log(T_err)
+    delta_pose_z = pose_se3_to_z_delta(xi_err)
+    delta_z_star = jnp.zeros((D_Z,), dtype=jnp.float64).at[0:6].set(delta_pose_z)
+
+    cov_psd, _ = domain_projection_psd_core(cov_ros, eps_psd)
+    L_pose, lift_strength = spd_cholesky_inverse_lifted_core(cov_psd, eps_lift)
+
+    L = jnp.zeros((D_Z, D_Z), dtype=jnp.float64).at[0:6, 0:6].set(L_pose)
+    h = L @ delta_z_star
+
+    nll_proxy = 0.5 * (delta_pose_z @ L_pose @ delta_pose_z)
+
+    L_pose_psd, cert_vec = domain_projection_psd_core(L_pose, eps_psd)
+    eigvals = jnp.linalg.eigvalsh(L_pose_psd)
+    eig_min = jnp.min(eigvals)
+    eig_max = jnp.max(eigvals)
+    cond = eig_max / jnp.maximum(eig_min, 1e-18)
+    near_null_count = jnp.sum(eigvals < 1e-12).astype(jnp.int32)
+
+    return (
+        L,
+        h,
+        delta_z_star,
+        lift_strength,
+        nll_proxy,
+        eig_min,
+        eig_max,
+        cond,
+        near_null_count,
+    )
 
 
 def odom_quadratic_evidence(
@@ -60,45 +111,35 @@ def odom_quadratic_evidence(
     odom_pose = jnp.asarray(odom_pose, dtype=jnp.float64).reshape(-1)
     cov_ros = jnp.asarray(odom_cov_se3, dtype=jnp.float64)
 
-    # Pose error as a twist in se3 ordering
-    T_err = se3_jax.se3_relative(odom_pose, belief_pred_pose)  # belief^{-1} ∘ odom
-    xi_err = se3_jax.se3_log(T_err)  # [rho, phi]
-
-    # Map to 22D pose slice ordering [trans, rot] - same as se3_jax, no conversion needed!
-    delta_pose_z = pose_se3_to_z_delta(xi_err)  # identity - [trans, rot]
-    delta_z_star = jnp.zeros((D_Z,), dtype=jnp.float64)
-    delta_z_star = delta_z_star.at[0:6].set(delta_pose_z)
-
-    # ROS pose covariance: [x, y, z, roll, pitch, yaw] = [trans(0:3), rot(3:6)]
-    # GC pose ordering:    [tx, ty, tz, rx, ry, rz]    = [trans(0:3), rot(3:6)]
-    # No permutation needed - orderings now match!
-    cov = cov_ros
-
-    cov_psd = domain_projection_psd(cov, eps_psd).M_psd
-    L_pose, lift_strength = spd_cholesky_inverse_lifted(cov_psd, eps_lift)
-
-    L = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
-    L = L.at[0:6, 0:6].set(L_pose)
-    h = L @ delta_z_star
-
-    nll_proxy = 0.5 * float(delta_pose_z @ L_pose @ delta_pose_z)
-
-    eigvals = jnp.linalg.eigvalsh(domain_projection_psd(L_pose, eps_psd).M_psd)
-    eig_min = float(jnp.min(eigvals))
-    eig_max = float(jnp.max(eigvals))
-    cond = eig_max / max(eig_min, 1e-18)
+    (
+        L,
+        h,
+        delta_z_star,
+        lift_strength,
+        nll_proxy,
+        eig_min,
+        eig_max,
+        cond,
+        near_null_count,
+    ) = _odom_quadratic_evidence_core(
+        belief_pred_pose,
+        odom_pose,
+        cov_ros,
+        jnp.array(eps_psd, dtype=jnp.float64),
+        jnp.array(eps_lift, dtype=jnp.float64),
+    )
 
     cert = CertBundle.create_approx(
         chart_id=chart_id,
         anchor_id=anchor_id,
         triggers=["OdomEvidenceGaussian"],
         conditioning=ConditioningCert(
-            eig_min=eig_min,
-            eig_max=eig_max,
-            cond=cond,
-            near_null_count=int(jnp.sum(eigvals < 1e-12)),
+            eig_min=float(eig_min),
+            eig_max=float(eig_max),
+            cond=float(cond),
+            near_null_count=int(near_null_count),
         ),
-        mismatch=MismatchCert(nll_per_ess=nll_proxy, directional_score=0.0),
+        mismatch=MismatchCert(nll_per_ess=float(nll_proxy), directional_score=0.0),
         influence=InfluenceCert(
             lift_strength=float(lift_strength),
             psd_projection_delta=0.0,
@@ -112,7 +153,7 @@ def odom_quadratic_evidence(
 
     effect = ExpectedEffect(
         objective_name="odom_quadratic_nll_proxy",
-        predicted=nll_proxy,
+        predicted=float(nll_proxy),
         realized=None,
     )
 

@@ -123,6 +123,21 @@ def domain_projection_psd_core(
     return M_psd, cert_vec
 
 
+@jax.jit
+def domain_projection_psd_batch(
+    M_batch: jnp.ndarray,
+    eps_psd: float = 1e-12,
+) -> jnp.ndarray:
+    """
+    Batched PSD projection over the first axis.
+
+    Uses vmap(domain_projection_psd_core) so callers avoid nested vmaps.
+    M_batch shape (B, d, d); returns (B, d, d) PSD matrices.
+    """
+    M_psd, _ = jax.vmap(domain_projection_psd_core, (0, None))(M_batch, eps_psd)
+    return M_psd
+
+
 def spd_cholesky_solve_lifted_core(
     L: jnp.ndarray,
     b: jnp.ndarray,

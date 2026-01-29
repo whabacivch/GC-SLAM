@@ -12,10 +12,11 @@ from typing import Tuple
 from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.primitives import (
-    domain_projection_psd,
-    inv_mass,
-    safe_normalize,
+    domain_projection_psd_batch,
+    inv_mass_core,
+    _safe_normalize_jax,
 )
+from fl_slam_poc.backend.operators.kappa import kappa_from_resultant_batch
 
 
 # =============================================================================
@@ -97,6 +98,19 @@ class MapBinStats:
     sum_ppT: jnp.ndarray  # (B_BINS, 3, 3) Σ w p p^T
 
 
+@dataclass
+class MapDerivedStats:
+    """
+    Derived statistics from map sufficient stats (single pytree for JIT).
+
+    All fields are JAX arrays; no host pulls inside the JIT'd core.
+    """
+    mu_dir: jnp.ndarray   # (B_BINS, 3) mean directions
+    kappa: jnp.ndarray   # (B_BINS,) concentration parameters
+    centroid: jnp.ndarray  # (B_BINS, 3) centroids
+    Sigma_c: jnp.ndarray  # (B_BINS, 3, 3) centroid covariances
+
+
 def create_empty_map_stats(n_bins: int = constants.GC_B_BINS) -> MapBinStats:
     """
     Create empty map statistics (zero initialized).
@@ -146,6 +160,43 @@ def update_map_stats(
     )
 
 
+@jax.jit
+def _compute_map_derived_stats_core(
+    S_dir: jnp.ndarray,
+    N_dir: jnp.ndarray,
+    N_pos: jnp.ndarray,
+    sum_p: jnp.ndarray,
+    sum_ppT: jnp.ndarray,
+    eps_mass: jnp.ndarray,
+    eps_psd: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    JIT'd batched computation of derived stats over all bins.
+
+    Takes map_stats fields as arrays so JIT sees only arrays (no dataclass).
+    No Python loop; no host pulls. Returns (mu_dir, kappa, centroid, Sigma_c).
+    """
+    # Directional: batched safe_normalize over rows of S_dir
+    mu_dir, _ = jax.vmap(_safe_normalize_jax, (0, None))(S_dir, eps_mass)
+
+    # Kappa from resultant length (batched)
+    inv_N_dir, _ = inv_mass_core(N_dir, eps_mass)
+    S_norms = jnp.linalg.norm(S_dir, axis=1)
+    Rbar = S_norms * inv_N_dir
+    kappa = kappa_from_resultant_batch(Rbar, eps_r=constants.GC_EPS_R)
+
+    # Spatial: batched centroid and covariance
+    inv_N_pos, _ = inv_mass_core(N_pos, eps_mass)
+    centroid = sum_p * inv_N_pos[:, None]
+    Sigma_raw = (
+        sum_ppT * inv_N_pos[:, None, None]
+        - jnp.einsum("bi,bj->bij", centroid, centroid)
+    )
+    Sigma_c = domain_projection_psd_batch(Sigma_raw, eps_psd)
+
+    return mu_dir, kappa, centroid, Sigma_c
+
+
 def compute_map_derived_stats(
     map_stats: MapBinStats,
     eps_mass: float = constants.GC_EPS_MASS,
@@ -153,63 +204,21 @@ def compute_map_derived_stats(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute derived statistics from sufficient stats.
-    
-    Uses InvMass for all mass-based computations (no N==0 branches).
-    
-    Args:
-        map_stats: Map sufficient statistics
-        eps_mass: Mass regularization
-        eps_psd: PSD projection epsilon
-        
-    Returns:
-        Tuple of (mu_dir, kappa, centroid, Sigma_c)
-        - mu_dir: (B_BINS, 3) mean directions
-        - kappa: (B_BINS,) concentration parameters
-        - centroid: (B_BINS, 3) centroids
-        - Sigma_c: (B_BINS, 3, 3) centroid covariances
+
+    Uses a single JIT'd batched path; no Python loop, no per-bin host pulls.
+    Returns (mu_dir, kappa, centroid, Sigma_c) for backward compatibility.
     """
-    n_bins = map_stats.N_dir.shape[0]
-    
-    mu_dir = jnp.zeros((n_bins, 3), dtype=jnp.float64)
-    kappa = jnp.zeros(n_bins, dtype=jnp.float64)
-    centroid = jnp.zeros((n_bins, 3), dtype=jnp.float64)
-    Sigma_c = jnp.zeros((n_bins, 3, 3), dtype=jnp.float64)
-    
-    # Import kappa operator
-    from fl_slam_poc.backend.operators.kappa import kappa_from_resultant_v2
-    
-    for b in range(n_bins):
-        # Directional statistics
-        S_b = map_stats.S_dir[b]
-        N_d = map_stats.N_dir[b]
-        
-        # Mean direction (with safe normalize)
-        mu_b, _ = safe_normalize(S_b, eps_mass)
-        mu_dir = mu_dir.at[b].set(mu_b)
-        
-        # Resultant length and kappa
-        inv_N_d = inv_mass(float(N_d), eps_mass).inv_mass
-        S_norm = float(jnp.linalg.norm(S_b))
-        Rbar = S_norm * inv_N_d
-        kappa_result, _, _ = kappa_from_resultant_v2(Rbar)
-        kappa = kappa.at[b].set(kappa_result.kappa)
-        
-        # Spatial statistics
-        N_p = map_stats.N_pos[b]
-        sum_p_b = map_stats.sum_p[b]
-        sum_ppT_b = map_stats.sum_ppT[b]
-        
-        # Centroid (with InvMass)
-        inv_N_p = inv_mass(float(N_p), eps_mass).inv_mass
-        c_b = sum_p_b * inv_N_p
-        centroid = centroid.at[b].set(c_b)
-        
-        # Centroid covariance
-        Sigma_raw = sum_ppT_b * inv_N_p - jnp.outer(c_b, c_b)
-        Sigma_psd = domain_projection_psd(Sigma_raw, eps_psd).M_psd
-        Sigma_c = Sigma_c.at[b].set(Sigma_psd)
-    
-    return mu_dir, kappa, centroid, Sigma_c
+    eps_mass_j = jnp.asarray(eps_mass, dtype=jnp.float64)
+    eps_psd_j = jnp.asarray(eps_psd, dtype=jnp.float64)
+    return _compute_map_derived_stats_core(
+        map_stats.S_dir,
+        map_stats.N_dir,
+        map_stats.N_pos,
+        map_stats.sum_p,
+        map_stats.sum_ppT,
+        eps_mass_j,
+        eps_psd_j,
+    )
 
 
 # =============================================================================
