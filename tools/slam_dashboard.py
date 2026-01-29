@@ -1,28 +1,18 @@
 #!/usr/bin/env python3
 """
-Golden Child SLAM v2 Debugging Dashboard.
+Golden Child SLAM v2 diagnostics dashboard.
 
-Interactive Plotly dashboard for visualizing per-scan diagnostics.
+Loads an NPZ from a SLAM run and builds an interactive HTML dashboard (Plotly.js from CDN).
+Panels: A = timeline (conditioning, MF, posterior health), B = L_pose6 heatmap, C = 3D trajectory, D = factor influence + top-K bins.
 
-Four panels:
-- Panel A: Timeline scrubber with diagnostic scalar plots
-- Panel B: Evidence inspector heatmap (22x22 L matrix)
-- Panel C: 3D trajectory view with local evidence field glyphs
-- Panel D: Excitation & Fusion diagnostics
+Trajectory: The pipeline always writes an estimated trajectory to a TUM file (trajectory_export_path).
+Full-diagnostics NPZ stores p_W per scan; minimal-tape NPZ does not (to keep the hot path cheap).
+When loading a minimal-tape NPZ from a results directory, the dashboard loads estimated_trajectory.tum
+from the same dir and interpolates at scan timestamps so Panel C can still show the trajectory.
 
 Usage:
-    # Auto-open in browser (Wayland and X11 compatible)
-    .venv/bin/python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz
-    
-    # Save to file and open manually
-    .venv/bin/python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz --output dashboard.html
-    
-    # Start at specific scan
-    .venv/bin/python tools/slam_dashboard.py /tmp/gc_slam_diagnostics.npz --scan 50
-    
-    # With ground truth in 3D view (auto if diagnostics are in results dir with ground_truth_aligned.tum)
-    .venv/bin/python tools/slam_dashboard.py results/gc_20260128_172635/diagnostics.npz --output dashboard.html
-    .venv/bin/python tools/slam_dashboard.py diagnostics.npz --ground-truth path/to/ground_truth_aligned.tum
+  tools/slam_dashboard.py <diagnostics.npz> [--output dashboard.html] [--scan N] [--ground-truth path.tum]
+  Ground truth is auto-detected from results/gc_*/ground_truth_aligned.tum when present.
 """
 
 import argparse
@@ -36,24 +26,10 @@ from pathlib import Path
 
 import numpy as np
 
-# Add the package to path for imports
 SCRIPT_DIR = Path(__file__).parent.absolute()
 PROJECT_ROOT = SCRIPT_DIR.parent
 FL_WS_SRC = PROJECT_ROOT / "fl_ws" / "src" / "fl_slam_poc"
 sys.path.insert(0, str(FL_WS_SRC))
-
-try:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-except ImportError:
-    print("Error: plotly not installed. Install with: pip install plotly")
-    sys.exit(1)
-
-try:
-    from fl_slam_poc.backend.diagnostics import DiagnosticsLog
-except ImportError:
-    print("Warning: Could not import DiagnosticsLog, using standalone loader")
-    DiagnosticsLog = None
 
 
 def load_diagnostics_npz(path: str) -> dict:
@@ -109,6 +85,8 @@ def numpy_to_json(obj):
         return obj.tolist()
     elif isinstance(obj, (np.integer, np.floating)):
         return float(obj)
+    elif isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
     elif isinstance(obj, dict):
         return {k: numpy_to_json(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -177,20 +155,23 @@ def create_full_dashboard(
     selected_scan: int = 0,
     output_path: str = None,
     ground_truth_path: str = None,
+    gt_y_flip: bool = False,
 ) -> str:
     """
     Create and display the fully interactive dashboard.
 
     All panels update dynamically when the slider is moved.
-    
+
     Args:
         data: Diagnostics data dictionary
         selected_scan: Initial scan index to display
         output_path: Optional path to save HTML file. If None, uses temp file.
         ground_truth_path: Optional path to ground truth TUM file. If provided,
-            loads GT and adds it to the 3D trajectory plot, both trajectories
-            shifted so origin = first estimated pose.
-    
+            loads GT and adds it to the 3D trajectory plot. GT is aligned to the
+            estimate frame (same coordinate system; arbitrary start = 0,0,0) so
+            we compare internal estimates vs external truth.
+        gt_y_flip: If True, negate GT Y when loading (for frame-convention mismatch:
+            e.g. if per-scan residual Y is all one sign, try this).
     Returns:
         Path to the created HTML file
     """
@@ -198,6 +179,26 @@ def create_full_dashboard(
     if n_scans == 0:
         print("No scan data found in file")
         return None
+
+    # Detect minimal-tape format (from pipeline optimization: save_full_diagnostics=False)
+    is_minimal_tape = (
+        data.get("format") == "minimal_tape"
+        or ("L_pose6" in data and "L_total" not in data)
+    )
+    if is_minimal_tape:
+        # Alias: minimal tape uses cond_pose6; dashboard expects conditioning_pose6
+        if "cond_pose6" in data and "conditioning_pose6" not in data:
+            data = dict(data)
+            data["conditioning_pose6"] = np.asarray(data["cond_pose6"], dtype=np.float64)
+        # Build L_total (22x22) from L_pose6 (6x6) so heatmap and pose6-derived timeline work
+        L_pose6_arr = np.asarray(data["L_pose6"], dtype=np.float64)
+        if L_pose6_arr.ndim == 2:
+            L_pose6_arr = L_pose6_arr[np.newaxis, :, :]
+        n_tape = L_pose6_arr.shape[0]
+        L_total_full = np.zeros((n_tape, 22, 22), dtype=np.float64)
+        L_total_full[:, 0:6, 0:6] = L_pose6_arr
+        data = dict(data)
+        data["L_total"] = L_total_full
 
     # Prepare all data for JavaScript
     scan_idx = list(range(n_scans))
@@ -388,24 +389,23 @@ def create_full_dashboard(
             timeline_data[f"I_rot_{prefix}"] = (alpha * rot).tolist()
             timeline_data[f"I_xy_{prefix}"] = (alpha * xy).tolist()
             timeline_data[f"I_z_{prefix}"] = (alpha * z).tolist()
-            if prefix == "lidar":
-                xy_mean = 0.5 * (L_fac[:, 0, 0] + L_fac[:, 1, 1]) + 1e-12
-                timeline_data["z_leak_ratio_lidar"] = (L_fac[:, 2, 2] / xy_mean).tolist()
+            xy_mean = 0.5 * (L_fac[:, 0, 0] + L_fac[:, 1, 1]) + 1e-12
+            timeline_data[f"z_leak_ratio_{prefix}"] = (L_fac[:, 2, 2] / xy_mean).tolist()
         else:
             timeline_data[f"I_rot_{prefix}"] = [0.0] * n_scans
             timeline_data[f"I_xy_{prefix}"] = [0.0] * n_scans
             timeline_data[f"I_z_{prefix}"] = [0.0] * n_scans
-            if prefix == "lidar":
-                timeline_data["z_leak_ratio_lidar"] = [0.0] * n_scans
+            timeline_data[f"z_leak_ratio_{prefix}"] = [0.0] * n_scans
 
-    # Trajectory data (estimated from diagnostics)
+    # Trajectory: one coordinate system = estimate frame (robot's arbitrary start = 0,0,0).
+    # We align GT to that start so we compare apples to apples: how good are our estimates vs external truth.
     p_W = data.get("p_W", np.zeros((n_scans, 3)))
     if hasattr(p_W, 'tolist'):
         p_W = np.array(p_W)
-    origin = np.array(p_W[0], dtype=np.float64)
-    est_x = (p_W[:, 0] - origin[0]).tolist()
-    est_y = (p_W[:, 1] - origin[1]).tolist()
-    est_z = (p_W[:, 2] - origin[2]).tolist()
+    origin_est = np.array(p_W[0], dtype=np.float64)  # estimate frame origin (arbitrary start)
+    est_x = (p_W[:, 0] - origin_est[0]).tolist()
+    est_y = (p_W[:, 1] - origin_est[1]).tolist()
+    est_z = (p_W[:, 2] - origin_est[2]).tolist()
     has_ground_truth = False
     scan_timestamps = np.array(data.get("timestamps", np.zeros(n_scans)), dtype=np.float64)
     if scan_timestamps.size != n_scans:
@@ -413,26 +413,47 @@ def create_full_dashboard(
     if ground_truth_path:
         gt_xyz = load_tum_positions(ground_truth_path)
         if gt_xyz is not None:
-            gt_x_arr = np.array(gt_xyz[0], dtype=np.float64) - origin[0]
-            gt_y_arr = np.array(gt_xyz[1], dtype=np.float64) - origin[1]
-            gt_z_arr = np.array(gt_xyz[2], dtype=np.float64) - origin[2]
+            gt_x_raw = np.array(gt_xyz[0], dtype=np.float64)
+            gt_y_raw = np.array(gt_xyz[1], dtype=np.float64)
+            gt_z_raw = np.array(gt_xyz[2], dtype=np.float64)
+            if gt_y_flip:
+                gt_y_raw = -gt_y_raw
             gt_ts_arr = np.array(gt_xyz[3], dtype=np.float64)
+            # Put GT in the same coordinate system as the estimate: align so at first scan GT = estimate (both 0,0,0).
+            # GT_in_est_frame = GT_world + (origin_est - GT_at_t0); then plot GT_in_est_frame - origin_est = GT_world - GT_at_t0.
+            if scan_timestamps.size > 0 and gt_ts_arr.size >= 2:
+                t0 = float(scan_timestamps[0])
+                gt_at_t0 = np.array([
+                    np.interp(t0, gt_ts_arr, gt_x_raw),
+                    np.interp(t0, gt_ts_arr, gt_y_raw),
+                    np.interp(t0, gt_ts_arr, gt_z_raw),
+                ], dtype=np.float64)
+            else:
+                gt_at_t0 = np.array([gt_x_raw[0], gt_y_raw[0], gt_z_raw[0]], dtype=np.float64)
+            gt_x_arr = gt_x_raw - gt_at_t0[0]
+            gt_y_arr = gt_y_raw - gt_at_t0[1]
+            gt_z_arr = gt_z_raw - gt_at_t0[2]
             has_ground_truth = True
-            # GT positions at scan timestamps (for alignment display)
+            # GT positions at scan timestamps (for markers); GT already in estimate frame (GT - gt_at_t0)
             gt_at_scan_x, gt_at_scan_y, gt_at_scan_z = interpolate_gt_at_times(
-                np.array(gt_xyz[0], dtype=np.float64) - origin[0],
-                np.array(gt_xyz[1], dtype=np.float64) - origin[1],
-                np.array(gt_xyz[2], dtype=np.float64) - origin[2],
+                gt_x_arr, gt_y_arr, gt_z_arr,
                 gt_ts_arr,
                 scan_timestamps,
             )
+    # For minimal tape, logdet_L_total is not saved; use logdet_L_pose6 for trajectory color
+    logdet_for_trajectory = (
+        timeline_data["logdet_L_pose6"]
+        if is_minimal_tape
+        else timeline_data["logdet_L_total"]
+    )
     trajectory_data = {
         "x": est_x,
         "y": est_y,
         "z": est_z,
-        "logdet": timeline_data["logdet_L_total"],
+        "logdet": logdet_for_trajectory,
         "has_ground_truth": has_ground_truth,
         "scan_timestamps": scan_timestamps.tolist(),
+        "is_minimal_tape": is_minimal_tape,
     }
     if has_ground_truth:
         trajectory_data["gt_x"] = gt_x_arr.tolist()
@@ -442,6 +463,13 @@ def create_full_dashboard(
         trajectory_data["gt_at_scan_x"] = gt_at_scan_x.tolist()
         trajectory_data["gt_at_scan_y"] = gt_at_scan_y.tolist()
         trajectory_data["gt_at_scan_z"] = gt_at_scan_z.tolist()
+        # Per-scan residual (GT - estimate) in estimate frame: both in same coordinate system
+        res_x = (gt_at_scan_x - (p_W[:, 0] - origin_est[0])).tolist()
+        res_y = (gt_at_scan_y - (p_W[:, 1] - origin_est[1])).tolist()
+        res_z = (gt_at_scan_z - (p_W[:, 2] - origin_est[2])).tolist()
+        trajectory_data["res_x"] = res_x
+        trajectory_data["res_y"] = res_y
+        trajectory_data["res_z"] = res_z
 
     # L matrices for heatmap (all scans)
     L_total = data.get("L_total", np.zeros((n_scans, 22, 22)))
@@ -498,6 +526,15 @@ def create_full_dashboard(
         .full-width {{
             grid-column: 1 / -1;
         }}
+        #offset-table th, #offset-table td {{
+            padding: 6px 10px;
+            text-align: right;
+            border-bottom: 1px solid #2a2a4a;
+        }}
+        #offset-table th {{ background: #0f3460; position: sticky; top: 0; }}
+        #offset-table tbody tr:nth-child(even) {{ background: rgba(15, 52, 96, 0.3); }}
+        #offset-table td:first-child, #offset-table th:first-child {{ text-align: right; }}
+        #offset-table td:nth-child(2) {{ text-align: right; }}
         .controls {{
             text-align: center;
             margin: 15px 0;
@@ -590,6 +627,7 @@ def create_full_dashboard(
 <body>
     <h1>Golden Child SLAM v2 Diagnostics Dashboard</h1>
     <p class="subtitle">Interactive per-scan pipeline diagnostics | {n_scans} scans loaded</p>
+    <p class="subtitle" id="minimal-tape-notice" style="display: none; color: #f7b731;">Minimal tape mode: trajectory and some panels (MF, bins, factor influence) not recorded. Use save_full_diagnostics=True for full dashboard.</p>
 
 	    <div class="controls">
 	        <label>Scan:</label>
@@ -623,6 +661,15 @@ def create_full_dashboard(
             <div class="panel-title">Panel D: Factor influence ledger + top-K bin anatomy</div>
             <div id="factor-stacked"></div>
             <div id="topk-bins"></div>
+        </div>
+        <div class="panel full-width" id="offset-table-panel" style="display: none;">
+            <div class="panel-title">Per-scan offset (estimate, GT, residual) — same coordinate system (estimate frame, m)</div>
+            <div style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
+                <table id="offset-table" style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                    <thead><tr id="offset-table-head"></tr></thead>
+                    <tbody id="offset-table-body"></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
@@ -747,13 +794,19 @@ def create_full_dashboard(
 	        const xy_mean = (Lxx + Lyy) / 2 + 1e-10;
 	        const zLeakRatio = Lzz / xy_mean;
 	        const zLeakTotal = timelineData.z_leak_ratio_total ? timelineData.z_leak_ratio_total[scanIdx] : zLeakRatio;
+	        const fmt = (v) => (v != null && v !== undefined) ? Number(v).toFixed(4) : '--';
 	        const zLeakLidar = timelineData.z_leak_ratio_lidar ? timelineData.z_leak_ratio_lidar[scanIdx] : 0.0;
+	        const zLeakOdom = timelineData.z_leak_ratio_odom ? timelineData.z_leak_ratio_odom[scanIdx] : null;
+	        const zLeakImu = timelineData.z_leak_ratio_imu ? timelineData.z_leak_ratio_imu[scanIdx] : null;
+	        const zLeakGyro = timelineData.z_leak_ratio_gyro ? timelineData.z_leak_ratio_gyro[scanIdx] : null;
+	        const zLeakPreint = timelineData.z_leak_ratio_preint ? timelineData.z_leak_ratio_preint[scanIdx] : null;
 	        const el = document.getElementById('z-leak-value');
 	        if (el) {{
 	            el.innerHTML =
-	                'Z leak total: <span class="value">' + zLeakTotal.toFixed(4) + '</span>' +
-	                ' &nbsp; | &nbsp; Z leak LiDAR: <span class="value">' + zLeakLidar.toFixed(4) + '</span>' +
-	                ' &nbsp; | &nbsp; L_zz(total)=' + Lzz.toFixed(4);
+	                'Z leak total: <span class="value">' + zLeakTotal.toFixed(4) + '</span> &nbsp;|&nbsp; L_zz=' + Lzz.toFixed(4) + '<br>' +
+	                'LiDAR: <span class="value">' + fmt(zLeakLidar) + '</span> (planar=0) &nbsp; ' +
+	                'odom: <span class="value">' + fmt(zLeakOdom) + '</span> &nbsp; imu: <span class="value">' + fmt(zLeakImu) + '</span> &nbsp; ' +
+	                'gyro: <span class="value">' + fmt(zLeakGyro) + '</span> &nbsp; preint: <span class="value">' + fmt(zLeakPreint) + '</span>';
 	        }}
 	    }}
 
@@ -840,7 +893,7 @@ def create_full_dashboard(
 	            const IzL = (timelineData.I_z_lidar && timelineData.I_z_lidar[scanIdx] !== undefined)
 	                ? timelineData.I_z_lidar[scanIdx].toFixed(2) : '--';
 	            const prefix = trajectoryData.has_ground_truth
-	                ? 'Ground truth (teal) + Estimate (orange).'
+	                ? 'GT aligned to estimate frame (arbitrary start = 0,0,0). Both in same coordinate system.'
 	                : 'Estimate only (add --ground-truth to overlay).';
 	            noteEl.textContent = `${{prefix}} Selected scan=${{scanIdx}} | geodesic_pred→MF=${{geod}}° | z_leak_lidar=${{zLeakL}} | ΔI_z_lidar=${{IzL}}`;
 	        }}
@@ -1141,11 +1194,12 @@ def create_full_dashboard(
 
         // Update info display
         document.getElementById('scan-display').textContent = scanIdx;
+	        const logdetVal = trajectoryData.is_minimal_tape ? timelineData.logdet_L_pose6[scanIdx] : timelineData.logdet_L_total[scanIdx];
 	        document.getElementById('info-dt').textContent = timelineData.dt_secs[scanIdx].toFixed(3);
 	        document.getElementById('info-alpha').textContent = timelineData.fusion_alpha[scanIdx].toFixed(3);
-	        document.getElementById('info-logdet').textContent = timelineData.logdet_L_total[scanIdx].toFixed(1);
+	        document.getElementById('info-logdet').textContent = (typeof logdetVal === 'number' ? logdetVal : 0).toFixed(1);
 	        document.getElementById('info-cond').textContent = timelineData.log10_cond_pose6[scanIdx].toFixed(2);
-	        document.getElementById('info-rot-lidar').textContent = timelineData.rot_err_lidar_deg_post[scanIdx].toFixed(2);
+	        document.getElementById('info-rot-lidar').textContent = (timelineData.rot_err_lidar_deg_post && timelineData.rot_err_lidar_deg_post[scanIdx] !== undefined) ? timelineData.rot_err_lidar_deg_post[scanIdx].toFixed(2) : '--';
 
         // Update timeline vertical lines
         Plotly.relayout('timeline', {{ shapes: createVerticalLines(scanIdx, TIMELINE_ROWS) }});
@@ -1167,19 +1221,37 @@ def create_full_dashboard(
     // Initialize
     // =====================================================================
 	    document.addEventListener('DOMContentLoaded', function() {{
+        if (trajectoryData.is_minimal_tape) {{
+            const el = document.getElementById('minimal-tape-notice');
+            if (el) el.style.display = 'block';
+        }}
         createTimeline();
         setupHeatmapToggle();
         createHeatmap(currentScan);
         createTrajectory(currentScan);
         createFactorStacked();
         createTopKBins(currentScan);
+        if (trajectoryData.has_ground_truth && trajectoryData.res_x && trajectoryData.res_x.length > 0) {{
+            document.getElementById('offset-table-panel').style.display = 'block';
+            const thead = document.getElementById('offset-table-head');
+            thead.innerHTML = '<th>Scan</th><th>t (s)</th><th>est_x</th><th>est_y</th><th>est_z</th><th>gt_x</th><th>gt_y</th><th>gt_z</th><th>res_x</th><th>res_y</th><th>res_z</th>';
+            const tbody = document.getElementById('offset-table-body');
+            const ts = trajectoryData.scan_timestamps || [];
+            const fmt = (v) => (typeof v === 'number' && !isNaN(v) ? v.toFixed(4) : '—');
+            for (let i = 0; i < trajectoryData.res_x.length; i++) {{
+                const row = document.createElement('tr');
+                row.innerHTML = `<td>${{i}}</td><td>${{fmt(ts[i])}}</td><td>${{fmt(trajectoryData.x[i])}}</td><td>${{fmt(trajectoryData.y[i])}}</td><td>${{fmt(trajectoryData.z[i])}}</td><td>${{fmt(trajectoryData.gt_at_scan_x[i])}}</td><td>${{fmt(trajectoryData.gt_at_scan_y[i])}}</td><td>${{fmt(trajectoryData.gt_at_scan_z[i])}}</td><td>${{fmt(trajectoryData.res_x[i])}}</td><td>${{fmt(trajectoryData.res_y[i])}}</td><td>${{fmt(trajectoryData.res_z[i])}}</td>`;
+                tbody.appendChild(row);
+            }}
+        }}
 
-        // Update info display
-	        document.getElementById('info-dt').textContent = timelineData.dt_secs[currentScan].toFixed(3);
-	        document.getElementById('info-alpha').textContent = timelineData.fusion_alpha[currentScan].toFixed(3);
-	        document.getElementById('info-logdet').textContent = timelineData.logdet_L_total[currentScan].toFixed(1);
-	        document.getElementById('info-cond').textContent = timelineData.log10_cond_pose6[currentScan].toFixed(2);
-	        document.getElementById('info-rot-lidar').textContent = timelineData.rot_err_lidar_deg_post[currentScan].toFixed(2);
+        // Update info display (use logdet_L_pose6 when minimal tape)
+        const logdetVal = trajectoryData.is_minimal_tape ? timelineData.logdet_L_pose6[currentScan] : timelineData.logdet_L_total[currentScan];
+        document.getElementById('info-dt').textContent = timelineData.dt_secs[currentScan].toFixed(3);
+        document.getElementById('info-alpha').textContent = timelineData.fusion_alpha[currentScan].toFixed(3);
+        document.getElementById('info-logdet').textContent = (typeof logdetVal === 'number' ? logdetVal : 0).toFixed(1);
+        document.getElementById('info-cond').textContent = timelineData.log10_cond_pose6[currentScan].toFixed(2);
+        document.getElementById('info-rot-lidar').textContent = (timelineData.rot_err_lidar_deg_post && timelineData.rot_err_lidar_deg_post[currentScan] !== undefined) ? timelineData.rot_err_lidar_deg_post[currentScan].toFixed(2) : '--';
 
         // Slider event
         const slider = document.getElementById('scan-slider');
@@ -1268,6 +1340,11 @@ def main():
         default=None,
         help="Path to ground truth TUM file. If omitted and diagnostics are in a results dir, uses ground_truth_aligned.tum in the same directory.",
     )
+    parser.add_argument(
+        "--gt-y-flip",
+        action="store_true",
+        help="Negate GT Y when loading (if per-scan residual Y is all one sign, may be frame convention; try this to test).",
+    )
 
     args = parser.parse_args()
 
@@ -1290,6 +1367,26 @@ def main():
 
     n_scans = int(data.get("n_scans", 0))
     print(f"Loaded {n_scans} scans")
+
+    # Minimal tape: NPZ does not store p_W (pipeline still writes trajectory to TUM file).
+    # Load estimated_trajectory.tum from same dir when present so Panel C can show the trajectory.
+    is_minimal = data.get("format") == "minimal_tape" or ("L_pose6" in data and "L_total" not in data)
+    if is_minimal and n_scans > 0:
+        results_dir = Path(args.diagnostics_file).resolve().parent
+        est_tum = results_dir / "estimated_trajectory.tum"
+        if est_tum.exists():
+            xyz_ts = load_tum_positions(str(est_tum))
+            if xyz_ts is not None:
+                x_est, y_est, z_est, ts_est = xyz_ts
+                ts_est = np.asarray(ts_est, dtype=np.float64)
+                scan_ts = np.asarray(data.get("timestamps", np.zeros(n_scans)), dtype=np.float64)
+                if scan_ts.size == n_scans and ts_est.size >= 2:
+                    x_at_scan = np.interp(scan_ts, ts_est, np.asarray(x_est, dtype=np.float64))
+                    y_at_scan = np.interp(scan_ts, ts_est, np.asarray(y_est, dtype=np.float64))
+                    z_at_scan = np.interp(scan_ts, ts_est, np.asarray(z_est, dtype=np.float64))
+                    data = dict(data)
+                    data["p_W"] = np.stack([x_at_scan, y_at_scan, z_at_scan], axis=1)
+                    print(f"Trajectory: loaded {est_tum.name} (interpolated at {n_scans} scan timestamps)")
 
     # Print available keys for debugging
     print(f"Available data keys: {sorted(data.keys())}")
@@ -1326,7 +1423,7 @@ def main():
 
     # Create dashboard
     html_path = create_full_dashboard(
-        data, args.scan, output_path=args.output, ground_truth_path=ground_truth_path
+        data, args.scan, output_path=args.output, ground_truth_path=ground_truth_path, gt_y_flip=args.gt_y_flip
     )
     
     if html_path:

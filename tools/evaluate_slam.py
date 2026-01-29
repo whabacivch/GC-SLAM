@@ -22,6 +22,12 @@ Compares estimated trajectory against ground truth using:
    - metrics.json: Structured JSON for automation/CI integration
 
 Uses evo library for standard SLAM metrics, enhanced with comprehensive statistics.
+
+Alignment: SLAM is relative — the robot arbitrarily says "start here (0,0,0)" and estimates from there.
+To evaluate meaningfully, ground truth must be in the same coordinate system as the estimate.
+Default is initial-pose alignment: GT is transformed into the estimate frame (at first pose, GT = estimate).
+Then ATE/RPE measure how the estimate diverges from reality. Use --align umeyama for full
+SE(3) best-fit (hides initial error; not valid for relative SLAM).
 """
 import argparse
 import os
@@ -50,6 +56,59 @@ from scipy.spatial.transform import Rotation
 def load_trajectory(file_path):
     """Load trajectory from TUM format."""
     return file_interface.read_tum_trajectory_file(file_path)
+
+
+# Signed permutation from Umeyama (est → GT): GT x ≈ -EST z, GT y ≈ EST x, GT z ≈ -EST y.
+# Apply to EST positions/orientations to express EST in GT axis convention for same-plane comparison.
+R_EST_TO_GT = np.array([
+    [0, 0, -1],
+    [1, 0, 0],
+    [0, -1, 0],
+], dtype=np.float64)
+
+
+def apply_est_to_gt_convention(traj: trajectory.PoseTrajectory3D) -> trajectory.PoseTrajectory3D:
+    """
+    Return a new trajectory with each pose transformed by R_EST_TO_GT (position and rotation).
+    Expresses estimate in GT axis convention so 2D projections are same-plane.
+    """
+    new_poses = []
+    for pose in traj.poses_se3:
+        R = np.array(pose[:3, :3], dtype=np.float64)
+        t = np.array(pose[:3, 3], dtype=np.float64)
+        R_new = R_EST_TO_GT @ R
+        t_new = R_EST_TO_GT @ t
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R_new
+        T[:3, 3] = t_new
+        new_poses.append(T)
+    return trajectory.PoseTrajectory3D(
+        poses_se3=new_poses,
+        timestamps=np.array(traj.timestamps, dtype=np.float64),
+        meta=dict(traj.meta) if traj.meta else None,
+    )
+
+
+def swap_gt_yz(traj: trajectory.PoseTrajectory3D) -> trajectory.PoseTrajectory3D:
+    """
+    Return a new trajectory with Y and Z axes swapped (position and rotation).
+    Diagnostic for axis-convention mismatch when "our XZ looks like GT XY".
+    """
+    new_poses = []
+    for pose in traj.poses_se3:
+        R = np.array(pose[:3, :3], dtype=np.float64)
+        t = np.array(pose[:3, 3], dtype=np.float64)
+        R_new = R[:, [0, 2, 1]]
+        t_new = np.array([t[0], t[2], t[1]], dtype=np.float64)
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R_new
+        T[:3, 3] = t_new
+        new_poses.append(T)
+    return trajectory.PoseTrajectory3D(
+        poses_se3=new_poses,
+        timestamps=np.array(traj.timestamps, dtype=np.float64),
+        meta=dict(traj.meta) if traj.meta else None,
+    )
 
 
 def load_op_reports(file_path):
@@ -238,22 +297,48 @@ def validate_trajectory(traj: trajectory.PoseTrajectory3D, name: str, strict: bo
         print(f"    Status: WARNINGS (continuing with evaluation)")
 
 
-def compute_ate_full(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D):
+def align_trajectories_initial(gt_sync: trajectory.PoseTrajectory3D, est_sync: trajectory.PoseTrajectory3D) -> None:
+    """
+    Put GT in the same coordinate system as the estimate (estimate frame).
+    Transforms GT so that at the first associated pose, GT = estimate (robot's arbitrary start).
+    Then we compare apples to apples: how good are our internal estimates vs external truth.
+    Modifies gt_sync in place.
+    """
+    if len(gt_sync.poses_se3) == 0 or len(est_sync.poses_se3) == 0:
+        return
+    T_est0 = np.array(est_sync.poses_se3[0], dtype=np.float64)
+    T_gt0_inv = np.linalg.inv(gt_sync.poses_se3[0])
+    T_gt_to_est = T_est0 @ T_gt0_inv
+    gt_sync.transform(T_gt_to_est)
+
+
+def compute_ate_full(
+    gt_traj: trajectory.PoseTrajectory3D,
+    est_traj: trajectory.PoseTrajectory3D,
+    *,
+    align_mode: str = "initial",
+):
     """
     Compute ATE for both translation and rotation.
-    
+
+    align_mode: "initial" = align first pose only (GT → estimate frame; valid for relative SLAM).
+                "umeyama" = full SE(3) Umeyama over whole trajectory (best-fit; hides initial error).
+
     Returns: (ate_trans, ate_rot, gt_aligned, est_aligned)
     """
     # Deep copy to avoid modifying originals
     gt_copy = copy.deepcopy(gt_traj)
     est_copy = copy.deepcopy(est_traj)
-    
-    # Align trajectories
+
+    # Associate by timestamp
     gt_sync, est_sync = sync.associate_trajectories(gt_copy, est_copy)
-    
-    # Align using SE(3) Umeyama (rotation + translation, no scale)
-    est_sync.align(gt_sync, correct_scale=False)
-    
+
+    # Put both in same frame: initial pose (estimate frame) or full Umeyama
+    if align_mode == "initial":
+        align_trajectories_initial(gt_sync, est_sync)
+    else:
+        est_sync.align(gt_sync, correct_scale=False)
+
     # Translation ATE
     ate_trans = metrics.APE(metrics.PoseRelation.translation_part)
     ate_trans.process_data((gt_sync, est_sync))
@@ -324,21 +409,30 @@ def diagnose_constant_rotation_offset(
     }
 
 
-def compute_rpe_multi_scale(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D):
+def compute_rpe_multi_scale(
+    gt_traj: trajectory.PoseTrajectory3D,
+    est_traj: trajectory.PoseTrajectory3D,
+    *,
+    align_mode: str = "initial",
+):
     """
     Compute RPE at multiple scales: 1m, 5m, 10m.
-    
+    Uses same align_mode as ATE so trajectories are in the same frame.
     Returns dict: scale -> {'trans': metric, 'rot': metric}
     """
     scales = [1.0, 5.0, 10.0]
     results = {}
-    
+
     for delta in scales:
         # Deep copy for each scale
         gt_copy = copy.deepcopy(gt_traj)
         est_copy = copy.deepcopy(est_traj)
         gt_sync, est_sync = sync.associate_trajectories(gt_copy, est_copy)
-        
+        if align_mode == "initial":
+            align_trajectories_initial(gt_sync, est_sync)
+        else:
+            est_sync.align(gt_sync, correct_scale=False)
+
         try:
             # Translation RPE
             rpe_trans = metrics.RPE(
@@ -365,9 +459,16 @@ def compute_rpe_multi_scale(gt_traj: trajectory.PoseTrajectory3D, est_traj: traj
     return results
 
 
-def compute_per_axis_errors(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory.PoseTrajectory3D):
+def compute_per_axis_errors(
+    gt_traj: trajectory.PoseTrajectory3D,
+    est_traj: trajectory.PoseTrajectory3D,
+    *,
+    align_mode: str = "initial",
+):
     """
-    Compute per-axis translation and rotation errors after SE(3) alignment.
+    Compute per-axis translation and rotation errors after alignment.
+
+    align_mode: "initial" or "umeyama" (same as ATE).
 
     Translation: per-axis absolute difference |gt - est| in meters (X, Y, Z).
     Rotation: at each pose, relative rotation est_inv * gt; Euler angles (XYZ order)
@@ -382,12 +483,13 @@ def compute_per_axis_errors(gt_traj: trajectory.PoseTrajectory3D, est_traj: traj
     # Deep copy to avoid modifying originals
     gt_copy = copy.deepcopy(gt_traj)
     est_copy = copy.deepcopy(est_traj)
-    
-    # Align trajectories
+
+    # Associate and align (same mode as ATE)
     gt_sync, est_sync = sync.associate_trajectories(gt_copy, est_copy)
-    
-    # Align using SE(3) Umeyama
-    est_sync.align(gt_sync, correct_scale=False)
+    if align_mode == "initial":
+        align_trajectories_initial(gt_sync, est_sync)
+    else:
+        est_sync.align(gt_sync, correct_scale=False)
     
     # Translation errors per axis
     trans_diff = gt_sync.positions_xyz - est_sync.positions_xyz
@@ -472,6 +574,14 @@ def plot_trajectories(gt_traj: trajectory.PoseTrajectory3D, est_traj: trajectory
     # Get positions
     gt_xyz = gt_traj.positions_xyz
     est_xyz = est_traj.positions_xyz
+
+    # Sanity-print axis ranges (TUM order: col0=x, col1=y, col2=z). GT Z should be ~constant for planar robot.
+    ptp_gt = np.ptp(gt_xyz, axis=0)
+    ptp_est = np.ptp(est_xyz, axis=0)
+    print(f"   [plot] GT  ptp(x,y,z) (m): {ptp_gt[0]:.4f}, {ptp_gt[1]:.4f}, {ptp_gt[2]:.4f}")
+    print(f"   [plot] EST ptp(x,y,z) (m): {ptp_est[0]:.4f}, {ptp_est[1]:.4f}, {ptp_est[2]:.4f}")
+    if ptp_gt[2] > 0.5:
+        print("   [plot] WARNING: GT ptp(z) is large — expected ~0.04 m for planar robot; check axis convention or column order.")
     
     # XY view
     ax1 = fig.add_subplot(2, 2, 1)
@@ -776,12 +886,13 @@ def plot_cumulative_error(ate_metric, timestamps, output_path):
     print(f"  Cumulative error plot saved: {output_path}")
 
 
-def save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_path, eval_diagnostics: dict | None = None):
+def save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_path, eval_diagnostics: dict | None = None, align_mode: str = "initial"):
     """Save metrics in human-readable text format."""
     ate_t_stats = ate_trans.get_all_statistics()
     ate_r_stats = ate_rot.get_all_statistics()
     rpe_1m = rpe_results.get('1m', {}).get('trans')
     rpe_1m_rmse = rpe_1m.get_all_statistics()['rmse'] if rpe_1m else float('nan')
+    align_note = "initial-pose alignment (GT → estimate frame)" if align_mode == "initial" else "SE(3) Umeyama alignment (scale fixed)"
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write("FL-SLAM Evaluation Metrics\n")
@@ -792,9 +903,9 @@ def save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_path
         f.write(f"ATE rotation RMSE (deg):       {ate_r_stats['rmse']:.6f}\n")
         f.write(f"RPE translation @ 1m (m/m):    {rpe_1m_rmse:.6f}\n")
         f.write("\n")
-        
+
         f.write("ABSOLUTE TRAJECTORY ERROR (ATE)\n")
-        f.write("  (after SE(3) Umeyama alignment, scale fixed)\n")
+        f.write(f"  (after {align_note})\n")
         f.write("-" * 40 + "\n")
         
         f.write("Translation (m):\n")
@@ -848,7 +959,7 @@ def save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_path
             if note:
                 f.write(f"  note: {note}\n")
 
-        f.write("\n\nPER-AXIS ATE (after SE(3) alignment)\n")
+        f.write(f"\n\nPER-AXIS ATE (after {align_note})\n")
         f.write("-" * 40 + "\n")
         
         trans_errors = per_axis_data['translation']
@@ -1019,15 +1130,16 @@ def save_metrics_csv(ate_trans, ate_rot, rpe_results, per_axis_data, output_path
     print(f"  Metrics (csv) saved: {output_path}")
 
 
-def save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_path, eval_diagnostics: dict | None = None):
+def save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_path, eval_diagnostics: dict | None = None, align_mode: str = "initial"):
     """Save all metrics to structured JSON format."""
     from datetime import datetime
-    
+
     # Build comprehensive metrics dictionary
     metrics_dict = {
         'metadata': {
             'timestamp': datetime.now().isoformat(),
             'evaluation_tool': 'evaluate_slam.py',
+            'align_mode': align_mode,
             'diagnostics': eval_diagnostics or None,
         },
         'ate': {
@@ -1121,35 +1233,63 @@ def save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_pat
     print(f"  Metrics (json) saved: {output_path}")
 
 
-def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
-    """Run full evaluation pipeline."""
+def main(gt_file, est_file, output_dir, op_report_path, require_imu=True, align_mode="initial", gt_swap_yz=False, apply_est_to_gt_axes=False, verbose=False):
+    """Run full evaluation pipeline.
+
+    align_mode: "initial" = align first pose only (GT → estimate frame; valid for relative SLAM).
+                "umeyama" = full SE(3) Umeyama over whole trajectory (best-fit).
+    gt_swap_yz: if True, swap GT Y and Z axes before evaluation (diagnostic for axis-convention mismatch).
+    apply_est_to_gt_axes: if True, transform EST by R_EST_TO_GT so EST is in GT axis convention (same-plane plots).
+    verbose: if True, print first 5 rows of positions (TUM: t, x, y, z, qx, qy, qz, qw) to verify column order.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     print("=" * 60)
     print("FL-SLAM Trajectory Evaluation")
     print("=" * 60)
-    
+
     # Load trajectories
     print("\n1. Loading trajectories...")
     gt_traj = load_trajectory(gt_file)
     est_traj = load_trajectory(est_file)
+    if gt_swap_yz:
+        gt_traj = swap_gt_yz(gt_traj)
+        print("   Applied --gt-swap-yz: GT Y and Z axes swapped (diagnostic for axis-convention mismatch).")
+    if apply_est_to_gt_axes:
+        est_traj = apply_est_to_gt_convention(est_traj)
+        print("   Applied --apply-est-to-gt-convention: EST expressed in GT axis convention (R_EST_TO_GT).")
+    # Raw ptp (before alignment): GT Z should be ~0.04 m for planar robot
+    ptp_gt_raw = np.ptp(gt_traj.positions_xyz, axis=0)
+    ptp_est_raw = np.ptp(est_traj.positions_xyz, axis=0)
+    print(f"   [raw] GT  ptp(x,y,z) (m): {ptp_gt_raw[0]:.4f}, {ptp_gt_raw[1]:.4f}, {ptp_gt_raw[2]:.4f}")
+    print(f"   [raw] EST ptp(x,y,z) (m): {ptp_est_raw[0]:.4f}, {ptp_est_raw[1]:.4f}, {ptp_est_raw[2]:.4f}")
+    if ptp_gt_raw[2] > 0.5:
+        print("   [raw] WARNING: GT ptp(z) large — expected ~0.04 m for planar; check TUM column order (t x y z qx qy qz qw).")
+    if verbose:
+        print("   First 5 positions (x,y,z) — GT:")
+        for i in range(min(5, len(gt_traj.positions_xyz))):
+            print(f"     {gt_traj.positions_xyz[i, 0]:.4f}, {gt_traj.positions_xyz[i, 1]:.4f}, {gt_traj.positions_xyz[i, 2]:.4f}")
+        print("   First 5 positions (x,y,z) — EST:")
+        for i in range(min(5, len(est_traj.positions_xyz))):
+            print(f"     {est_traj.positions_xyz[i, 0]:.4f}, {est_traj.positions_xyz[i, 1]:.4f}, {est_traj.positions_xyz[i, 2]:.4f}")
     print(f"   Ground truth: {len(gt_traj.timestamps)} poses")
     print(f"   Estimated: {len(est_traj.timestamps)} poses")
-    
+
     # Validate trajectories
     print("\n2. Validating trajectories...")
     validate_trajectory(gt_traj, "Ground Truth", strict=True)
     # Use non-strict validation for estimated trajectory to allow evaluation even with extreme values
     validate_trajectory(est_traj, "Estimated", strict=False)
-    
+
     # OpReport validation (IMU + Frobenius diagnostics)
     print("\n3. Validating OpReports (runtime health + audit)...")
     validate_op_reports(op_report_path, require_imu=require_imu)
 
     # Compute ATE (translation + rotation)
     print("\n4. Computing Absolute Trajectory Error (ATE)...")
-    ate_trans, ate_rot, gt_aligned, est_aligned = compute_ate_full(gt_traj, est_traj)
+    print(f"   Alignment: {align_mode} (GT in estimate frame)")
+    ate_trans, ate_rot, gt_aligned, est_aligned = compute_ate_full(gt_traj, est_traj, align_mode=align_mode)
     eval_diag = diagnose_constant_rotation_offset(gt_aligned, est_aligned)
     
     ate_t_stats = ate_trans.get_all_statistics()
@@ -1183,7 +1323,7 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     
     # Compute per-axis errors
     print("\n5. Computing per-axis errors...")
-    per_axis_data = compute_per_axis_errors(gt_traj, est_traj)
+    per_axis_data = compute_per_axis_errors(gt_traj, est_traj, align_mode=align_mode)
     
     print("   Translation per axis:")
     for axis in ['x', 'y', 'z']:
@@ -1197,7 +1337,7 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     
     # Compute multi-scale RPE
     print("\n6. Computing Relative Pose Error (RPE) at multiple scales...")
-    rpe_results = compute_rpe_multi_scale(gt_traj, est_traj)
+    rpe_results = compute_rpe_multi_scale(gt_traj, est_traj, align_mode=align_mode)
     
     for scale, rpe_dict in rpe_results.items():
         rpe_t_stats = rpe_dict['trans'].get_all_statistics()
@@ -1217,9 +1357,9 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     
     # Save metrics
     print("\n8. Saving metrics...")
-    save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.txt", eval_diagnostics=eval_diag)
+    save_metrics_txt(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.txt", eval_diagnostics=eval_diag, align_mode=align_mode)
     save_metrics_csv(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.csv")
-    save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.json", eval_diagnostics=eval_diag)
+    save_metrics_json(ate_trans, ate_rot, rpe_results, per_axis_data, output_dir / "metrics.json", eval_diagnostics=eval_diag, align_mode=align_mode)
     
     print("\n" + "=" * 60)
     print("Evaluation complete!")
@@ -1232,7 +1372,7 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
     if '1m' in rpe_results:
         print(f"  RPE translation @ 1 m (m/m):    {rpe_results['1m']['trans'].get_all_statistics()['rmse']:.4f} m/m")
     
-    # Per-axis summary (after SE(3) alignment)
+    # Per-axis summary
     print("\n  Per-axis translation RMSE (X, Y, Z in meters):")
     for axis in ['x', 'y', 'z']:
         errors = per_axis_data['translation'][axis]
@@ -1252,11 +1392,32 @@ def main(gt_file, est_file, output_dir, op_report_path, require_imu=True):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("ground_truth", help="Aligned ground truth TUM file")
+    ap.add_argument("ground_truth", help="Aligned ground truth TUM file (time-aligned)")
     ap.add_argument("estimated", help="Estimated TUM file")
     ap.add_argument("output_dir", help="Output directory")
     ap.add_argument("op_report", help="OpReport JSONL file")
     ap.add_argument("--no-imu", action="store_true", help="Disable IMU OpReport requirements")
+    ap.add_argument(
+        "--align",
+        choices=("initial", "umeyama"),
+        default="initial",
+        help="Alignment for metrics: initial = first pose only (GT → estimate frame; valid for relative SLAM). umeyama = full SE(3) best-fit (default: initial)",
+    )
+    ap.add_argument(
+        "--gt-swap-yz",
+        action="store_true",
+        help="Swap GT Y and Z axes before evaluation (diagnostic when 'our XZ looks like GT XY' — axis-convention mismatch).",
+    )
+    ap.add_argument(
+        "--apply-est-to-gt-convention",
+        action="store_true",
+        help="Transform EST by R_EST_TO_GT (GT x≈-EST z, GT y≈EST x, GT z≈-EST y) so plots are same-plane in GT axes.",
+    )
+    ap.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print first 5 rows of positions (x,y,z) and ptp ranges to verify TUM column order.",
+    )
     args = ap.parse_args()
 
     try:
@@ -1266,6 +1427,10 @@ if __name__ == "__main__":
             args.output_dir,
             args.op_report,
             require_imu=not args.no_imu,
+            align_mode=args.align,
+            gt_swap_yz=args.gt_swap_yz,
+            apply_est_to_gt_axes=args.apply_est_to_gt_convention,
+            verbose=args.verbose,
         )
     except KeyboardInterrupt:
         print("\n\nEvaluation interrupted by user.")

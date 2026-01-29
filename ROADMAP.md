@@ -1,78 +1,60 @@
 # FL-SLAM Roadmap (Impact Project v1)
 
-This roadmap is organized around the **Golden Child SLAM v2** implementation and a clean separation between:
-- **MVP operational code**: required to run `tools/run_and_evaluate_gc.sh`
-- **Immediate priorities**: Adaptive noise (IW), IMU fusion (vMF), factor-based evidence
-- **Future work**: Additional datasets, dense RGB-D, visual loop factors
+This roadmap is organized around the **Golden Child SLAM v2** implementation. **Code is the source of truth;** this doc reflects the repo as of **2026-01-29**.
+
+- **Primary operational code**: Required to run `tools/run_and_evaluate_gc.sh` (GC v2 on M3DGR Dynamic01).
+- **Immediate priorities**: IW tuning/diagnostics, remaining design gaps (see `docs/PIPELINE_DESIGN_GAPS.md`), optional bin-level motion smear.
+- **Future work**: Additional datasets, dense RGB-D, visual loop factors, semantic/categorical layer.
 
 ---
 
 ## ✅ Completed Milestones
 
-### IMU Integration & 15D State Extension (2026-01-21)
-- **Contract B IMU Fusion**: Frontend publishes raw IMU segments (`/sim/imu_segment`), backend re-integrates with sigma-point propagation and bias coupling
-- **15D State Extension**: Backend maintains 15DOF state (pose + velocity + biases) per anchor module
-- **Two-State Schur Marginalization**: Joint e-projection followed by exact Schur marginalization
-- **Hellinger-Dirichlet Fusion**: Batched moment matching with Hellinger-tilted likelihood and Dirichlet-categorical routing
-- **Files**: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/imu_jax_kernel.py`, `dirichlet_routing.py`, `lie_jax.py`, `gaussian_info.py`
-- **Message**: `IMUSegment.msg` (replaces deprecated `IMUFactor.msg`)
+### 22D State & 14-Step Pipeline (current)
+- **22D augmented state** (per `fl_ws/src/fl_slam_poc/fl_slam_poc/common/constants.py`): `[trans(3), rot(3), vel(3), bg(3), ba(3), dt(1), ex(6)]`
+- **14-step pipeline per scan**: PointBudgetResample → PredictDiffusion → DeskewConstantTwist → BinSoftAssign → ScanBinMomentMatch → MatrixFisherRotation → PlanarTranslationEvidence → Evidence (odom pose + odom twist + planar priors + IMU + LiDAR) → FusionScaleFromCertificates → InfoFusionAdditive → PoseUpdateFrobeniusRecompose → PoseCovInflationPushforward → AnchorDriftUpdate
+- **LiDAR evidence**: Matrix Fisher rotation + planarized translation with self-adaptive z precision (`matrix_fisher_evidence.py`, `build_combined_lidar_evidence_22d`)
+- **IMU**: Time-resolved vMF tilt, gyro evidence, preintegration factor; preintegration window sliced to 512 steps (`GC_MAX_IMU_PREINT_LEN`)
+- **Odom**: Pose evidence + twist evidence (velocity, yaw-rate, pose–twist kinematic consistency); see `odom_evidence.py`, `odom_twist_evidence.py`
+- **Planar**: Planar z and vel_z priors; map update sets `t_hat[2]=0` to break z feedback (`planar_prior.py`, `map_update.py`)
+- **Adaptive noise**: Inverse-Wishart for process Q and measurement Σ (gyro, accel, LiDAR); readiness weights (no gates); updates every scan (`structures/inverse_wishart_jax.py`, `measurement_noise_iw_jax.py`, `lidar_bucket_noise_iw_jax.py`)
+- **Smoothed initial anchor**: Provisional A0 on first odom; after K odom, A_smoothed from closed-form aggregate; export = anchor_correction ∘ pose_belief (`backend_node.py`, `gc_unified.yaml` init_window_odom_count)
+- **Wahba removed**: Pipeline uses Matrix Fisher only; legacy Wahba in `archive/legacy_operators/`
 
-### Package Structure Flattening (2026-01-22)
-- Flattened package structure: `common/`, `frontend/`, `backend/` at top level
-- Moved utility nodes into `frontend/`
-- Updated all imports and entry points
-
-### Existing Adaptive Components
-- **Adaptive Process Noise** (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/process_noise.py`): Inverse-Wishart model for online process noise estimation
-- **Adaptive Parameters** (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/adaptive.py`): Bayesian online parameter estimation with Normal priors
-- **Reference**: See `docs/Self-Adaptive Systems Guide.md` for full self-adaptive system specifications
+### Package & Entry Points
+- **Package**: `fl_ws/src/fl_slam_poc/fl_slam_poc/` — `common/`, `frontend/` (hub, sensors, audit), `backend/` (pipeline, operators, structures)
+- **Launch**: `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `config/gc_unified.yaml`
+- **Nodes**: `gc_sensor_hub` (frontend), `gc_backend_node` (backend); sensors: livox_converter, odom_normalizer, imu_normalizer
+- **Reference**: `docs/Self-Adaptive Systems Guide.md`, `docs/PIPELINE_DESIGN_GAPS.md`, `docs/IMU_BELIEF_MAP_AND_FUSION.md`
 
 ---
 
-## Immediate Priority: GC v2 Full Implementation
+## Immediate Priority: Hardening & Design Gaps
 
-**Goal:** Implement the full spec from `docs/GOLDEN_CHILD_INTERFACE_SPEC.md` including adaptive noise, IMU fusion, and factor-based evidence.
+**Goal:** Align with full spec (`docs/GOLDEN_CHILD_INTERFACE_SPEC.md`), close remaining design gaps in `docs/PIPELINE_DESIGN_GAPS.md`, and improve robustness/metrics.
 
-### Phase 1: Inverse-Wishart Process Noise (Replace Fixed Q)
-- Replace `build_default_process_noise()` with `ProcessNoiseState` containing 7 per-block IW states
-- Initialize with datasheet priors and low pseudocounts (ν = p + 0.5) for fast adaptation
-- Datasheet values:
-  - IMU (ICM-40609): gyro σ² ≈ 8.7e-7 rad²/s², accel σ² ≈ 9.5e-5 m²/s⁴
-  - LiDAR (Mid-360): range σ ≈ 2cm, angular σ ≈ 0.15°, combined ~1e-3 m²/axis
-  - Odometry: use real 2D-aware covariances from `/odom` message
-- **Files**: `backend/operators/predict.py`, `backend/backend_node.py`
+### Done (current pipeline)
+- **IW process + measurement + LiDAR bucket**: Per-block IW states; readiness weights (no gates); datasheet priors; updates every scan. Files: `backend/structures/inverse_wishart_jax.py`, `operators/measurement_noise_iw_jax.py`, `operators/lidar_bucket_noise_iw_jax.py`, `operators/inverse_wishart_jax.py`.
+- **Sensor evidence**: IMU (vMF tilt, gyro, preintegration), odom (pose + twist + kinematic consistency), planar priors, LiDAR (Matrix Fisher + planar translation). All in 22D info form.
+- **Diagnostics**: MF SVD, scatter eigenvalues, factor ledger, conditioning, timing (`enable_timing`); dashboard and NPZ schema updated.
 
-### Phase 2: Sensor Evidence (IMU + Odom) **(Implemented)**
-- The IMU/odom evidence operators described above already exist in the pipeline (`backend/operators/imu_evidence.py`, `backend/operators/odom_evidence.py`, and `backend/pipeline.py:613-981`). IMU vMF direction, gyro Gaussian, odom velocity/yaw rate, and pose-twist consistency factors run with continuous covariances.
-- **Next focus:** tuning the IW prior weights, surfacing diagnostics (MF SVD, factor ledger, cross-sensor disagreements), and ensuring the evidence logging (certs) covers the new summary fields added to `ScanDiagnostics`.
+### Next: Design gaps & tuning
 
-### Phase 3: IW Conjugate Updates + Measurement Noise
-- Compute innovation residuals after `PoseUpdateFrobeniusRecompose`
-- Per-block IW updates: `Psi += outer(residual_block)`, `nu += 1`
-- Add IW states for measurement noise (Σg, Σa, Σlidar)
-- Odometry covariance as hyper-evidence for trans/vel IW priors
-- **Files**: new `backend/operators/adaptive_noise.py`, `backend/pipeline.py`
+1. **Pose–twist as joint observation** (PIPELINE_DESIGN_GAPS §4): Model pose and twist with declared joint/cross-covariance; reflect kinematics in evidence.
+2. **Cross-sensor consistency as evidence**: Use dyaw_gyro / dyaw_odom / dyaw_mf agreement in the model (currently diagnostics only).
+3. **Use more raw message info**: IMU message covariances and orientation not consumed; LiDAR intensity not used. Optional: forward/lateral decomposition.
+4. **Q trans block z**: Use `GC_PROCESS_Z_DIFFUSION` for z in process noise (PIPELINE_DESIGN_GAPS §5.5).
+5. **Rotation/tilt**: Audit gravity/IMU alignment; optional tilt prior for planar robot; inflate odom roll/pitch variance if bag publishes tight tilt.
 
-### Phase 4: Likelihood-Based LiDAR Evidence (Matrix Fisher + planar translation)
-- The pipeline now runs `matrix_fisher_evidence.py` to supply Matrix Fisher rotation plus planarized translation evidence with IW self-adaptation and planar priors (`backend/pipeline.py:613-672`). The “replace Wahba/UT regression” work is legacy—diagnostics now focus on scatter eigenvalues, Z-leak sentinels, and per-bin conditioning.
-- **Next focus:** expand bin-level diagnostics (MF SVD, leak detectors) and integrate them with the dashboards/NPZ logs.
-
-### Phase 4.1: Bin-level Motion Smear & Timing Instrumentation (next focus)
-
-- **Replace per-point deskew:** The new `deskew_constant_twist` operator is still in use, but the future plan (see `docs/PIPELINE_DESIGN_GAPS.md` §5.8) is to compute `Σ_motion,b` per bin via per-bin time moments (`Σ Δt^k`) and point second moments (`Σ p pᵀ`). Implement a `BinMotionSmearCovariance` operator between `BinSoftAssign` and `ScanBinMomentMatch` and add the inflated covariance into the information-form bin update. The config should explicitly select `deskew_model: per_point | bin_smear_2nd_order`, and the operator must emit a certified Frobenius correction whenever any series approximation is triggered.
-- **Diagnostics:** Track `Σ_motion,b`, leak energy (rot/info injected into Z), and per-bin moment stats in the NPZ/logs so the dashboard can plot leak sentinels and expose the bin-level approximations.
-- **Timing instrumentation:** Continue using the `enable_timing` flag (`backend_node.py:309-365`, `config/gc_unified.yaml:85`, `gc_rosbag.launch.py`) and the per-stage timers in `backend/pipeline.py:176-717`/`backend/diagnostics.py:343`. Profile the new bin-smear operator to ensure the 4000→512 IMU slicing remains the bottleneck fix and document the timing results in evaluation runs.
-
-### Phase 5: Integration and Validation
-- Full pipeline integration (updated 16-step sequence)
-- Certificate extensions for IW state summaries
-- M3DGR evaluation and metric comparison across phases
-- **Files**: `backend/pipeline.py`, `backend/certificates.py`
+### Optional: Bin-level motion smear (PIPELINE_DESIGN_GAPS §5.8)
+- **Goal:** Replace per-point deskew with bin-level covariance inflation `Σ_motion,b` (closed-form 2nd-order rotational smear).
+- **Operator:** `BinMotionSmearCovariance` between BinSoftAssign and ScanBinMomentMatch; config `deskew_model: per_point | bin_smear_2nd_order`; emit Frobenius correction when approximation triggers.
+- **Diagnostics:** Per-bin `Σ_motion,b`, time moments, leak sentinels in NPZ/dashboard. IMU preint already sliced to 512 steps; `enable_timing` and per-stage timers in pipeline/diagnostics.
 
 ### Key Invariants (Must Preserve)
-- No gating: all adaptations via continuous scaling
-- No fixed constants: all noise params are IW random variables with weak priors
-- Branch-free: IW updates happen every scan regardless of "convergence"
+- No gating: all adaptations via continuous scaling/weights
+- No fixed constants in the loop: noise params from IW (priors are config)
+- Branch-free: IW and evidence run every scan
 
 ---
 
@@ -96,48 +78,36 @@ These are **observed facts from the bag** and should be treated as the default c
 
 ---
 
-## 1) MVP Status (Current Baseline)
+## 1) GC v2 Status (Current Baseline)
 
 **Primary entrypoint**
-- `tools/run_and_evaluate.sh`: runs the M3DGR Dynamic01 pipeline end-to-end (SLAM + plots/metrics).
+- `tools/run_and_evaluate_gc.sh`: runs GC v2 on M3DGR Dynamic01 end-to-end (SLAM + alignment + metrics + plots + audit). Artifacts under `results/gc_YYYYMMDD_HHMMSS/`.
 
 **Launch**
-- `fl_ws/src/fl_slam_poc/launch/poc_m3dgr_rosbag.launch.py`
+- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `fl_ws/src/fl_slam_poc/config/gc_unified.yaml`
 
-**Nodes in the MVP pipeline**
-- Frontend: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/frontend_node.py`
-- Backend: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
-- Utility: `image_decompress_cpp` (C++ node; compressed RGB + compressedDepth → raw `sensor_msgs/Image`)
-- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/livox_converter.py` (moved from `utility_nodes/` during flattening)
-- Utility: `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/odom_bridge.py` (moved from `utility_nodes/` during flattening; generic abs→delta odom bridge)
+**Nodes**
+- Frontend: `gc_sensor_hub` (`fl_slam_poc/frontend/hub/gc_sensor_hub.py`) — publishes `/gc/sensors/lidar_points`, `/gc/sensors/odom`, `/gc/sensors/imu`
+- Backend: `gc_backend_node` (`fl_slam_poc/backend/backend_node.py`) — 14-step pipeline, IW updates, hypothesis combine
+- Sensors (used by hub): `livox_converter`, `odom_normalizer`, `imu_normalizer`; optional: `dead_end_audit_node`, `wiring_auditor`
 
 **Evaluation**
-- `tools/align_ground_truth.py`
-- `tools/evaluate_slam.py`
+- `tools/align_ground_truth.py`, `tools/evaluate_slam.py`, `tools/slam_dashboard.py`
 
-**Current State (15DOF per module)**
+**State (22D per chart)**
 ```python
-mu = [x, y, z, rx, ry, rz, vx, vy, vz, bg_x, bg_y, bg_z, ba_x, ba_y, ba_z]  # 15D: pose + velocity + biases
-cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
+# fl_slam_poc/common/constants.py: GC_D_Z = 22
+z = [trans(0:3), rot(3:6), vel(6:9), bg(9:12), ba(12:15), dt(15:16), ex(16:22)]
+# cov = 22×22 in tangent space
 ```
-
-**Note**: State was extended from 6DOF to 15DOF as part of IMU integration (completed 2026-01-21). See Completed Milestones above.
 
 ---
 
-## 2) Near-Term Priority: IMU Integration & 15D State Extension
+## 2) IMU & Multi-Sensor Fusion (Completed)
 
-### Status: ✅ COMPLETED (2026-01-21)
+### Status: ✅ Implemented
 
-**Implementation**: Contract B IMU fusion architecture with raw IMU segments, sigma-point propagation, and two-state Schur marginalization. See Completed Milestones section above for details.
-
-### Overview
-
-IMU integration has been completed to fix rotation accuracy, extend backend state from 6DOF SE(3) to 15DOF (pose + velocity + biases), and harden multi-sensor fusion. The implementation uses **Contract B architecture**: frontend publishes raw IMU segments (`IMUSegment.msg`), backend re-integrates with sigma-point propagation and bias coupling, then performs joint e-projection followed by exact Schur marginalization.
-
-**Expected improvement:** Rotation RPE should improve ~30-50% with IMU vs. without (wheel odom + LiDAR only).
-
-**Self-Adaptive Systems Integration**: See Section 2.7 below for adaptive IMU noise model integration (future enhancement).
+**Current flow**: Backend subscribes to `/gc/sensors/imu` (from gc_sensor_hub); buffers IMU in-node; runs preintegration over the scan window (sliced to 512 steps). State is **22D** (pose + vel + biases + dt + ex). Evidence: time-resolved vMF tilt, gyro rotation, preintegration factor; odom pose + twist + kinematic consistency; planar priors; LiDAR Matrix Fisher + planar translation. IW updates every scan (process, measurement, LiDAR bucket). See Completed Milestones and §1 above.
 
 ---
 
@@ -317,7 +287,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 #### 5.2 Baseline Evaluation After IMU Integration
 
-**Files:** `tools/run_and_evaluate.sh`, `tools/evaluate_slam.py`
+**Files:** `tools/run_and_evaluate_gc.sh`, `tools/evaluate_slam.py`
 
 **Changes:**
 - Add rotation metrics (RPE rotation, ATE rotation) to `tools/evaluate_slam.py` (already present, verify)
@@ -344,7 +314,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 #### 6.1 M3DGR Launch File
 
-**Files:** `fl_ws/src/fl_slam_poc/launch/poc_m3dgr_rosbag.launch.py`
+**Files:** `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`
 
 **Changes:**
 - Add IMU parameters:
@@ -359,7 +329,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 #### 6.2 Alternative Dataset Support (Newer College, etc.)
 
-**Files:** `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
+**Files:** Add launch for 3D rosbag under `fl_ws/.../launch/` when needed
 
 **Changes:**
 - Add same IMU parameters as above
@@ -445,8 +415,8 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 **Primary files:**
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/se3.py` (flattened from `common/transforms/se3.py`)
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/odom_bridge.py` (moved from `utility_nodes/` during flattening)
+- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/geometry/se3_jax.py`
+- Odom: backend subscribes to `/gc/sensors/odom` (from gc_sensor_hub)
 
 **Checklist:**
 - Verify pose composition conventions and frame semantics (odom/base).
@@ -464,15 +434,11 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 ### C) TurtleBot3 (2D) validation
 
-**Files:**
-- `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3_rosbag.launch.py`
-- `tools/download_tb3_rosbag.sh`
+**Files:** `tools/download_tb3_rosbag.sh`. Launch: add `fl_ws/.../launch/` entry for TB3 when needed.
 
 ### D) NVIDIA r2b (3D) validation / GPU
 
-**Files:**
-- `phase2/fl_ws/src/fl_slam_poc/launch/poc_3d_rosbag.launch.py`
-- `tools/download_r2b_dataset.sh`
+**Files:** `tools/download_r2b_dataset.sh`. Launch: add entry for 3D rosbag when needed.
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/pointcloud_gpu.py` (flattened from `frontend/loops/pointcloud_gpu.py`)
 
 ---
@@ -989,9 +955,7 @@ pi_outlier = 0.1       # outlier mixture weight
 ### D) Dirichlet Semantic SLAM Integration
 
 **Files:**
-- `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/dirichlet_backend_node.py`
-- `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/nodes/sim_semantics_node.py`
-- `fl_ws/src/fl_slam_poc/fl_slam_poc/common/dirichlet_geom.py` (moved from `operators/` during flattening)
+- Semantic/Dirichlet nodes and common utilities to be added under `fl_ws/src/fl_slam_poc/` if semantic layer is implemented
 
 **Self-Adaptive Systems Integration**: See `docs/Self-Adaptive Systems Guide.md` Section 3 (Adaptive Association via Dirichlet Concentration Tracking):
 - Adaptive concentration regulation based on system-wide entropy
@@ -1001,11 +965,9 @@ pi_outlier = 0.1       # outlier mixture weight
 
 ---
 
-### E) Gazebo Live Testing
+### E) Gazebo live testing
 
-**Files:**
-- `phase2/fl_ws/src/fl_slam_poc/launch/poc_tb3.launch.py`
-- `phase2/fl_ws/src/fl_slam_poc/fl_slam_poc/utility_nodes/sim_world.py`
+**Files:** To be added under `fl_ws/.../launch/` and frontend when needed.
 
 ---
 
@@ -1045,13 +1007,10 @@ pi_outlier = 0.1       # outlier mixture weight
 
 ## Roadmap Summary
 
-### Immediate Work (Priority 1) — GC v2 Full Implementation (Phases 1-5)
-1. ✅ 22D augmented state + 15-step LiDAR pipeline - **COMPLETED**
-2. ⏳ Phase 1: Inverse-Wishart adaptive process noise (replace fixed Q with datasheet priors)
-3. ⏳ Phase 2: Sensor evidence (IMU vMF/gyro + Odom partial observation)
-4. ⏳ Phase 3: IW conjugate updates + measurement noise IW states (Σg, Σa, Σodom, Σlidar)
-5. ⏳ Phase 4: Likelihood-based LiDAR evidence (replace UT regression with Laplace/I-projection)
-6. ⏳ Phase 5: Integration and validation (17-step pipeline, M3DGR evaluation)
+### Current + Immediate (Priority 1)
+1. ✅ 22D state + 14-step pipeline (IW, MF+planar LiDAR, odom+twist, IMU, planar priors) - **COMPLETED**
+2. ⏳ Design gaps: pose–twist joint; cross-sensor consistency; IMU cov / LiDAR intensity; Q trans z; rotation/tilt audit
+3. ⏳ Optional: bin-level motion smear (PIPELINE_DESIGN_GAPS §5.8)
 
 ### Near-Term Future Work (Priority 2) — Phases 6-8
 7. ⏳ Phase 6: Dense RGB-D in 3D mode
@@ -1072,9 +1031,10 @@ pi_outlier = 0.1       # outlier mixture weight
 18. ⏳ Phase 17: System-wide adaptive coordinator
 
 ---
-Yes—adding **categorical (and hierarchical categorical)** layers is the cleanest way to reach Hydra-DSG–level semantic usability while staying fully within your “exponential-family, additive stats, branch-free” doctrine.
+## Future: Semantic / Categorical Layer (Reference)
 
-Below is a strict, implementable way to do it that (i) remains first principles, (ii) is JAX/static-shape friendly, and (iii) keeps the semantic layer auditable and uncertainty-aware.
+
+Adding **categorical (and hierarchical categorical)** layers is a principled way to reach Hydra-DSG–level semantic usability while staying within exponential-family, additive stats, branch-free doctrine. Below: strict, implementable outline (first principles, JAX/static-shape friendly, auditable).
 
 ---
 

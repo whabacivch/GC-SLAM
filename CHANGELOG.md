@@ -4,6 +4,10 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-29: ROADMAP.md updated to match current codebase
+
+- **ROADMAP.md**: Brought in line with current GC v2: 22D state, 14-step pipeline, `gc_sensor_hub` → `gc_backend_node`, `/gc/sensors/*` topics, `gc_rosbag.launch.py`, `gc_unified.yaml`. Completed milestones and §1 (GC v2 status) rewritten; immediate priorities aligned with `docs/PIPELINE_DESIGN_GAPS.md`; removed/updated stale refs (15D→22D, `run_and_evaluate.sh`→`run_and_evaluate_gc.sh`, `poc_m3dgr_rosbag`→`gc_rosbag`, `phase2/` paths). Roadmap Summary and Future semantic section clarified. Historical Phase 1–6 detail retained with note that current architecture is summarized in §1 and Completed Milestones.
+
 ## 2026-01-29: Fixed shapes + diagnostics doc + bin_atlas import
 
 - **Dynamic shapes:** Point budget now returns **fixed-size** arrays (N_POINTS_CAP) instead of slicing to n_selected; pipeline passes them to deskew → bin_soft_assign → scan_bin_moment_match so downstream JITs see static `n_points` and do not recompile per scan (point_budget.py, pipeline unchanged except uses full result).
