@@ -72,9 +72,9 @@ Each **LiDAR** message triggers one pipeline run. The pipeline is **fixed-cost**
 | 4 | **BinSoftAssign** | point_directions (from deskewed_points, lidar_origin_base), bin_atlas | responsibilities. |
 | 5 | **ScanBinMomentMatch** | deskewed_points, weights, responsibilities, point_lambda | scan_bins (s_dir, N, kappa_scan, p_bar, Sigma_p, etc.). |
 | 6 | **KappaFromResultant** | map_stats, scan_bins | mu_map, kappa_map, c_map, Sigma_c_map; mu_scan. |
-| 7 | **WahbaSVD** | mu_map, mu_scan, wahba_weights (N×kappa_map×kappa_scan) | R_hat. |
-| 8 | **TranslationWLS** | c_map, Sigma_c_map, scan_bins, R_hat, Sigma_meas | t_hat, t_cov. |
-| 9 | **Odom + IMU + LiDAR evidence** | belief_pred, **odom_pose**, **imu** (gyro preint, accel vMF, preint factor), scan_bins, map_bins, R_hat, t_hat | L_evidence, h_evidence (sum of L_odom, L_imu, L_gyro, L_imu_preint, L_lidar; same for h). |
+| 7 | **MatrixFisherRotation** | scan/map directional scatter (S_dir, S_dir_scatter, N) | R_hat. |
+| 8 | **PlanarTranslationEvidence** | c_map, Sigma_c_map, scan_bins, R_hat, map scatter (z observability) | t_hat, L_trans (planarized), N_eff. |
+| 9 | **Odom + IMU + LiDAR evidence** | belief_pred, odom pose + twist, IMU (gyro preint, **time-resolved vMF**, preint factor), scan_bins/map_bins, R_hat, t_hat | L_evidence, h_evidence (sum of L_odom, L_imu, L_gyro, L_imu_preint, L_lidar, planar priors, odom twist factors). |
 | *(after 9)* | **Excitation scaling** | L_evidence, belief_pred.L | belief_pred with scaled prior (dt index 15, extrinsic 16:22). |
 | 10 | **FusionScaleFromCertificates** | L_evidence (pose 6×6 conditioning), certs | α. |
 | 11 | **InfoFusionAdditive** | belief_pred, L_evidence, h_evidence, α | belief_post. |
@@ -84,9 +84,9 @@ Each **LiDAR** message triggers one pipeline run. The pipeline is **fixed-cost**
 
 **Where each topic feeds in:**
 
-- **LiDAR:** Steps 1–2 (raw points); 3 (deskew uses points + IMU); 4–8 (bins, Wahba, WLS); 9 (lidar_quadratic_evidence); 14 (map update uses scan_bins).
-- **IMU:** Step 3 (deskew twist); step 9 (gyro evidence, accel vMF evidence, preintegration factor); also IW updates for Σg, Σa after the pipeline.
-- **Odom:** Step 9 (odom_quadratic_evidence); first-odom reference applied in backend before pipeline.
+- **LiDAR:** Steps 1–2 (raw points); 3 (deskew uses points + IMU); 4–8 (bins, Matrix Fisher, planar translation); 9 (combined LiDAR evidence from MF + planar translation); 14 (map update uses scan_bins with planar z fix).
+- **IMU:** Step 3 (deskew twist); step 9 (gyro evidence, **time-resolved** accel vMF evidence, preintegration factor); also IW updates for Σg, Σa after the pipeline.
+- **Odom:** Step 9 (odom_quadratic_evidence + twist evidence); first-odom reference applied in backend before pipeline.
 
 ---
 
@@ -116,10 +116,10 @@ In this project the IMU is the Livox Mid-360 onboard IMU (ICM-40609), outputting
 |--------|--------|
 | **Measures** | Specific force (m/s² after scale): gravity + linear acceleration. |
 | **Provides** | Gravity direction when stationary (→ pitch/roll); linear acceleration when moving. |
-| **Does not provide** | Position, velocity, or **yaw** (current implementation uses only mean direction → gravity alignment). |
-| **In code** | `imu_vmf_gravity_evidence()`: vMF-style factor on **direction only**; converted to Gaussian information (rotation block [3:6]) via Laplace at δθ=0. |
+| **Does not provide** | Position, velocity, or **yaw** (current implementation constrains tilt only). |
+| **In code** | `imu_vmf_gravity_evidence_time_resolved()`: time-resolved vMF-style factor on **direction only**, weighted by transport consistency; converted to Gaussian information (rotation block [3:6]) via Laplace at δθ=0. |
 
-**Critical limitation:** The accelerometer evidence uses a **single vMF on the mean direction** of all accel samples. That measures “how much the mean direction deviates from vertical,” which constrains **pitch/roll only**. It does **not** constrain yaw; centrifugal force is not exploited for yaw in the current design.
+**Current limitation:** The accelerometer evidence still constrains **pitch/roll only** (no yaw), but is now **time-resolved** and transport‑consistency‑weighted to reduce contamination by linear acceleration. It remains a Laplace approximation with PSD projection.
 
 ### 3.4 Odometry (wheel encoder)
 
@@ -133,8 +133,8 @@ In this project the IMU is the Livox Mid-360 onboard IMU (ICM-40609), outputting
 
 | Aspect | Detail |
 |--------|--------|
-| **Provides** | Scan-to-map alignment (Wahba + translation WLS) → rotation R_hat, translation t_hat, and covariance. |
-| **In code** | `lidar_quadratic_evidence()`: Quadratic (Gaussian) evidence on full 22D state at belief_pred; blocks for pose [0:6], plus coupling for dt (index 15) and extrinsic (16:22). |
+| **Provides** | Scan-to-map alignment via **Matrix Fisher rotation + planar translation** → rotation R_hat, translation t_hat, planarized translation info. |
+| **In code** | `matrix_fisher_rotation_evidence()` + `planar_translation_evidence()` → `build_combined_lidar_evidence_22d()` (pose block with self‑adaptive z precision). |
 
 ### 3.6 Summary: What Constrains What
 
@@ -172,11 +172,13 @@ Yaw is under-constrained (gyro gives only relative change; accel does not use ho
 
 All evidence is converted to **Gaussian information form** (L, h) on the 22D tangent chart so it can be added and fused in one place.
 
-### 5.1 Gaussian Evidence (Gyro, Odom, LiDAR, IMU Preintegration)
+### 5.1 Gaussian Evidence (Gyro, Odom, Odom Twist, LiDAR, IMU Preintegration, Planar Priors)
 
 - **Gyro** (`imu_gyro_evidence.py`): Residual on SO(3), **r = Log(R_end_pred^T @ R_end_imu)**. Covariance **Σ_rot ≈ Σ_g * dt_int** (Σ_g from IW/datasheet). Information **L_rot = Σ_rot^{-1}**; placed in **[3:6, 3:6]** (rotation block). **Gaussian on rotation**, no vMF.
 - **Odom** (`odom_evidence.py`): Pose error **T_err = belief_pred^{-1} ∘ T_odom**, **ξ = Log(T_err)**. **L = Σ^{-1}** from ROS 6×6 pose covariance; placed in **[0:6, 0:6]**. **Gaussian on full 6D pose.**
-- **LiDAR** (`lidar_evidence.py`): Wahba + WLS give R_hat, t_hat, t_cov. Quadratic at belief_pred on full 22D with pose block [0:6], plus dt (15) and extrinsic (16:22) coupling. **Gaussian (quadratic) on 22D.**
+- **LiDAR** (`matrix_fisher_evidence.py` + `pipeline.py`): Matrix Fisher rotation + planar translation produce R_hat and planarized translation info. Combined into Gaussian info on the pose block [0:6] via `build_combined_lidar_evidence_22d()` (self‑adaptive z precision).
+- **Odom twist** (`odom_twist_evidence.py`): Velocity factor (body twist → world velocity), yaw‑rate factor, and pose–twist kinematic consistency across scan dt.
+- **Planar priors** (`planar_prior.py`): Always‑on soft priors on z ≈ z_ref and v_z ≈ 0.
 - **IMU preintegration** (`imu_preintegration_factor.py`): Velocity/position from accel preintegration vs predicted state → quadratic term; **Gaussian** on the relevant tangent block.
 
 ### 5.2 vMF Evidence (Accelerometer Only)
@@ -185,8 +187,8 @@ All evidence is converted to **Gaussian information form** (L, h) on the 22D tan
 
 - **Model:** Likelihood is **ℓ(δθ) = -κ · μ(δθ)ᵀ · x̄** (vMF-style direction-only factor).
   - **μ(δθ)** = predicted gravity direction in body frame = R(δθ)ᵀ·(-g_hat).
-  - **x̄** = mean resultant direction of accel samples (normalize each sample, then average).
-- **κ:** From mean resultant length **R̄** via `kappa_from_resultant_v2()` (continuous blend of low-R and high-R approximations; **not** per-axis Gaussian).
+  - **x̄** = **weighted** resultant direction of accel samples (normalize each sample, then reliability‑weight and average).
+- **κ:** From weighted resultant length **R̄** via `kappa_from_resultant_v2()` (continuous blend of low‑R and high‑R approximations; **not** per‑axis Gaussian).
 - **Conversion to Gaussian:** Laplace at **δθ = 0**:
   - **Gradient:** **g_rot = -κ · (μ₀ × x̄)** (exact).
   - **Hessian (approximation):** **H_rot ≈ κ · [ (x̄·μ₀)·I - 0.5·(x̄μ₀ᵀ + μ₀x̄ᵀ) ]**, then symmetrized and PSD-projected.
@@ -202,8 +204,8 @@ All evidence is converted to **Gaussian information form** (L, h) on the 22D tan
 
 All evidence is in **information form** (L, h) on the 22D chart:
 
-- **L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint**
-- **h_evidence = h_lidar + h_odom + h_imu + h_gyro + h_imu_preint**
+- **L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint + L_planar + L_vel + L_wz + L_consistency**
+- **h_evidence = h_lidar + h_odom + h_imu + h_gyro + h_imu_preint + h_planar + h_vel + h_wz + h_consistency**
 
 So Gaussians and the vMF-derived term are combined by **adding** their L and h. This is equivalent to a product of Gaussians in information form (Bregman/additive fusion). No separate “vMF fusion” step; vMF has already been turned into (L_imu, h_imu).
 
@@ -266,7 +268,7 @@ So IMU does **not** define the bin grid, but it **does** change the points that 
 - Updated in the **backend** after the pipeline using **map_increments** from the pipeline.
 - **R_for_map**, **t_for_map**:
   - **First scan (map empty):** **belief_recomposed.mean_world_pose()** → pose already includes IMU + odom (no LiDAR alignment yet).
-  - **Later scans:** **R_hat**, **t_hat** from Wahba + translation WLS (scan-to-map).
+  - **Later scans:** **R_hat**, **t_hat** from Matrix Fisher rotation + planar translation (scan-to-map).
 - Scan-side inputs to map update: scan_bins (N, s_dir, p_bar, Sigma_p), which come from **deskewed** points (IMU-dependent).
 
 So IMU influences the map by: (1) first-scan placement using a pose that has already been updated by IMU (and odom); (2) every scan, the statistics pushed into the map come from deskewed points (IMU-dependent).
@@ -287,12 +289,12 @@ So IMU influences the map by: (1) first-scan placement using a pose that has alr
 |-------|--------|
 | **Raw → canonical** | livox_converter (lidar), odom_normalizer (odom), imu_normalizer (imu); backend subscribes only to /gc/sensors/*. |
 | **Pipeline trigger** | LiDAR message on /gc/sensors/lidar_points; IMU and odom consumed from buffer/last when each scan runs. |
-| **Pipeline steps** | 1–14 run every scan; deskew (3) uses IMU; evidence (9) uses odom + IMU + LiDAR; fusion (10–12) then recompose (13), map update (14), anchor drift (15). |
+| **Pipeline steps** | 1–14 run every scan; deskew (3) uses IMU; evidence (9) uses odom pose + odom twist + IMU + LiDAR + planar priors; fusion (10–12) then recompose (13), map update (14), anchor drift (15). |
 | **Belief** | IMU adds L_imu, L_gyro, L_imu_preint (and h) to the same information sum as odom and LiDAR; same fusion and recompose. |
 | **Bins** | Scan bins come from **deskewed** scan; deskew uses IMU → IMU shapes scan_bins. |
-| **Map** | Map updated from scan_bins + pose; first-scan pose = IMU+odom belief; later poses = Wahba/WLS on deskewed scan; scan_bins IMU-dependent. |
-| **Gaussians** | Gyro, odom, LiDAR, IMU preint: all Gaussian (or quadratic) in information form on 22D (or pose block). |
-| **vMF** | Accel only: single vMF on mean direction → Laplace at δθ=0 → (L_imu, h_imu) on rotation block [3:6]; constrains pitch/roll, not yaw. |
+| **Map** | Map updated from scan_bins + pose; first-scan pose = IMU+odom belief; later poses = Matrix Fisher + planar translation on deskewed scan; scan_bins IMU-dependent. |
+| **Gaussians** | Gyro, odom, LiDAR, IMU preint, planar priors, odom twist: all Gaussian (or quadratic) in information form on 22D (or pose block). |
+| **vMF** | Accel only: **time‑resolved** vMF with transport‑consistency weighting → Laplace at δθ=0 → (L_imu, h_imu) on rotation block [3:6]; constrains pitch/roll, not yaw. |
 | **Fusion** | L_evidence = sum of all L; h_evidence = sum of all h; excitation scaling scales prior; α from pose-6 conditioning + support; L_post = L_pred + α·L_evidence, h_post = h_pred + α·h_evidence; PSD on L_post. |
 | **Outputs** | /gc/state, /gc/trajectory, /gc/runtime_manifest, /gc/certificate, /gc/status; trajectory file (TUM); diagnostics NPZ. |
 
@@ -303,7 +305,7 @@ So IMU influences the map by: (1) first-scan placement using a pose that has alr
 The following are **canonical** and should match across docs and code:
 
 - **GC state ordering:** `[trans 0:3, rot 3:6, vel 6:9, gyro_bias 9:12, accel_bias 12:15, dt 15, extrinsic 16:22]`. LiDAR/odom/IMU evidence block indices are defined by this ordering (e.g. rotation = `[3:6]`, not `[0:3]`).
-- **Evidence sum:** `L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint` (five terms; same for h).
+- **Evidence sum:** `L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint + L_planar + L_vel + L_wz + L_consistency` (same for h).
 - **Gyro covariance:** `Sigma_rot = Sigma_g * dt_int` (dt_int = sum of IMU sample intervals in window), not dt_scan.
 - **Pipeline steps:** 14 numbered steps (1–14); excitation scaling is applied after evidence combine, before FusionScale.
 - **Fusion alpha:** Conditioning for α is taken from the **6×6 pose block** of L_evidence (overwritten in pipeline before `fusion_scale_from_certificates`).

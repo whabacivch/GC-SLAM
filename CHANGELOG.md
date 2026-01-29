@@ -4,6 +4,46 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-28: IMU preint window slice + Wahba removed
+
+- **IMU preintegration bottleneck fix (PIPELINE_DESIGN_GAPS §5.6):** Slice IMU buffer to integration window `[min(t_last_scan, scan_start), max(t_scan, scan_end)]`, cap at `GC_MAX_IMU_PREINT_LEN = 512`, pad to 512. Preintegration now runs over 512 steps instead of 4000 per call (~8× fewer scan iterations per LiDAR scan). `constants.GC_MAX_IMU_PREINT_LEN`, `backend_node.py` slice logic.
+- **Wahba removed:** Pipeline uses Matrix Fisher rotation only. `wahba.py` moved to `archive/legacy_operators/wahba.py`; removed from `fl_slam_poc.backend.operators` and from tests (`TestWahbaSVD` removed). Diagnostics still store MF cost/yaw in fields `wahba_cost` / `dyaw_wahba` for NPZ/dashboard compatibility.
+
+## 2026-01-28: Smoothed initial anchor (explicit A, no scan drops)
+
+- **Explicit anchor A:** Belief lives in anchor frame; export uses anchor-to-world transform A. Provisional A0 = first odom sample (no scan drops); after first K odom, A_smoothed from closed-form aggregate.
+- **Closed-form aggregate:** Translation t̄ = Σ w_k t_k / Σ w_k; rotation R̄ = polar(M) with M = Σ w_k R_k (one SVD). Weights w_k from IMU stability: w_k ∝ exp(-c_gyro ‖ω_k‖²) · exp(-c_accel (‖a_k‖ - g)²) (no gates).
+- **anchor_correction:** pose_export = anchor_correction ∘ pose_belief; applied when publishing state, TF, and trajectory file. Identity until A_smoothed set.
+- **backend_node.py:** A0 on first odom; odom_init_buffer for first K; _polar_so3, _imu_stability_weights; anchor_correction in _publish_state_from_pose.
+- **constants.py:** GC_INIT_ANCHOR_GYRO_SCALE, GC_INIT_ANCHOR_ACCEL_SCALE, GRAVITY_MAG.
+- **gc_unified.yaml:** init_window_odom_count (default 10).
+- **docs/PIPELINE_DESIGN_GAPS.md:** §5.4.1 marked implemented with code anchors.
+
+## 2026-01-29: Docs — PIPELINE_DESIGN_GAPS audited vs code
+
+- **docs/PIPELINE_DESIGN_GAPS.md**: Updated to match current backend behavior (odom twist factors, planar priors + planar map z, time-resolved IMU tilt evidence, planarized LiDAR translation, fixed K_HYP hypothesis container). Added explicit code anchors and marked “DONE vs remaining” gaps. Noted that some referenced trace docs may be stale relative to code.
+
+## 2026-01-29: Docs — pipeline and evidence references updated
+
+- Updated documentation to reflect current operators: Matrix Fisher rotation, planar translation evidence, time‑resolved IMU vMF, odom twist factors, and planar priors.
+- Marked legacy z‑drift analysis as historical and documented current fixes.
+- Updated diagrams and spec notes to remove Wahba/TranslationWLS as “current” and clarify legacy status.
+
+## 2026-01-29: Archive legacy operators/tools/tests
+
+- Moved Wahba/TranslationWLS tooling and legacy LiDAR evidence operators into `archive/`.
+- Removed legacy exports/imports from `fl_slam_poc.backend.operators` and cleaned pipeline references.
+
+## 2026-01-29: README — project overview refresh
+
+- Expanded README with overview, novelty, goals, visuals, and updated code layout.
+
+## 2026-01-29: Dashboard — MF/scatter sentinels + factor ledger readability
+
+- **fl_ws/src/fl_slam_poc/fl_slam_poc/backend/diagnostics.py**: Added MF SVD and per-bin scatter eigenvalues + map kappa bins to NPZ schema for dashboard use.
+- **fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py**: Populates MF SVD, scan/map scatter eigenvalues, and map kappa bins in `ScanDiagnostics`.
+- **tools/slam_dashboard.py**: Reworked Panel A to show true Matrix Fisher singular values (log scale), scatter proxies, conditioning, yaw/geodesic agreement, and posterior spectrum sentinels; improved factor ledger into subspace plots and added explicit Z-leak visualization.
+
 ## 2026-01-28: SLAM Pipeline Upgrade - Planar Constraints and Odom Twist
 
 ### Summary

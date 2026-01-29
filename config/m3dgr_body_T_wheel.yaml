@@ -1,0 +1,25 @@
+# M3DGR calibration: T_body<-wheel (body = camera_imu, wheel = odom/base_footprint)
+# Source: M3DGR calibration.md (# wheel 2 camera_imu -> body_T_wheel, !!opencv-matrix).
+# Used to transform our estimated trajectory (T_world<-wheel) to body frame
+# (T_world<-body) before evaluation when GT is in body frame.
+# See docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md § M3DGR calibration.
+#
+# 4x4 row-major: [R | t; 0 0 0 1]. Values copied from calibration.md data line
+# (element 8 is 0.0477569625897234e-01 = 0.00477569625897234).
+body_T_wheel_row_major_4x4:
+  - 4.2873564019253907e-02
+  - -9.9906999607154057e-01
+  - 4.5826256555663858e-03
+  - 1.0000278019634017e+00
+  - 2.3548883729155812e-02
+  - -3.5750257528033291e-03
+  - -9.9971629438855181e-01
+  - 4.77569625897234e-03
+  - 9.9880293731215963e-01
+  - 4.2969316267296165e-02
+  - 2.3373709079283481e-02
+  - 2.0902387796334685e-01
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0

@@ -60,7 +60,6 @@ from fl_slam_poc.backend.operators.matrix_fisher_evidence import (
     build_combined_lidar_evidence_22d,
 )
 # Legacy imports kept for IW residual computation (will be removed later)
-from fl_slam_poc.backend.operators.translation import translation_wls
 from fl_slam_poc.backend.operators.measurement_noise_iw_jax import (
     lidar_meas_iw_suffstats_from_translation_residuals_jax,
     imu_gyro_meas_iw_suffstats_from_avg_rate_jax,
@@ -82,10 +81,6 @@ from fl_slam_poc.backend.operators.planar_prior import (
 )
 from fl_slam_poc.backend.operators.imu_gyro_evidence import imu_gyro_rotation_evidence
 from fl_slam_poc.backend.operators.imu_preintegration_factor import imu_preintegration_factor
-from fl_slam_poc.backend.operators.lidar_evidence import (
-    lidar_quadratic_evidence,
-    MapBinStats as LidarMapBinStats,
-)
 from fl_slam_poc.backend.operators.lidar_bucket_noise_iw_jax import (
     lidar_point_reliability_from_buckets_jax,
     lidar_bucket_iw_suffstats_from_bin_residuals_jax,
@@ -307,14 +302,13 @@ def process_scan_single_hypothesis(
     4. BinSoftAssign
     5. ScanBinMomentMatch
     6. KappaFromResultant (map and scan)
-    7. WahbaSVD
-    8. TranslationWLS
-    9. OdomEvidence + ImuEvidence + LidarEvidence (closed-form/Laplace; no moment-matching)
-    10. FusionScaleFromCertificates
-    11. InfoFusionAdditive
-    12. PoseUpdateFrobeniusRecompose
-    13. PoseCovInflationPushforward
-    14. AnchorDriftUpdate
+    7. Matrix Fisher rotation + planar translation
+    8. OdomEvidence + ImuEvidence + LidarEvidence (closed-form/Laplace; no moment-matching)
+    9. FusionScaleFromCertificates
+    10. InfoFusionAdditive
+    11. PoseUpdateFrobeniusRecompose
+    12. PoseCovInflationPushforward
+    13. AnchorDriftUpdate
     
     All steps run every time. No gates.
     
@@ -677,19 +671,6 @@ def process_scan_single_hypothesis(
     # =========================================================================
     # Step 9: Odom + IMU + LiDAR evidence (no moment matching)
     # =========================================================================
-    # Build map bins structure for lidar evidence
-    lidar_map_bins = LidarMapBinStats(
-        S_dir=map_stats.S_dir,
-        S_dir_scatter=map_stats.S_dir_scatter,
-        N_dir=map_stats.N_dir,
-        N_pos=map_stats.N_pos,
-        sum_p=map_stats.sum_p,
-        sum_ppT=map_stats.sum_ppT,
-        mu_dir=mu_map,
-        kappa_map=kappa_map,
-        centroid=c_map,
-        Sigma_c=Sigma_c_map,
-    )
     
     # Odom evidence (Gaussian)
     odom_pose = jnp.asarray(odom_pose, dtype=jnp.float64).reshape(-1)
@@ -950,7 +931,7 @@ def process_scan_single_hypothesis(
         pose_curr=pose_pred,  # Current (predicted) pose
         v_body=odom_twist[0:3],  # Body linear velocity
         omega_body=odom_twist[3:6],  # Body angular velocity
-        dt=dt_scan,  # Time between scans
+        dt=dt_sec,  # Time between scans
         Sigma_v=Sigma_v_odom,
         Sigma_omega=Sigma_omega_odom,
         eps_psd=config.eps_psd,
@@ -1012,6 +993,7 @@ def process_scan_single_hypothesis(
     # Step 10: FusionScaleFromCertificates
     # =========================================================================
     # Use a combined certificate for fusion scale (single-path, includes IMU+odom+lidar).
+    evidence_cert = aggregate_certificates([deskew_cert, assign_cert, scan_cert, mf_cert, planar_trans_cert])
     combined_evidence_cert = aggregate_certificates([evidence_cert, odom_cert, imu_cert, gyro_cert])
 
     # Effective conditioning for trust alpha should be evaluated on the subspace we intend to update.
@@ -1279,6 +1261,11 @@ def process_scan_single_hypothesis(
     # Total trigger magnitude
     total_trigger_mag = sum(c.total_trigger_magnitude() for c in all_certs)
 
+    # Matrix Fisher and scatter sentinels for the dashboard
+    mf_svd_np = np.array(mf_result.svd_singular_values, dtype=np.float64).reshape(3,)
+    scan_scatter_eigs = np.linalg.eigvalsh(np.array(scan_bins.S_dir_scatter, dtype=np.float64))  # (B, 3)
+    map_scatter_eigs = np.linalg.eigvalsh(np.array(map_stats.S_dir_scatter, dtype=np.float64))  # (B, 3)
+
     diagnostics = ScanDiagnostics(
         scan_number=0,  # Will be set by backend_node
         timestamp=scan_end_time,
@@ -1299,9 +1286,10 @@ def process_scan_single_hypothesis(
         N_bins=np.array(scan_bins.N),
         S_bins=np.array(scan_bins.s_dir),
         kappa_bins=np.array(scan_bins.kappa_scan),
+        kappa_map_bins=np.array(kappa_map),
         L_total=L_total_np,
         h_total=h_total_np,
-        L_lidar=np.array(evidence_result.L_lidar),
+        L_lidar=np.array(L_lidar),
         L_odom=np.array(odom_result.L_odom),
         L_imu=np.array(imu_result.L_imu),
         L_gyro=np.array(gyro_result.L_gyro),
@@ -1316,6 +1304,9 @@ def process_scan_single_hypothesis(
         psd_min_eig_before=psd_min_eig_before,
         psd_min_eig_after=psd_min_eig_after,
         wahba_cost=float(jnp.sum(mf_result.svd_singular_values)),  # MF cost proxy (SVD sum)
+        mf_svd=mf_svd_np,
+        scan_scatter_eigs=scan_scatter_eigs,
+        map_scatter_eigs=map_scatter_eigs,
         translation_residual_norm=float(jnp.linalg.norm(planar_trans_result.delta_trans)),
         rot_err_lidar_deg_pred=rot_err_lidar_deg_pred,
         rot_err_lidar_deg_post=rot_err_lidar_deg_post,
@@ -1452,8 +1443,7 @@ class RuntimeManifest:
                 "imu_preintegration": "fl_slam_poc.backend.operators.imu_preintegration",
                 "imu_evidence": "fl_slam_poc.backend.operators.imu_evidence (Laplace over intrinsic ops)",
                 "odom_evidence": "fl_slam_poc.backend.operators.odom_evidence (Gaussian SE(3) pose factor)",
-                "lidar_evidence": "fl_slam_poc.backend.operators.lidar_evidence (closed-form pose info; no sigma-point regression)",
-                "translation_wls": "fl_slam_poc.backend.operators.translation (vectorized over bins; Cholesky inverse)",
+                "lidar_evidence": "fl_slam_poc.backend.operators.matrix_fisher_evidence (Matrix Fisher + planar translation)",
                 "hypothesis_barycenter": "fl_slam_poc.backend.operators.hypothesis (vectorized over hypotheses)",
                 "map_update": "fl_slam_poc.backend.operators.map_update (vectorized over bins)",
                 "lidar_converter": "fl_slam_poc.frontend.sensors.livox_converter",

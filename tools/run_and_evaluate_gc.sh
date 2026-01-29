@@ -18,7 +18,9 @@ DESKEW_ROTATION_ONLY="${DESKEW_ROTATION_ONLY:-false}"
 BAG_PATH="$PROJECT_ROOT/rosbags/m3dgr/Dynamic01_ros2"
 GT_FILE="$PROJECT_ROOT/rosbags/m3dgr/Dynamic01.txt"
 EST_FILE="/tmp/gc_slam_trajectory.tum"
+EST_BODY="/tmp/gc_slam_trajectory_body.tum"
 GT_ALIGNED="/tmp/m3dgr_ground_truth_aligned.tum"
+BODY_CALIB="${BODY_CALIB:-$PROJECT_ROOT/config/m3dgr_body_T_wheel.yaml}"
 WIRING_SUMMARY="/tmp/gc_wiring_summary.json"
 DIAGNOSTICS_FILE="/tmp/gc_slam_diagnostics.npz"
 RESULTS_DIR="$PROJECT_ROOT/results/gc_$(date +%Y%m%d_%H%M%S)"
@@ -195,7 +197,8 @@ print_ok "Package built successfully"
 # ============================================================================
 print_stage 2 5 "Run Golden Child SLAM"
 
-# ROS environment
+# ROS environment (use domain 1 to avoid CycloneDDS "free participant index" exhaustion on domain 0)
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
 export ROS_HOME="${ROS_HOME:-/tmp/ros_home}"
 export ROS_LOG_DIR="${ROS_LOG_DIR:-/tmp/ros_log}"
 export RMW_FASTRTPS_USE_SHM="${RMW_FASTRTPS_USE_SHM:-0}"
@@ -333,11 +336,24 @@ echo "    odom=$LAST_ODOM  scan=$LAST_SCAN  imu=$LAST_IMU"
 # ============================================================================
 print_stage 3 5 "Evaluate Trajectory"
 
-# Align ground truth
+# Transform estimate to body frame (M3DGR GT is in body/camera_imu frame)
+echo "  Transforming estimate to body frame..."
+if [ -f "$BODY_CALIB" ]; then
+  env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/transform_estimate_to_body_frame.py" \
+    "$EST_FILE" \
+    "$EST_BODY" \
+    --calib "$BODY_CALIB" 2>&1 | sed 's/^/    /'
+  EST_FOR_EVAL="$EST_BODY"
+else
+  print_warn "Body calib not found ($BODY_CALIB); evaluating wheel-frame estimate vs GT"
+  EST_FOR_EVAL="$EST_FILE"
+fi
+
+# Align ground truth to estimate
 echo "  Aligning ground truth..."
 env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/align_ground_truth.py" \
   "$GT_FILE" \
-  "$EST_FILE" \
+  "$EST_FOR_EVAL" \
   "$GT_ALIGNED" 2>&1 | sed 's/^/    /'
 
 # Create op_report with all required metrics fields
@@ -354,13 +370,14 @@ echo ""
 echo "  Computing metrics..."
 env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/evaluate_slam.py" \
   "$GT_ALIGNED" \
-  "$EST_FILE" \
+  "$EST_FOR_EVAL" \
   "$RESULTS_DIR" \
   "$OP_REPORT_FILE" \
   --no-imu 2>&1 | sed 's/^/    /'
 
 # Copy files
-cp "$EST_FILE" "$RESULTS_DIR/estimated_trajectory.tum"
+cp "$EST_FOR_EVAL" "$RESULTS_DIR/estimated_trajectory.tum"
+cp "$EST_FILE" "$RESULTS_DIR/estimated_trajectory_wheel.tum"
 cp "$GT_ALIGNED" "$RESULTS_DIR/ground_truth_aligned.tum"
 
 # Copy wiring summary if available

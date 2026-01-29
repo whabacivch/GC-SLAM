@@ -69,26 +69,31 @@ L_rot = Sigma_rot^-1  # (3, 3) information matrix
 
 ### 2.1 Evidence Extraction
 
-**Five evidence sources are extracted per scan** (GC state ordering: **trans 0:3, rot 3:6**):
+**Evidence sources per scan** (GC state ordering: **trans 0:3, rot 3:6**):
 
-1. **LiDAR Evidence** (`lidar_quadratic_evidence`):
-   - Translation: Gaussian from `TranslationWLS` covariance; **Fills: `L[0:3, 0:3]`**
-   - Rotation: from bin statistics; **Fills: `L[3:6, 3:6]`**
-   - Also applies scaling to `L[15, :]` (dt) and `L[16:22, 16:22]` (extrinsics)
+1. **LiDAR Evidence** (`matrix_fisher_rotation_evidence` + `planar_translation_evidence`):
+   - Rotation: Matrix Fisher → **Fills: `L[3:6, 3:6]`**
+   - Translation: planarized WLS → **Fills: `L[0:3, 0:3]`** (self‑adaptive z precision)
 
 2. **Odometry Evidence** (`odom_quadratic_evidence`):
    - SE(3) pose factor: `T_err = T_pred^{-1} ∘ T_odom`
    - Fills: `L[0:6, 0:6]` (full pose: trans 0:3, rot 3:6)
 
-3. **IMU Accel Evidence** (`imu_vmf_gravity_evidence`):
-   - vMF directional likelihood on gravity direction (Laplace at δθ=0)
+3. **Odom Twist Evidence** (`odom_velocity_evidence`, `odom_yawrate_evidence`, `pose_twist_kinematic_consistency`):
+   - Velocity factor (body twist → world velocity), yaw‑rate factor, and pose–twist consistency across scan dt
+
+4. **Planar Priors** (`planar_z_prior`, `velocity_z_prior`):
+   - Soft constraints on **z ≈ z_ref** and **v_z ≈ 0**
+
+5. **IMU Accel Evidence** (`imu_vmf_gravity_evidence_time_resolved`):
+   - vMF directional likelihood on gravity direction (Laplace at δθ=0), **time‑resolved and reliability‑weighted**
    - Fills: `L[3:6, 3:6]` (rotation block only)
 
-4. **IMU Gyro Evidence** (`imu_gyro_rotation_evidence`):
+6. **IMU Gyro Evidence** (`imu_gyro_rotation_evidence`):
    - Gaussian on preintegrated rotation residual
    - Fills: `L[3:6, 3:6]` (rotation block only)
 
-5. **IMU Preintegration Evidence** (`imu_preintegration_factor`):
+7. **IMU Preintegration Evidence** (`imu_preintegration_factor`):
    - Gaussian on velocity/position from accel preintegration vs predicted state
    - Fills the relevant tangent block (velocity/position components)
 
@@ -96,8 +101,8 @@ L_rot = Sigma_rot^-1  # (3, 3) information matrix
 
 **Additive combination** (`pipeline.py`: evidence sum):
 ```python
-L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint
-h_evidence = h_lidar + h_odom + h_imu + h_gyro + h_imu_preint
+L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint + L_planar + L_vel + L_wz + L_consistency
+h_evidence = h_lidar + h_odom + h_imu + h_gyro + h_imu_preint + h_planar + h_vel + h_wz + h_consistency
 ```
 
 **Note:** This happens **before** excitation scaling and fusion scaling. All evidence is combined with equal weight in the sum.

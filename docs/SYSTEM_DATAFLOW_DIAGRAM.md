@@ -61,17 +61,17 @@ cd docs && dot -Tsvg system_dataflow.dot -o system_dataflow.svg
 ### Processed Topics (Active Pipeline)
 
 1. **`/odom`** → `odom_normalizer` → **`/gc/sensors/odom`** → Backend
-   - Status: ✅ **FUSED via `OdomQuadraticEvidence`** (Gaussian SE(3) pose factor)
+   - Status: ✅ **FUSED via `OdomQuadraticEvidence` + twist factors** (pose + velocity + yaw-rate + pose–twist consistency)
    - Message: `nav_msgs/Odometry` (absolute → normalized)
    - Frame: `odom_combined` → `base_footprint`
 
 2. **`/livox/mid360/lidar`** → `livox_converter` → **`/gc/sensors/lidar_points`** → Backend
-   - Status: ✅ **FUSED via `LidarQuadraticEvidence`** (14-step pipeline)
+   - Status: ✅ **FUSED via Matrix Fisher rotation + planar translation evidence** (14-step pipeline)
    - Message: `livox_ros_driver2/CustomMsg` → `sensor_msgs/PointCloud2`
    - Frame: `livox_frame`
 
 3. **`/livox/mid360/imu`** → `imu_normalizer` → **`/gc/sensors/imu`** → Backend
-   - Status: ✅ **FUSED via `ImuVMFGravityEvidence` + `ImuGyroRotationEvidence` + `imu_preintegration_factor`**
+   - Status: ✅ **FUSED via `ImuVMFGravityEvidenceTimeResolved` + `ImuGyroRotationEvidence` + `imu_preintegration_factor`**
    - Used for: Deskew (IMU preintegration), gravity direction evidence, gyro rotation evidence, preintegration (velocity/position) evidence
    - Message: `sensor_msgs/Imu`
    - Frame: `livox_frame`
@@ -145,11 +145,11 @@ These topics are present in the rosbag but are **explicitly not consumed** by th
 
 ✅ **All three sensor modalities are FUSED** into the belief state:
 
-- **LiDAR**: `LidarQuadraticEvidence` (closed-form pose information)
-- **IMU**: `ImuVMFGravityEvidence` (vMF Laplace on rotation) + `ImuGyroRotationEvidence` (Gaussian SO(3))
+- **LiDAR**: Matrix Fisher rotation + planar translation evidence (closed‑form pose information)
+- **IMU**: `ImuVMFGravityEvidenceTimeResolved` (vMF Laplace on rotation) + `ImuGyroRotationEvidence` (Gaussian SO(3))
 - **Odom**: `OdomQuadraticEvidence` (Gaussian SE(3) pose factor)
 
-The evidence terms are combined additively: `L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint` (and same for h).
+The evidence terms are combined additively: `L_evidence = L_lidar + L_odom + L_imu + L_gyro + L_imu_preint + L_planar + L_vel + L_wz + L_consistency` (and same for h).
 
 ✅ **Dead-end topics are explicitly tracked** for accountability - no data is silently ignored.
 

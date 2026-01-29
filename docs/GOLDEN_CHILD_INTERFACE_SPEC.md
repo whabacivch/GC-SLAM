@@ -419,6 +419,8 @@ ExpectedEffect:
 
 ### 5.7 ExactOp: `WahbaSVD`
 
+**Status (code):** Legacy. Current implementation uses **Matrix Fisher rotation evidence** (`matrix_fisher_rotation_evidence`, see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:608`). This section is retained for historical reference.
+
 Always compute Wahba matrix:
 [
 M = \sum_b w_b, \mu_{map}[b]\mu_{scan}[b]^\top,\quad
@@ -438,6 +440,8 @@ ExpectedEffect:
 * `predicted=σ_2/σ_1` (continuous)
 
 ### 5.8 ExactOp: `TranslationWLS`
+
+**Status (code):** Legacy. Current implementation uses **Planar Translation Evidence** with self‑adaptive z precision (`planar_translation_evidence`, see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:633`). This section is retained for historical reference.
 
 Always compute per-bin:
 
@@ -460,6 +464,8 @@ ExpectedEffect:
 * `predicted=trace(L_tt)`
 
 ### 5.9 ApproxOp: `LidarQuadraticEvidence`
+
+**Status (code):** Legacy. Current implementation builds LiDAR evidence from **Matrix Fisher rotation + planar translation** (`build_combined_lidar_evidence_22d`) and does **not** use `ut_cache`.
 
 Produces `BeliefGaussianInfo evidence` on full 22D tangent at fixed cost, reusing `ut_cache`.
 
@@ -726,13 +732,13 @@ RuntimeManifest:
 
 1. `PointBudgetResample`
 2. `PredictDiffusion`
-3. `DeskewUTMomentMatch` (produces `ut_cache`)
+3. `DeskewConstantTwist` (IMU preintegration over scan window)
 4. `BinSoftAssign`
 5. `ScanBinMomentMatch`
 6. `KappaFromResultant:v2_single_formula` (map and scan)
-7. `WahbaSVD`
-8. `TranslationWLS`
-9. `LidarQuadraticEvidence` (reuses `ut_cache`)
+7. `MatrixFisherRotationEvidence`
+8. `PlanarTranslationEvidence`
+9. `LidarEvidence` (Matrix Fisher + planar translation)
 10. `FusionScaleFromCertificates` (alpha)
 11. `InfoFusionAdditive`
 12. `PoseUpdateFrobeniusRecompose` (continuous Frobenius strength)
@@ -2359,7 +2365,7 @@ II) LiDAR edits that raise the whole project to the same standard
 
 These are strict, first-principles upgrades that align LiDAR with the IMU spec above (factorized exp-family evidence + Laplace/I-projection), and remove remaining hand-tuned knobs.
 
-1) Replace LidarQuadraticEvidence UT regression with factor → Laplace/I-projection
+1) **Implemented (current code):** LiDAR evidence is now built from **Matrix Fisher rotation + planar translation** (no UT cache). Full exp‑family factorization is still an open research item.
 
 Instead of regressing a quadratic surrogate, define LiDAR as explicit likelihood factors (categorical soft assignments; vMF directional terms; Gaussian translational terms) and compute 
 g,H

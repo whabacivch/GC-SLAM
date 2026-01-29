@@ -26,9 +26,9 @@ When `on_lidar` runs, it executes this sequence. Every scan runs the same steps 
 | **L10** | **Step 4 – BinSoftAssign:** Point directions → soft assignments to bin atlas. | pipeline: bin_soft_assign() |
 | **L11** | **Step 5 – ScanBinMomentMatch:** Weighted moment match per bin (responsibilities, weights, point_covariances=zeros). | pipeline: scan_bin_moment_match() |
 | **L12** | **Step 6 – KappaFromResultant:** Inside ScanBinMomentMatch. | (same) |
-| **L13** | **Step 7 – WahbaSVD:** Scan-vs-map rotation → R_hat. | pipeline: wahba_svd_rotation_jax() |
-| **L14** | **Step 8 – TranslationWLS:** Scan-vs-map translation → t_hat, t_cov. | pipeline: translation_wls_jax() |
-| **L15** | **Step 9 – Evidence:** Odom (Gaussian pose); IMU vMF gravity; IMU gyro rotation; IMU preintegration factor; LiDAR quadratic. Combined additively (L_evidence, h_evidence). | pipeline: odom_quadratic_evidence(), imu_*_evidence(), imu_preintegration_factor(), lidar_quadratic_evidence() |
+| **L13** | **Step 7 – MatrixFisherRotation:** Scan-vs-map rotation → R_hat. | pipeline: matrix_fisher_rotation_evidence() |
+| **L14** | **Step 8 – PlanarTranslationEvidence:** Scan-vs-map translation → t_hat, L_trans (planarized). | pipeline: planar_translation_evidence() |
+| **L15** | **Step 9 – Evidence:** Odom pose + odom twist; IMU time‑resolved vMF + gyro + preintegration; LiDAR (Matrix Fisher + planar translation); planar priors. Combined additively (L_evidence, h_evidence). | pipeline: odom_*_evidence(), imu_*_evidence(), build_combined_lidar_evidence_22d(), planar_prior() |
 | **L16** | **Step 10 – FusionScaleFromCertificates:** Scale evidence by alpha. | pipeline: fusion_scale_from_certificates_jax() |
 | **L17** | **Step 11 – InfoFusionAdditive:** Posterior info = prior_info + scaled_evidence. | pipeline: info_fusion_additive() |
 | **L18** | **Step 12 – PoseUpdateFrobeniusRecompose:** Tangent update → SE(3) belief; anchor update. | pipeline: pose_update_frobenius_recompose() |
@@ -36,7 +36,7 @@ When `on_lidar` runs, it executes this sequence. Every scan runs the same steps 
 | **L20** | **Step 14 – AnchorDriftUpdate:** Reanchor on belief_recomposed. | pipeline: anchor_drift_update() |
 | **L21** | IW sufficient-statistics accumulation; hypothesis and map_stats updated. | on_lidar: accum_*, hypothesis, map_update |
 
-So: **Raw PointCloud2** → parse → T_base_lidar → budget → predict → deskew (IMU) → bin → moment match → Wahba/WLS → evidence (odom + IMU + LiDAR) → fusion → recompose → map update → anchor drift. One sequence; every value we trace below flows through this spine.
+So: **Raw PointCloud2** → parse → T_base_lidar → budget → predict → deskew (IMU) → bin → moment match → Matrix Fisher + planar translation → evidence (odom pose + odom twist + IMU + LiDAR + planar priors) → fusion → recompose → map update → anchor drift. One sequence; every value we trace below flows through this spine.
 
 ---
 
@@ -169,23 +169,23 @@ First odom (message 1): trans **[3.07019, 3.97681, 29.99595]** m, rotvec **[0, 0
 - **L7:** Budget → object may be kept or dropped; ring, tag preserved.
 - **L9:** Deskew: constant twist (from IMU) applied using per-point t → deskewed point.
 - **L10–L11:** Soft assign to bins; moment match → scan_bins (centroids, directions, Sigma_p, etc.). Object contributes to bin statistics.
-- **L13–L14:** Wahba → R_hat; TranslationWLS → **t_hat (3D)**, t_cov (3×3). Object’s contribution is part of **t_hat** (including **t_hat[2]** = z).
-- **L15:** LiDAR evidence from R_hat, t_hat, t_cov (full 3D; no z-downweighting). This point **contaminates** t_hat → L_lidar (translation block including z) → L_evidence, h_evidence.
+- **L13–L14:** Matrix Fisher → R_hat; PlanarTranslation → **t_hat (3D)** with **planarized z precision** (self‑adaptive from map scatter). Object’s contribution is part of **t_hat**, but z precision is downweighted.
+- **L15:** LiDAR evidence from R_hat + planarized translation (pose block only). Translation z information is **scaled down**, and map update later forces `t_hat[2]=0` when writing to the map.
 - **L17–L20:** Fusion → posterior → **trajectory** and **map** (map update uses R_hat, t_hat / belief pose).
 
 ## 4.4 Contamination summary (LiDAR point)
 
-- **Scan bins** → R_hat, t_hat (3D) → LiDAR evidence (full 3D trans) → fusion → **trajectory** and **map**.
+- **Scan bins** → R_hat, t_hat (planarized) → LiDAR evidence (planarized translation) → fusion → **trajectory** and **map** (map z fixed).
 
 ---
 
 # Part 5: Combined flow — raw objects → evidence → final outputs
 
 1. **IMU message 5:** raw (g, rad/s) → scale → rotate → buffer (specific force). When scan runs: **L5** → preintegration **P1–P8**; at **P5** gravity subtracted (a_world = a_world_nog + (0,0,-9.81)) → linear accel → delta_pose, delta_p, delta_v. These feed **L9** deskew, **L15** gyro evidence, vMF gravity, preintegration factor → L_evidence, h_evidence → **L17** fusion → **belief_updated** → **trajectory**.
-2. **Odom message 5:** raw pose + cov → relative pose, cov unchanged → last_odom_pose, last_odom_cov_se3 → **L6** → **L15** odom_evidence → L_odom, h_odom → fusion → **trajectory**.
-3. **LiDAR point:** raw → parse → base → **L7** budget → **L9** deskew (using IMU) → **L10–L11** bin → **L13–L14** Wahba/WLS → R_hat, **t_hat (3D)** → **L15** LiDAR evidence → fusion → **trajectory** and **map**.
+2. **Odom message 5:** raw pose + cov **and twist + twist cov** → relative pose, cov unchanged → last_odom_pose, last_odom_cov_se3, last_odom_twist → **L6** → **L15** odom pose + twist evidence (pose, velocity, yaw‑rate, pose–twist consistency) → fusion → **trajectory**.
+3. **LiDAR point:** raw → parse → base → **L7** budget → **L9** deskew (using IMU) → **L10–L11** bin → **L13–L14** Matrix Fisher + PlanarTranslation → R_hat, **t_hat (planarized)** → **L15** LiDAR evidence → fusion → **trajectory** and **map**.
 
-**Trajectory pose (including z)** gets contributions from: (1) odom pose (z very weak, 1e-6); (2) LiDAR t_hat (full 3D, strong z); (3) IMU via delta_p, delta_v (gravity already subtracted in P5) and vMF/gyro. A large z in the trajectory comes from **LiDAR translation evidence** and map–scan feedback (see `TRACE_Z_EVIDENCE_AND_TRAJECTORY.md`), not from forgetting to subtract gravity in preintegration. Full preintegration step detail: `PREINTEGRATION_STEP_BY_STEP.md`.
+**Trajectory pose (including z)** now gets contributions from: (1) odom pose (z weak, per covariance); (2) LiDAR translation **with planarized z precision**; (3) IMU via delta_p, delta_v and gyro/vMF; (4) always‑on planar priors. Map update forces `t_hat[2]=0`, so map–scan feedback no longer reinforces z. Full preintegration step detail: `PREINTEGRATION_STEP_BY_STEP.md`.
 
 ---
 
@@ -282,56 +282,31 @@ This is the single trace document: one mechanism, deterministic math, values as 
 
 ---
 
-# Part 8: Does the pipeline trace explain bad performance? (Results vs trace)
+# Part 8: Does the pipeline trace explain bad performance? (Legacy run vs current pipeline)
 
-**Short answer: yes.** Recent runs (e.g. `results/gc_20260128_105746`) show very poor metrics: **ATE translation RMSE ~47 m**, **ATE rotation RMSE ~116°**, **RPE @ 1m ~12.5 m/1m** (translation), and estimated trajectory **z** drifting to **-50 m to -80 m** (ground truth is planar, z ≈ 0.86 m). The pipeline trace and design-gaps docs explain *why* this happens.
+**Note:** The metrics below were from `results/gc_20260128_105746`, **before** planar translation, planar priors, and odom‑twist evidence were added. They are kept for historical context; re‑evaluate with the current pipeline for updated performance.
 
-## 8.1 Z drift (huge z in trajectory) — and where we're screwing up the z calculation
+## 8.1 Z drift (legacy failure mode; now mitigated)
 
-**Yes, the trace explains z massive accumulation.** It’s not one wrong formula; it’s a chain of design choices that are wrong for a planar robot.
+**Legacy mechanism (pre‑fix):** Full‑3D TranslationWLS + strong LiDAR z evidence + map feedback caused z to drift (belief_z → map z → t_hat[2] → LiDAR z → belief_z).
 
-### Where exactly we're screwing up z
+**Current pipeline fixes (in code):**
+- **Planar translation evidence** with self‑adaptive z precision (`pipeline.py:633`, `matrix_fisher_evidence.py:502`)
+- **Always‑on planar priors** on z and v_z (`pipeline.py:859`)
+- **Map update planar z** (`map_update.py:104`)
 
-| Where in the pipeline | What we do (the screw‑up) | Consequence |
-|------------------------|----------------------------|-------------|
-| **Odom evidence (L15)** | Use **cov[2,2] = 1e6** m² for z → **L_odom[2,2] = 1e-6**. | We *tell* the filter “z is almost unobserved” from odom, but we still feed odom_z. So z is barely pulled toward odom; any other z source dominates. |
-| **TranslationWLS (L14)** | Solve for **t_hat (3D)** with **isotropic Sigma_meas** (0.01 m² for x,y,**z**). No z-downweighting, no planar prior. | **t_hat[2]** is estimated with the **same** precision as t_hat[0], t_hat[1]. So we treat vertical translation as just as observable as horizontal. |
-| **LiDAR evidence (L15)** | **L_lidar[0:3,0:3] = inv(t_cov)** — full 3D, including **L_lidar[2,2]** from t_cov[2,2]. | We add **strong** z evidence from LiDAR every scan. For a planar robot we should not (or we should inflate t_cov[2,2] / zero out z). |
-| **Map update (L19)** | Map centroids = **belief pose** ∘ scan. So **map z = belief_z + (R @ p_scan)_z**. | If belief_z is wrong, the **map’s z is wrong**. Next scan aligns to that map → **t_hat[2]** matches the wrong map z → we feed that back as strong evidence → **belief_z** moves further wrong. **Feedback loop.** |
-| **Fusion (L17)** | **L_pose[2,2] = L_odom[2,2] + L_lidar[2,2] + …** ≈ **L_lidar[2,2]** (odom is 1e-6). | Z is **dominated by LiDAR**. So whatever t_hat[2] says (including errors from map feedback) gets fused with high weight. |
-| **Process / velocity (L8, L15)** | **Q** trans block same for x,y,z; **no vel_z = 0**; preintegration gives **delta_p_int[2]**, **delta_v_int[2]** with full weight. | We never **damp** z. Once z (or vel_z) is in the state, it can **accumulate** every scan; nothing pulls it back to planar. |
+## 8.2 X,Y and rotation (legacy under‑constrained; now improved)
 
-So the **z calculation** is “wrong” in this sense: we **compute** z correctly (no single sign/axis bug), but we **use** z as if the robot were 3D. We give z strong evidence from LiDAR, we put belief_z into the map and then reinforce it, and we never constrain z to a plane. That **is** the screw‑up: **treating z like x and y** + **map–scan feedback on z**.
+**Legacy issue:** Odom twist was unused; pose–twist coupling was missing.
 
-### How the accumulation grows (step by step)
+**Current pipeline:** Odom twist now contributes **velocity**, **yaw‑rate**, and **pose–twist consistency** factors (`pipeline.py:884`). Remaining gap: explicit **cross‑sensor Δyaw consistency likelihoods** (gyro ↔ odom ↔ LiDAR) are still diagnostics only.
 
-1. **Seed:** A small **t_hat[2]** appears (e.g. centroid mismatch scan vs map, or odom’s weak 1e-6 pull, or numerical noise). That gets fused with **strong** L_lidar[2,2] → **belief_z** moves a bit.
-2. **Map:** Map is updated with that belief → **c_map** now has that z offset.
-3. **Next scan:** TranslationWLS fits **t_hat** to align scan to **c_map** → **t_hat[2]** is consistent with the wrong map z → we add strong z evidence again → **belief_z** moves further.
-4. **Repeat:** Every scan, **belief_z → map z → t_hat[2] → L_lidar z → belief_z**. Z **accumulates** in the same direction (e.g. negative) because we keep reinforcing it. Process/velocity don’t oppose it.
+## 8.3 Map–scan feedback (still present, now planarized)
 
-So **yes, the trace explains z massive accumulation**: it’s the designed behaviour of (1) strong LiDAR z evidence, (2) map built from belief so map z = belief_z, (3) next t_hat[2] aligned to that map z and fed back as strong evidence, (4) no planar prior or z-downweighting anywhere. Fixes: downweight or zero z in LiDAR evidence (e.g. planar prior, inflate t_cov[2,2], or don’t use t_hat[2]); and/or add planar process/prior (smaller Q for z, vel_z = 0); and/or constrain map/TranslationWLS so z isn’t reinforced (see TRACE_Z_EVIDENCE_AND_TRAJECTORY end).
+Map–scan feedback remains inherent (belief → map → alignment → evidence → belief), but alignment is now **Matrix Fisher + planar translation**, and map z is fixed to the plane. Errors can still propagate if alignment is wrong, so sign/frames diagnostics remain important.
 
-## 8.2 X,Y and rotation errors (ATE ~47 m, rotation ~116°)
+## 8.4 Summary (current status)
 
-- **Trace (PIPELINE_DESIGN_GAPS):** We **do not use odom twist** (vx, vy, vz, wx, wy, wz). Pose and twist are **kinematically linked** (dp/dt = R @ v, dR/dt = R @ ω̂); we treat the 6D pose as a snapshot with **inverse(message covariance)** and no link to velocity or yaw rate. We do not model pose–twist coupling or use twist to constrain pose change. So:
-  - No observation that “pose change should match integrated twist.”
-  - No velocity / yaw-rate observation from odom.
-  - Evidence is effectively: odom 6D pose (x,y strong; z very weak) + IMU (gyro, vMF, preint) + LiDAR (R_hat, t_hat full 3D). If **LiDAR R_hat** or **t_hat** is wrong (e.g. first-scan frame, map mismatch, Wahba sign/frame issues), that wrong evidence is fused with the same weight structure and can dominate.
-- **Result:** X,Y and yaw can drift because we never tie them to odom twist or kinematics. Large roll/pitch/yaw errors (e.g. ~86°, ~50°, ~96° RMSE) are consistent with orientation being wrong or flipped (e.g. Wahba/first-scan frame issues, or LiDAR rotation evidence dominating and pulling away from odom/IMU). The trace explains that **underuse of odom twist** and **no pose–twist coupling** leave x,y and rotation under-constrained and vulnerable to wrong LiDAR evidence.
-
-## 8.3 Map–scan feedback amplifies any error
-
-- **Trace (Part 4, Part 5):** Map is built from **belief pose** and scan; next scan’s Wahba/WLS align to that map → **R_hat, t_hat** → LiDAR evidence → fusion → new belief. So **any** error in belief (z, x, y, or rotation) gets baked into the map and then **reinforced** by the next scan’s alignment. There is no separate “ground truth” correction; the pipeline is causal and deterministic.
-- **Result:** Initial errors (e.g. wrong R_hat from first scan or calibration) propagate and amplify. The trace explains why errors grow over time rather than being corrected.
-
-## 8.4 Summary: trace ↔ performance
-
-| Observed result | Explained by trace |
-|-----------------|--------------------|
-| Z drift to -50 m … -80 m | Odom z = 1e-6; LiDAR full 3D t_hat + map–scan feedback; no planar prior (Part 3–5, TRACE_Z_EVIDENCE_AND_TRAJECTORY). |
-| ATE trans ~47 m, RPE ~12.5 m/1m | No odom twist; no pose–twist coupling; 6D pose evidence = inverse(message cov) only; wrong LiDAR R_hat/t_hat can dominate (PIPELINE_DESIGN_GAPS). |
-| ATE rotation ~116°, roll/pitch/yaw huge | Same: no kinematic coupling; LiDAR rotation (Wahba) and fusion structure; possible Wahba/frame/sign issues. |
-| Errors grow over time | Map–scan feedback: belief → map → R_hat/t_hat → evidence → belief (Part 4, 5). |
-
-So the pipeline trace **does** explain why performance is so bad: it is the **expected outcome** of the current design (underuse of odom twist, full 3D LiDAR evidence with no planar constraint, no pose–twist coupling, map–scan feedback). Improving performance would require addressing those gaps (see PIPELINE_DESIGN_GAPS §4).
+- Legacy z‑drift mechanism is **fixed** by planar translation + planar priors + planar map update.
+- Odom twist is **now used** (velocity/yaw‑rate/pose–twist consistency).
+- Remaining gaps are **cross‑sensor consistency likelihoods** and **nonlinear approximation stress** (vMF/MF → Gaussian).

@@ -76,7 +76,7 @@ All sensors and tracking devices with their most important parameters:
    - Angular Resolution: 0.15°
    - IMU: 6-axis, 200 Hz
    - ROS Topic: `/livox/mid360/lidar`
-   - **Frame Convention**: `livox_frame` uses Z-down convention; requires 180° rotation about X-axis to convert to Z-up `base_footprint` frame
+   - **Frame Convention**: For **M3DGR Dynamic01**, see `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` (canonical). That doc states `livox_frame` is **Z-up** for this dataset (ground plane analysis). Generic Livox MID-360 datasheet may use Z-down; if so, conversion to Z-up `base_footprint` would require 180° rotation about X in `T_base_lidar`. Current code uses identity rotation; if evaluation shows ~180° roll offset vs ground truth, run `tools/diagnose_coordinate_frames.py` and set `T_base_lidar` rotation to `[π, 0, 0]` if the diagnostic reports Z-down.
 
 #### Visual-Inertial Sensor
 
@@ -157,10 +157,9 @@ All sensors and tracking devices with their most important parameters:
 These are the **explicit parameters we run with** for M3DGR (to compensate for missing `/tf(_static)` and missing `CameraInfo`):
 
 - **Base/body frame policy**: `base_frame` is treated as the dataset **body/IMU frame \(b\)** (we keep the name `base_footprint` for M3DGR because it matches bag truth).
-- **LiDAR mounting** (MID-360, no-TF): `T_base_lidar = [-0.011, 0.0, 0.778, 3.141593, 0.0, 0.0]` interpreted as \(T_{b\leftarrow \text{mid360}}\) with format `[x,y,z,rx,ry,rz]` (rotvec in radians).
+- **LiDAR mounting** (MID-360, no-TF): `T_base_lidar = [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]` interpreted as \(T_{b\leftarrow \text{mid360}}\) with format `[x,y,z,rx,ry,rz]` (rotvec in radians). **Canonical:** `docs/FRAME_AND_QUATERNION_CONVENTIONS.md`.
   - Translation: `[-0.011, 0.0, 0.778]` meters (LiDAR offset from base)
-  - Rotation: `[3.141593, 0.0, 0.0]` radians (180° around X-axis to convert from Z-down `livox_frame` to Z-up `base_footprint`)
-  - **Critical**: The 180° rotation is required because MID-360 `livox_frame` uses Z-down convention, while `base_footprint` uses Z-up.
+  - Rotation: `[0.0, 0.0, 0.0]` (identity). For M3DGR Dynamic01, `tools/diagnose_coordinate_frames.py` reports LiDAR Z-up (ground normal · Z > 0.7), so no 180° X rotation. If a different bag reports Z-down, use rotation `[3.141593, 0.0, 0.0]`.
 - **IMU mounting** (MID-360, no-TF): `T_base_imu = [0.0, 0.0, 0.0, -0.015586, 0.489293, 0.0]` (rotvec in radians).
   - Translation: `[0.0, 0.0, 0.0]` (IMU co-located with LiDAR in MID-360 unit)
   - Rotation: `[-0.015586, 0.489293, 0.0]` radians (~28° misalignment, estimated via gravity alignment)

@@ -174,6 +174,7 @@ No swapping of parameter names and no implicit "maybe it's the other direction".
   See `results/confirm_remaining_dynamic01.json` for the attempted estimates and why they are inconclusive.
 - **CONFIRMED (Dynamic01_ros2)**: `T_base_lidar` rotation is identity (`rotvec=[0,0,0]`) and consistent with the bag's
   point cloud Z-up convention (ground normal points +Z in `livox_frame`).
+- **If evaluation shows ~180° roll offset vs ground truth:** Run `tools/diagnose_coordinate_frames.py` on the bag. If it reports Z-down, set `T_base_lidar` rotation to `[π, 0, 0]` and update this subsection to record dataset-specific Z-down. See `docs/PIPELINE_DESIGN_GAPS.md` §5.5.
 - **Transformation**: `p_base = R_base_lidar @ p_lidar + t_base_lidar`
 - **Location**: `fl_slam_poc/backend/backend_node.py:556`
 
@@ -263,7 +264,7 @@ Interpretation:
 - `R` is treated as a body->world (child->parent) rotation when used for state/world pose.
 - Positive yaw corresponds to right-hand rotation about +Z (counter-clockwise when looking down +Z).
 
-When comparing yaw increments from different sources (gyro, odom, Wahba), the
+When comparing yaw increments from different sources (gyro, odom, **Matrix Fisher**), the
 same `yaw(R)` function must be used.
 
 ## Time / Stamp Semantics (No Hidden Alignment Heuristics)
@@ -283,7 +284,7 @@ IMU:
 Odometry:
 
 - Odometry is treated as a pose observation at `msg.header.stamp`.
-- GC currently does not use odom twist as a constraint (pose only).
+- GC **does** use odom twist as constraints (velocity factor, yaw‑rate factor, pose–twist kinematic consistency).
 
 ### IMU Extrinsic Verification
 To verify IMU extrinsic is correct:
@@ -427,8 +428,8 @@ These are not "heuristics"; they are deterministic symptoms of convention mismat
    - Verify: apply `R_base_imu @ accel_imu` on stationary data; Z should be ~+9.81 m/s^2 in base frame.
 
 4) Symptom: `R_hat` appears to be consistently inverted relative to gyro (matches `R_hat.T`)
-   - Likely cause: mismatched direction pairing in Wahba inputs (map/scan swapped) or a frame reflection.
-   - Verify: ensure Wahba matrix uses `sum w * mu_map * mu_scan^T` per spec and both mu vectors are in consistent frames.
+  - Likely cause: mismatched direction pairing in scan‑to‑map inputs or a frame reflection.
+  - Verify: ensure Matrix Fisher inputs use consistent frames for scan/map directions and the rotation is interpreted with the correct parent/child convention.
 
 ## References
 

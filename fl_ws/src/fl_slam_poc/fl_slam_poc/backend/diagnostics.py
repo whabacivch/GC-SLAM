@@ -79,6 +79,20 @@ class ScanDiagnostics:
     wahba_cost: float = 0.0
     translation_residual_norm: float = 0.0
 
+    # Matrix Fisher rotation evidence diagnostics
+    # Singular values of the (weighted) scatter matrix used by the MF rotation evidence.
+    # These are the "MF health" sentinels: s3 -> 0 indicates a near-degenerate rotation subspace.
+    mf_svd: np.ndarray = field(default_factory=lambda: np.zeros((3,), dtype=np.float64))
+
+    # Directional scatter diagnostics (per bin)
+    # Eigenvalues (ascending) of directional scatter tensors for scan and map.
+    # Used by the dashboard to compute anisotropy/planarity observability proxies.
+    scan_scatter_eigs: np.ndarray = field(default_factory=lambda: np.zeros((48, 3), dtype=np.float64))
+    map_scatter_eigs: np.ndarray = field(default_factory=lambda: np.zeros((48, 3), dtype=np.float64))
+
+    # Map kappa per bin (for top-K bin comparisons; may differ from scan kappa)
+    kappa_map_bins: np.ndarray = field(default_factory=lambda: np.zeros((48,), dtype=np.float64))
+
     # Rotation binding diagnostics (degrees)
     rot_err_lidar_deg_pred: float = 0.0
     rot_err_lidar_deg_post: float = 0.0
@@ -163,6 +177,10 @@ class ScanDiagnostics:
             "trace_Sigma_a_mode": self.trace_Sigma_a_mode,
             "wahba_cost": self.wahba_cost,
             "translation_residual_norm": self.translation_residual_norm,
+            "mf_svd": self.mf_svd.tolist(),
+            "scan_scatter_eigs": self.scan_scatter_eigs.tolist(),
+            "map_scatter_eigs": self.map_scatter_eigs.tolist(),
+            "kappa_map_bins": self.kappa_map_bins.tolist(),
             "rot_err_lidar_deg_pred": self.rot_err_lidar_deg_pred,
             "rot_err_lidar_deg_post": self.rot_err_lidar_deg_post,
             "rot_err_odom_deg_pred": self.rot_err_odom_deg_pred,
@@ -232,6 +250,10 @@ class ScanDiagnostics:
             trace_Sigma_a_mode=d.get("trace_Sigma_a_mode", 0.0),
             wahba_cost=d.get("wahba_cost", 0.0),
             translation_residual_norm=d.get("translation_residual_norm", 0.0),
+            mf_svd=np.array(d.get("mf_svd", [0.0, 0.0, 0.0]), dtype=np.float64),
+            scan_scatter_eigs=np.array(d.get("scan_scatter_eigs", np.zeros((48, 3))), dtype=np.float64),
+            map_scatter_eigs=np.array(d.get("map_scatter_eigs", np.zeros((48, 3))), dtype=np.float64),
+            kappa_map_bins=np.array(d.get("kappa_map_bins", np.zeros((48,))), dtype=np.float64),
             rot_err_lidar_deg_pred=d.get("rot_err_lidar_deg_pred", 0.0),
             rot_err_lidar_deg_post=d.get("rot_err_lidar_deg_post", 0.0),
             rot_err_odom_deg_pred=d.get("rot_err_odom_deg_pred", 0.0),
@@ -345,6 +367,7 @@ class DiagnosticsLog:
             "N_bins": np.stack([s.N_bins for s in self.scans]),  # (n, 48)
             "S_bins": np.stack([s.S_bins for s in self.scans]),  # (n, 48, 3)
             "kappa_bins": np.stack([s.kappa_bins for s in self.scans]),  # (n, 48)
+            "kappa_map_bins": np.stack([s.kappa_map_bins for s in self.scans]),  # (n, 48)
             "L_total": np.stack([s.L_total for s in self.scans]),  # (n, 22, 22)
             "h_total": np.stack([s.h_total for s in self.scans]),  # (n, 22)
             # Scalar diagnostics
@@ -362,6 +385,9 @@ class DiagnosticsLog:
             "trace_Sigma_g_mode": np.array([s.trace_Sigma_g_mode for s in self.scans]),
             "trace_Sigma_a_mode": np.array([s.trace_Sigma_a_mode for s in self.scans]),
             "wahba_cost": np.array([s.wahba_cost for s in self.scans]),
+            "mf_svd": np.stack([s.mf_svd for s in self.scans]),  # (n, 3)
+            "scan_scatter_eigs": np.stack([s.scan_scatter_eigs for s in self.scans]),  # (n, 48, 3)
+            "map_scatter_eigs": np.stack([s.map_scatter_eigs for s in self.scans]),  # (n, 48, 3)
             "translation_residual_norm": np.array([s.translation_residual_norm for s in self.scans]),
             "rot_err_lidar_deg_pred": np.array([s.rot_err_lidar_deg_pred for s in self.scans]),
             "rot_err_lidar_deg_post": np.array([s.rot_err_lidar_deg_post for s in self.scans]),
@@ -431,6 +457,7 @@ class DiagnosticsLog:
                 N_bins=data["N_bins"][i],
                 S_bins=data["S_bins"][i],
                 kappa_bins=data["kappa_bins"][i],
+                kappa_map_bins=data["kappa_map_bins"][i] if "kappa_map_bins" in data else np.zeros((48,), dtype=np.float64),
                 L_total=data["L_total"][i],
                 h_total=data["h_total"][i],
                 L_lidar=data["L_lidar"][i] if "L_lidar" in data else None,
@@ -452,6 +479,9 @@ class DiagnosticsLog:
                 trace_Sigma_a_mode=float(data["trace_Sigma_a_mode"][i]),
                 wahba_cost=float(data["wahba_cost"][i]),
                 translation_residual_norm=float(data["translation_residual_norm"][i]),
+                mf_svd=data["mf_svd"][i] if "mf_svd" in data else np.zeros((3,), dtype=np.float64),
+                scan_scatter_eigs=data["scan_scatter_eigs"][i] if "scan_scatter_eigs" in data else np.zeros((48, 3), dtype=np.float64),
+                map_scatter_eigs=data["map_scatter_eigs"][i] if "map_scatter_eigs" in data else np.zeros((48, 3), dtype=np.float64),
                 rot_err_lidar_deg_pred=float(data["rot_err_lidar_deg_pred"][i]) if "rot_err_lidar_deg_pred" in data else 0.0,
                 rot_err_lidar_deg_post=float(data["rot_err_lidar_deg_post"][i]) if "rot_err_lidar_deg_post" in data else 0.0,
                 rot_err_odom_deg_pred=float(data["rot_err_odom_deg_pred"][i]) if "rot_err_odom_deg_pred" in data else 0.0,

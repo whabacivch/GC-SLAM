@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS>
+  <Domain id="any">
+    <General>
+      <AllowMulticast>false</AllowMulticast>
+      <NetworkInterfaceAddress>lo</NetworkInterfaceAddress>
+    </General>
+    <Discovery>
+      <ParticipantIndex>0</ParticipantIndex>
+      <Peers>
+        <Peer address="127.0.0.1"/>
+      </Peers>
+    </Discovery>
+    <SharedMemory>
+      <Enable>false</Enable>
+    </SharedMemory>
+  </Domain>
+</CycloneDDS>

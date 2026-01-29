@@ -221,6 +221,10 @@ def create_full_dashboard(
         "rot_err_lidar_deg_post": safe_list("rot_err_lidar_deg_post", 0.0),
         "rot_err_odom_deg_pred": safe_list("rot_err_odom_deg_pred", 0.0),
         "rot_err_odom_deg_post": safe_list("rot_err_odom_deg_post", 0.0),
+        # Yaw increment diagnostics (degrees)
+        "dyaw_gyro": safe_list("dyaw_gyro", 0.0),
+        "dyaw_odom": safe_list("dyaw_odom", 0.0),
+        "dyaw_wahba": safe_list("dyaw_wahba", 0.0),
     }
 
     # Precompute log10 conditioning for visualization stability
@@ -232,44 +236,136 @@ def create_full_dashboard(
     # Bin statistics
     N_bins = data.get("N_bins", np.zeros((n_scans, 48)))
     kappa_bins = data.get("kappa_bins", np.zeros((n_scans, 48)))
+    kappa_map_bins = data.get("kappa_map_bins", np.zeros((n_scans, 48)))
     if hasattr(N_bins, 'tolist'):
         N_bins = np.array(N_bins)
     if hasattr(kappa_bins, 'tolist'):
         kappa_bins = np.array(kappa_bins)
+    if hasattr(kappa_map_bins, 'tolist'):
+        kappa_map_bins = np.array(kappa_map_bins)
+
+    # Optional: Matrix Fisher singular values and scatter eigenvalues (newer schema)
+    mf_svd = np.array(data.get("mf_svd", np.zeros((n_scans, 3))), dtype=np.float64)
+    scan_scatter_eigs = np.array(data.get("scan_scatter_eigs", np.zeros((n_scans, 48, 3))), dtype=np.float64)
+    map_scatter_eigs = np.array(data.get("map_scatter_eigs", np.zeros((n_scans, 48, 3))), dtype=np.float64)
 
     timeline_data["sum_N"] = np.sum(N_bins, axis=1).tolist()
     timeline_data["mean_kappa"] = np.mean(kappa_bins, axis=1).tolist()
-    timeline_data["mf_kappa"] = np.mean(kappa_bins, axis=1).tolist()
 
-    # MF + degeneracy + posterior subspace health (Panel A)
+    # =========================================================================
+    # MF health + scatter sentinels + posterior subspace health (Panel A)
+    # =========================================================================
     L_total_arr = np.array(data.get("L_total", np.zeros((n_scans, 22, 22))))
-    s1_list, s2_list, s3_list = [], [], []
-    logdet_L_pose6_list, eigmin_L_pose6_list = [], []
+    logdet_L_pose6_list = []
+    pose6_eigmin_list, pose6_eig2_list, pose6_eig3_list = [], [], []
+    xy_yaw_eigmin_list, xy_yaw_cond_log10_list = [], []
     for i in range(n_scans):
         L_pose6 = L_total_arr[i, 0:6, 0:6]
-        eigvals = np.linalg.eigvalsh(L_pose6)
-        eigvals = np.sort(eigvals)[::-1]  # descending
-        s1_list.append(float(eigvals[0]) if len(eigvals) > 0 else 0.0)
-        s2_list.append(float(eigvals[1]) if len(eigvals) > 1 else 0.0)
-        s3_list.append(float(eigvals[2]) if len(eigvals) > 2 else 0.0)
+        eigvals = np.sort(np.linalg.eigvalsh(L_pose6))  # ascending
         eigvals_pos = np.maximum(eigvals, 1e-12)
         logdet_L_pose6_list.append(float(np.sum(np.log(eigvals_pos))))
-        eigmin_L_pose6_list.append(float(np.min(eigvals)))
-    timeline_data["s1"] = s1_list
-    timeline_data["s2"] = s2_list
-    timeline_data["s3"] = s3_list
-    timeline_data["logdet_L_pose6"] = logdet_L_pose6_list
-    timeline_data["eigmin_L_pose6"] = eigmin_L_pose6_list
-    timeline_data["log10_mf_cond"] = timeline_data["log10_cond_pose6"]
+        pose6_eigmin_list.append(float(eigvals[0]) if len(eigvals) > 0 else 0.0)
+        pose6_eig2_list.append(float(eigvals[1]) if len(eigvals) > 1 else 0.0)
+        pose6_eig3_list.append(float(eigvals[2]) if len(eigvals) > 2 else 0.0)
 
-    # Factor influence (trace of pose6 block per factor) for Panel D stacked area
-    for key, name in [("L_lidar", "trace_L_pose6_lidar"), ("L_odom", "trace_L_pose6_odom"),
-                      ("L_imu", "trace_L_pose6_imu"), ("L_gyro", "trace_L_pose6_gyro")]:
+        # Observable ground-robot-ish subspace: (x, y, yaw)
+        idx = [0, 1, 5]
+        L_xy_yaw = L_total_arr[i][np.ix_(idx, idx)]
+        eig_xy_yaw = np.sort(np.linalg.eigvalsh(L_xy_yaw))
+        xy_yaw_eigmin_list.append(float(eig_xy_yaw[0]) if len(eig_xy_yaw) > 0 else 0.0)
+        lam_min = float(max(eig_xy_yaw[0], 1e-18)) if len(eig_xy_yaw) > 0 else 1e-18
+        lam_max = float(max(eig_xy_yaw[-1], lam_min)) if len(eig_xy_yaw) > 0 else lam_min
+        xy_yaw_cond_log10_list.append(float(np.log10(lam_max / lam_min)) if lam_min > 0 else 0.0)
+
+    timeline_data["logdet_L_pose6"] = logdet_L_pose6_list
+    timeline_data["eigmin_L_pose6"] = pose6_eigmin_list
+    timeline_data["eig2_L_pose6"] = pose6_eig2_list
+    timeline_data["eig3_L_pose6"] = pose6_eig3_list
+    timeline_data["eigmin_L_xy_yaw"] = xy_yaw_eigmin_list
+    timeline_data["log10_cond_xy_yaw"] = xy_yaw_cond_log10_list
+
+    # Z-leak sentinel ratios (total and LiDAR factor): L[z,z] / mean(L[x,x],L[y,y])
+    xy_mean_total = 0.5 * (L_total_arr[:, 0, 0] + L_total_arr[:, 1, 1]) + 1e-12
+    timeline_data["z_leak_ratio_total"] = (L_total_arr[:, 2, 2] / xy_mean_total).tolist()
+
+    # Matrix Fisher health signals (singular values + condition proxy)
+    mf_svd = np.asarray(mf_svd, dtype=np.float64).reshape(n_scans, 3)
+    timeline_data["mf_s1"] = mf_svd[:, 0].tolist()
+    timeline_data["mf_s2"] = mf_svd[:, 1].tolist()
+    timeline_data["mf_s3"] = mf_svd[:, 2].tolist()
+    timeline_data["mf_s1_f"] = np.maximum(mf_svd[:, 0], 1e-12).tolist()
+    timeline_data["mf_s2_f"] = np.maximum(mf_svd[:, 1], 1e-12).tolist()
+    timeline_data["mf_s3_f"] = np.maximum(mf_svd[:, 2], 1e-12).tolist()
+    mf_kappa = np.sum(mf_svd, axis=1)
+    # Fallback: older logs stored only wahba_cost as sum(svd); preserve visibility.
+    if np.all(mf_kappa == 0.0) and ("wahba_cost" in data):
+        mf_kappa = np.asarray(data["wahba_cost"], dtype=np.float64)
+    timeline_data["mf_kappa"] = mf_kappa.tolist()
+    eps = 1e-12
+    mf_cond = (mf_svd[:, 0] + eps) / (mf_svd[:, 2] + eps)
+    timeline_data["log10_mf_cond"] = np.log10(mf_cond).tolist()
+
+    # Log-scaled posterior spectrum sentinels
+    timeline_data["log10_eigmin_L_pose6"] = np.log10(np.maximum(np.asarray(pose6_eigmin_list), 1e-12)).tolist()
+    timeline_data["log10_eigmin_L_xy_yaw"] = np.log10(np.maximum(np.asarray(xy_yaw_eigmin_list), 1e-12)).tolist()
+
+    # Scatter health signals (anisotropy/planarity proxies)
+    # Eigenvalues are expected in ascending order from eigvalsh: [λ1<=λ2<=λ3].
+    # For metrics we use l1=max, l2=mid, l3=min.
+    def _scatter_to_metrics(eigs_asc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        l3 = eigs_asc[..., 0]
+        l2 = eigs_asc[..., 1]
+        l1 = eigs_asc[..., 2]
+        denom = np.maximum(l1, 1e-18)
+        anisotropy = (l1 - l2) / denom
+        planarity = (l2 - l3) / denom
+        return anisotropy, planarity
+
+    scan_aniso, scan_planarity = _scatter_to_metrics(scan_scatter_eigs)
+    map_aniso, map_planarity = _scatter_to_metrics(map_scatter_eigs)
+    timeline_data["median_scan_aniso"] = np.median(scan_aniso, axis=1).tolist()
+    timeline_data["median_scan_planarity"] = np.median(scan_planarity, axis=1).tolist()
+    timeline_data["median_map_aniso"] = np.median(map_aniso, axis=1).tolist()
+    timeline_data["median_map_planarity"] = np.median(map_planarity, axis=1).tolist()
+
+    # Simple support proxies for the dashboard (relative, visualization-only thresholds)
+    N_max = np.max(N_bins, axis=1, keepdims=True) + 1e-12
+    timeline_data["bins_strong_frac"] = np.mean(N_bins > (0.1 * N_max), axis=1).tolist()
+    timeline_data["bins_planar_frac"] = np.mean(map_planarity > 0.6, axis=1).tolist()
+
+    # Factor influence ledger (subspace traces, alpha-scaled; visualization proxy)
+    alpha = np.asarray(timeline_data["fusion_alpha"], dtype=np.float64)
+    alpha = np.where(np.isfinite(alpha), alpha, 1.0)
+
+    def _subspace_traces(L_fac: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # rot: [3:6], xy: [0:2], z: [2,2]
+        rot = np.trace(L_fac[:, 3:6, 3:6], axis1=1, axis2=2)
+        xy = np.trace(L_fac[:, 0:2, 0:2], axis1=1, axis2=2)
+        z = L_fac[:, 2, 2]
+        return rot, xy, z
+
+    for key, prefix in [
+        ("L_lidar", "lidar"),
+        ("L_odom", "odom"),
+        ("L_imu", "imu"),
+        ("L_gyro", "gyro"),
+        ("L_imu_preint", "preint"),
+    ]:
         if key in data:
-            L_fac = np.array(data[key])  # (n_scans, 22, 22)
-            timeline_data[name] = [float(np.trace(L_fac[i, 0:6, 0:6])) for i in range(n_scans)]
+            L_fac = np.array(data[key], dtype=np.float64)  # (n_scans, 22, 22)
+            rot, xy, z = _subspace_traces(L_fac)
+            timeline_data[f"I_rot_{prefix}"] = (alpha * rot).tolist()
+            timeline_data[f"I_xy_{prefix}"] = (alpha * xy).tolist()
+            timeline_data[f"I_z_{prefix}"] = (alpha * z).tolist()
+            if prefix == "lidar":
+                xy_mean = 0.5 * (L_fac[:, 0, 0] + L_fac[:, 1, 1]) + 1e-12
+                timeline_data["z_leak_ratio_lidar"] = (L_fac[:, 2, 2] / xy_mean).tolist()
         else:
-            timeline_data[name] = [0.0] * n_scans
+            timeline_data[f"I_rot_{prefix}"] = [0.0] * n_scans
+            timeline_data[f"I_xy_{prefix}"] = [0.0] * n_scans
+            timeline_data[f"I_z_{prefix}"] = [0.0] * n_scans
+            if prefix == "lidar":
+                timeline_data["z_leak_ratio_lidar"] = [0.0] * n_scans
 
     # Trajectory data (estimated from diagnostics)
     p_W = data.get("p_W", np.zeros((n_scans, 3)))
@@ -279,22 +375,25 @@ def create_full_dashboard(
     est_x = (p_W[:, 0] - origin[0]).tolist()
     est_y = (p_W[:, 1] - origin[1]).tolist()
     est_z = (p_W[:, 2] - origin[2]).tolist()
-    trajectory_data = {
-        "x": est_x,
-        "y": est_y,
-        "z": est_z,
-        "logdet": timeline_data["logdet_L_total"],
-    }
-    # Optional ground truth (same origin = first estimated pose)
+    has_ground_truth = False
     if ground_truth_path:
         gt_xyz = load_tum_positions(ground_truth_path)
         if gt_xyz is not None:
             gt_x_arr = gt_xyz[0] - origin[0]
             gt_y_arr = gt_xyz[1] - origin[1]
             gt_z_arr = gt_xyz[2] - origin[2]
-            trajectory_data["gt_x"] = gt_x_arr.tolist()
-            trajectory_data["gt_y"] = gt_y_arr.tolist()
-            trajectory_data["gt_z"] = gt_z_arr.tolist()
+            has_ground_truth = True
+    trajectory_data = {
+        "x": est_x,
+        "y": est_y,
+        "z": est_z,
+        "logdet": timeline_data["logdet_L_total"],
+        "has_ground_truth": has_ground_truth,
+    }
+    if has_ground_truth:
+        trajectory_data["gt_x"] = gt_x_arr.tolist()
+        trajectory_data["gt_y"] = gt_y_arr.tolist()
+        trajectory_data["gt_z"] = gt_z_arr.tolist()
 
     # L matrices for heatmap (all scans)
     L_total = data.get("L_total", np.zeros((n_scans, 22, 22)))
@@ -469,6 +568,7 @@ def create_full_dashboard(
         </div>
         <div class="panel">
             <div class="panel-title">Panel C: 3D Trajectory</div>
+            <div id="trajectory-note" style="font-size: 12px; color: #aaa; margin-bottom: 6px;"></div>
             <div id="trajectory"></div>
         </div>
         <div class="panel full-width">
@@ -482,11 +582,16 @@ def create_full_dashboard(
     // Embedded data
     const timelineData = {json.dumps(numpy_to_json(timeline_data))};
     const trajectoryData = {json.dumps(numpy_to_json(trajectory_data))};
-    const L_matrices = {json.dumps(L_total.tolist())};
-    const S_bins = {json.dumps(S_bins.tolist())};
-    const R_WL = {json.dumps(R_WL.tolist())};
-    const kappa_bins = {json.dumps(kappa_bins.tolist())};
-    const N_bins = {json.dumps(N_bins.tolist())};
+	    const L_matrices = {json.dumps(L_total.tolist())};
+	    const S_bins = {json.dumps(S_bins.tolist())};
+	    const R_WL = {json.dumps(R_WL.tolist())};
+	    const kappa_bins = {json.dumps(kappa_bins.tolist())};
+	    const kappa_map_bins = {json.dumps(kappa_map_bins.tolist())};
+	    const N_bins = {json.dumps(N_bins.tolist())};
+	    const scan_aniso = {json.dumps(scan_aniso.tolist())};
+	    const scan_planarity = {json.dumps(scan_planarity.tolist())};
+	    const map_aniso = {json.dumps(map_aniso.tolist())};
+	    const map_planarity = {json.dumps(map_planarity.tolist())};
 
     let currentScan = {selected_scan};
     const nScans = {n_scans};
@@ -505,34 +610,58 @@ def create_full_dashboard(
         yaxis: {{ gridcolor: '#1a1a2e', zerolinecolor: '#1a1a2e' }},
     }};
 
-    // =====================================================================
-    // Panel A: MF + degeneracy + posterior subspace health
-    // =====================================================================
-	    function createTimeline() {{
-	        const traces = [
-            // Row 1: s1, s2, s3 (singular/value strength)
-            {{ x: timelineData.scan_idx, y: timelineData.s1, name: 's1', line: {{color: '#00d4ff'}}, xaxis: 'x', yaxis: 'y' }},
-            {{ x: timelineData.scan_idx, y: timelineData.s2, name: 's2', line: {{color: '#4ecdc4'}}, xaxis: 'x', yaxis: 'y' }},
-            {{ x: timelineData.scan_idx, y: timelineData.s3, name: 's3', line: {{color: '#45aaf2'}}, xaxis: 'x', yaxis: 'y' }},
-            // Row 2: log10(mf_cond), mf_kappa, logdet(L_pose6), eigmin(L_pose6)
-            {{ x: timelineData.scan_idx, y: timelineData.log10_mf_cond, name: 'log10(mf_cond)', line: {{color: '#a55eea'}}, xaxis: 'x2', yaxis: 'y2' }},
-            {{ x: timelineData.scan_idx, y: timelineData.mf_kappa, name: 'mf_kappa', line: {{color: '#f7b731'}}, xaxis: 'x2', yaxis: 'y2' }},
-            {{ x: timelineData.scan_idx, y: timelineData.logdet_L_pose6, name: 'logdet(L_pose6)', line: {{color: '#26de81'}}, xaxis: 'x2', yaxis: 'y2' }},
-            {{ x: timelineData.scan_idx, y: timelineData.eigmin_L_pose6, name: 'eigmin(L_pose6)', line: {{color: '#ff6b6b'}}, xaxis: 'x2', yaxis: 'y2' }},
+	    // =====================================================================
+	    // Panel A: MF + degeneracy + posterior subspace health
+	    // =====================================================================
+	    const TIMELINE_ROWS = 5;
+		    function createTimeline() {{
+		        const traces = [
+            // Row 1: Matrix Fisher singular values (log scale; MF health)
+            {{ x: timelineData.scan_idx, y: timelineData.mf_s1_f, name: 'MF s1', line: {{color: '#00d4ff'}}, xaxis: 'x', yaxis: 'y' }},
+            {{ x: timelineData.scan_idx, y: timelineData.mf_s2_f, name: 'MF s2', line: {{color: '#4ecdc4'}}, xaxis: 'x', yaxis: 'y' }},
+            {{ x: timelineData.scan_idx, y: timelineData.mf_s3_f, name: 'MF s3', line: {{color: '#45aaf2'}}, xaxis: 'x', yaxis: 'y' }},
+
+            // Row 2: Scatter observability (0..1 proxies)
+            {{ x: timelineData.scan_idx, y: timelineData.median_map_aniso, name: 'median(map aniso)', line: {{color: '#f7b731'}}, xaxis: 'x2', yaxis: 'y2' }},
+            {{ x: timelineData.scan_idx, y: timelineData.median_map_planarity, name: 'median(map planarity)', line: {{color: '#26de81'}}, xaxis: 'x2', yaxis: 'y2' }},
+            {{ x: timelineData.scan_idx, y: timelineData.bins_strong_frac, name: '%bins strong (mass)', line: {{color: '#a55eea'}}, xaxis: 'x2', yaxis: 'y2' }},
+            {{ x: timelineData.scan_idx, y: timelineData.bins_planar_frac, name: '%bins planar (map)', line: {{color: '#ff6b6b'}}, xaxis: 'x2', yaxis: 'y2' }},
+
+            // Row 3: Conditioning sentinels (log10)
+            {{ x: timelineData.scan_idx, y: timelineData.log10_mf_cond, name: 'log10(MF cond)', line: {{color: '#00d4ff'}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_cond_pose6, name: 'log10(cond pose6)', line: {{color: '#f7b731'}}, xaxis: 'x3', yaxis: 'y3' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_cond_xy_yaw, name: 'log10(cond xy_yaw)', line: {{color: '#4ecdc4'}}, xaxis: 'x3', yaxis: 'y3' }},
+
+            // Row 4: Rotation / yaw agreement (degrees)
+            {{ x: timelineData.scan_idx, y: timelineData.rot_err_lidar_deg_pred, name: '||Log(R_predᵀ R_MF)|| (deg)', line: {{color: '#00d4ff'}}, xaxis: 'x4', yaxis: 'y4' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dyaw_gyro, name: 'Δyaw gyro', line: {{color: '#f7b731'}}, xaxis: 'x4', yaxis: 'y4' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dyaw_odom, name: 'Δyaw odom', line: {{color: '#4ecdc4'}}, xaxis: 'x4', yaxis: 'y4' }},
+            {{ x: timelineData.scan_idx, y: timelineData.dyaw_wahba, name: 'Δyaw MF', line: {{color: '#ff6b6b'}}, xaxis: 'x4', yaxis: 'y4' }},
+
+            // Row 5: Posterior health (log sentinels)
+            {{ x: timelineData.scan_idx, y: timelineData.log10_eigmin_L_pose6, name: 'log10(λmin pose6)', line: {{color: '#00d4ff'}}, xaxis: 'x5', yaxis: 'y5' }},
+            {{ x: timelineData.scan_idx, y: timelineData.log10_eigmin_L_xy_yaw, name: 'log10(λmin xy_yaw)', line: {{color: '#4ecdc4'}}, xaxis: 'x5', yaxis: 'y5' }},
+            {{ x: timelineData.scan_idx, y: timelineData.logdet_L_pose6, name: 'log|L_pose6|', line: {{color: '#26de81'}}, xaxis: 'x5', yaxis: 'y5' }},
         ];
 
         const layout = {{
             ...darkLayout,
-            height: 420,
+            height: 720,
             showlegend: true,
             legend: {{ orientation: 'h', y: 1.08, x: 0.5, xanchor: 'center' }},
-            grid: {{ rows: 2, columns: 1, pattern: 'independent', roworder: 'top to bottom' }},
+            grid: {{ rows: TIMELINE_ROWS, columns: 1, pattern: 'independent', roworder: 'top to bottom' }},
             xaxis: {{ ...darkLayout.xaxis, anchor: 'y', domain: [0, 1], showticklabels: false }},
-            xaxis2: {{ ...darkLayout.xaxis, anchor: 'y2', domain: [0, 1], title: 'Scan Index' }},
-            yaxis: {{ ...darkLayout.yaxis, domain: [0.5, 1], title: 's1, s2, s3' }},
-            yaxis2: {{ ...darkLayout.yaxis, domain: [0, 0.46], title: 'log10(mf_cond), mf_κ, logdet, λmin' }},
-            margin: {{ t: 50, b: 40, l: 60, r: 40 }},
-            shapes: createVerticalLines(currentScan, 2),
+            xaxis2: {{ ...darkLayout.xaxis, anchor: 'y2', domain: [0, 1], showticklabels: false }},
+            xaxis3: {{ ...darkLayout.xaxis, anchor: 'y3', domain: [0, 1], showticklabels: false }},
+            xaxis4: {{ ...darkLayout.xaxis, anchor: 'y4', domain: [0, 1], showticklabels: false }},
+            xaxis5: {{ ...darkLayout.xaxis, anchor: 'y5', domain: [0, 1], title: 'Scan Index' }},
+            yaxis: {{ ...darkLayout.yaxis, title: 'MF svd (log)', type: 'log' }},
+            yaxis2: {{ ...darkLayout.yaxis, title: 'scatter proxies', range: [0, 1.05] }},
+            yaxis3: {{ ...darkLayout.yaxis, title: 'log10(cond)' }},
+            yaxis4: {{ ...darkLayout.yaxis, title: 'deg' }},
+            yaxis5: {{ ...darkLayout.yaxis, title: 'log sentinels' }},
+            margin: {{ t: 50, b: 40, l: 70, r: 40 }},
+            shapes: createVerticalLines(currentScan, TIMELINE_ROWS),
         }};
 
         Plotly.newPlot('timeline', traces, layout, {{responsive: true}});
@@ -556,19 +685,24 @@ def create_full_dashboard(
     // =====================================================================
     // Panel B: L_pose6 (6x6) / L_xy_yaw (3x3) toggle + Z leak indicator
     // =====================================================================
-    function updateZLeakDisplay(scanIdx) {{
-        const L_full = L_matrices[scanIdx];
-        const L_pose = [];
-        for (let i = 0; i < 6; i++) L_pose.push(L_full[i].slice(0, 6));
-        const Lzz = L_pose[2][2];
-        const Lxx = L_pose[0][0], Lyy = L_pose[1][1];
-        const xy_mean = (Lxx + Lyy) / 2 + 1e-10;
-        const zLeakRatio = Lzz / xy_mean;
-        const el = document.getElementById('z-leak-value');
-        if (el) {{
-            el.innerHTML = 'Z leak (L[z,z]/mean(L[x,x],L[y,y])): <span class="value">' + zLeakRatio.toFixed(4) + '</span> &nbsp; L_zz=' + Lzz.toFixed(4);
-        }}
-    }}
+	    function updateZLeakDisplay(scanIdx) {{
+	        const L_full = L_matrices[scanIdx];
+	        const L_pose = [];
+	        for (let i = 0; i < 6; i++) L_pose.push(L_full[i].slice(0, 6));
+	        const Lzz = L_pose[2][2];
+	        const Lxx = L_pose[0][0], Lyy = L_pose[1][1];
+	        const xy_mean = (Lxx + Lyy) / 2 + 1e-10;
+	        const zLeakRatio = Lzz / xy_mean;
+	        const zLeakTotal = timelineData.z_leak_ratio_total ? timelineData.z_leak_ratio_total[scanIdx] : zLeakRatio;
+	        const zLeakLidar = timelineData.z_leak_ratio_lidar ? timelineData.z_leak_ratio_lidar[scanIdx] : 0.0;
+	        const el = document.getElementById('z-leak-value');
+	        if (el) {{
+	            el.innerHTML =
+	                'Z leak total: <span class="value">' + zLeakTotal.toFixed(4) + '</span>' +
+	                ' &nbsp; | &nbsp; Z leak LiDAR: <span class="value">' + zLeakLidar.toFixed(4) + '</span>' +
+	                ' &nbsp; | &nbsp; L_zz(total)=' + Lzz.toFixed(4);
+	        }}
+	    }}
 
     function createHeatmap(scanIdx) {{
         const L_full = L_matrices[scanIdx];
@@ -643,7 +777,20 @@ def create_full_dashboard(
     // =====================================================================
     // Panel C: 3D Trajectory
     // =====================================================================
-    function createTrajectory(scanIdx) {{
+	    function createTrajectory(scanIdx) {{
+	        const noteEl = document.getElementById('trajectory-note');
+	        if (noteEl) {{
+	            const geod = (timelineData.rot_err_lidar_deg_pred && timelineData.rot_err_lidar_deg_pred[scanIdx] !== undefined)
+	                ? timelineData.rot_err_lidar_deg_pred[scanIdx].toFixed(2) : '--';
+	            const zLeakL = (timelineData.z_leak_ratio_lidar && timelineData.z_leak_ratio_lidar[scanIdx] !== undefined)
+	                ? timelineData.z_leak_ratio_lidar[scanIdx].toFixed(4) : '--';
+	            const IzL = (timelineData.I_z_lidar && timelineData.I_z_lidar[scanIdx] !== undefined)
+	                ? timelineData.I_z_lidar[scanIdx].toFixed(2) : '--';
+	            const prefix = trajectoryData.has_ground_truth
+	                ? 'Ground truth (teal) + Estimate (orange).'
+	                : 'Estimate only (add --ground-truth to overlay).';
+	            noteEl.textContent = `${{prefix}} Selected scan=${{scanIdx}} | geodesic_pred→MF=${{geod}}° | z_leak_lidar=${{zLeakL}} | ΔI_z_lidar=${{IzL}}`;
+	        }}
         const traces = [];
         // Ground truth (if present; draw first so it appears behind estimated)
         if (trajectoryData.gt_x && trajectoryData.gt_y && trajectoryData.gt_z) {{
@@ -653,26 +800,26 @@ def create_full_dashboard(
                 z: trajectoryData.gt_z,
                 mode: 'lines',
                 type: 'scatter3d',
-                line: {{ color: '#4ecdc4', width: 4 }},
+                line: {{ color: '#4ecdc4', width: 5 }},
                 name: 'Ground truth',
                 hovertemplate: 'Ground truth<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>'
             }});
         }}
-        // Estimated trajectory
+        // Estimated trajectory (bright color so visible next to ground truth on dark background)
         traces.push({{
             x: trajectoryData.x, y: trajectoryData.y, z: trajectoryData.z,
             mode: 'lines+markers',
             type: 'scatter3d',
             marker: {{
-                size: 3,
+                size: 4,
                 color: trajectoryData.logdet,
                 colorscale: 'Viridis',
                 colorbar: {{ title: 'log|L|', x: 1.02, tickfont: {{color: '#eee'}} }},
                 showscale: true
             }},
-            line: {{ color: '#555', width: 2 }},
+            line: {{ color: '#f7b731', width: 4 }},
             name: 'Estimated',
-            hovertemplate: 'Scan %{{text}}<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>',
+            hovertemplate: 'Estimated (scan %{{text}})<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>',
             text: timelineData.scan_idx.map(i => i.toString())
         }});
         // Selected point marker
@@ -741,56 +888,176 @@ def create_full_dashboard(
         Plotly.react('trajectory', traces, layout, {{responsive: true}});
     }}
 
-    // =====================================================================
-    // Panel D: Factor influence (stacked area) + top-K bins bar chart
-    // =====================================================================
-    const TOP_K_BINS = 12;
-	    function createFactorStacked() {{
-	        const hasLidar = timelineData.trace_L_pose6_lidar && timelineData.trace_L_pose6_lidar.some(v => v !== 0);
-	        const hasOdom = timelineData.trace_L_pose6_odom && timelineData.trace_L_pose6_odom.some(v => v !== 0);
-	        const hasImu = timelineData.trace_L_pose6_imu && timelineData.trace_L_pose6_imu.some(v => v !== 0);
-	        const hasGyro = timelineData.trace_L_pose6_gyro && timelineData.trace_L_pose6_gyro.some(v => v !== 0);
-	        const traces = [];
-	        if (hasLidar) traces.push({{ x: timelineData.scan_idx, y: timelineData.trace_L_pose6_lidar, name: 'Lidar (tr L_pose6)', stackgroup: 'one', fill: 'tozeroy', line: {{color: '#00d4ff', width: 1}}, mode: 'lines' }});
-	        if (hasOdom) traces.push({{ x: timelineData.scan_idx, y: timelineData.trace_L_pose6_odom, name: 'Odom', stackgroup: 'one', fill: 'tonexty', line: {{color: '#4ecdc4', width: 1}}, mode: 'lines' }});
-	        if (hasImu) traces.push({{ x: timelineData.scan_idx, y: timelineData.trace_L_pose6_imu, name: 'IMU', stackgroup: 'one', fill: 'tonexty', line: {{color: '#f7b731', width: 1}}, mode: 'lines' }});
-	        if (hasGyro) traces.push({{ x: timelineData.scan_idx, y: timelineData.trace_L_pose6_gyro, name: 'Gyro', stackgroup: 'one', fill: 'tonexty', line: {{color: '#ff6b6b', width: 1}}, mode: 'lines' }});
-	        if (traces.length === 0) traces.push({{ x: timelineData.scan_idx, y: timelineData.scan_idx.map(() => 0), name: 'No factor data', line: {{color: '#888'}} }});
-	        const layout = {{
-	            ...darkLayout,
-	            height: 280,
-	            title: {{ text: 'Info added per factor (tr L_pose6)', font: {{color: '#00d4ff'}} }},
-	            xaxis: {{ ...darkLayout.xaxis, title: 'Scan Index' }},
-	            yaxis: {{ ...darkLayout.yaxis, title: 'tr(L_pose6)' }},
-	            showlegend: true,
-	            legend: {{ orientation: 'h', y: 1.02 }},
-	            margin: {{ t: 40, b: 40, l: 50, r: 30 }},
-	        }};
-	        Plotly.newPlot('factor-stacked', traces, layout, {{responsive: true}});
-	    }}
+	    // =====================================================================
+	    // Panel D: Factor influence (stacked area) + top-K bins bar chart
+	    // =====================================================================
+	    const TOP_K_BINS = 12;
+		    function createFactorStacked() {{
+		        const factors = [
+		            {{ id: 'lidar', label: 'LiDAR', color: '#00d4ff' }},
+		            {{ id: 'odom', label: 'Odom', color: '#4ecdc4' }},
+		            {{ id: 'imu', label: 'Accel(vMF)', color: '#f7b731' }},
+		            {{ id: 'gyro', label: 'Gyro', color: '#ff6b6b' }},
+		            {{ id: 'preint', label: 'Preint', color: '#a55eea' }},
+		        ];
 
-	    function createTopKBins(scanIdx) {{
-	        const N = N_bins[scanIdx] || Array(48).fill(0);
-	        const kappa = kappa_bins[scanIdx] || Array(48).fill(0);
-	        const w_b = N.map((n, i) => n * kappa[i]);
-	        const indices = [...Array(48).keys()].sort((a, b) => w_b[b] - w_b[a]).slice(0, TOP_K_BINS);
-	        const binLabels = indices.map(i => 'b' + i);
-	        const traceW = {{ x: binLabels, y: indices.map(i => w_b[i]), name: 'w_b (N×κ)', type: 'bar', marker: {{ color: '#00d4ff' }} }};
-	        const traceN = {{ x: binLabels, y: indices.map(i => N[i]), name: 'N', type: 'bar', marker: {{ color: '#4ecdc4' }} }};
-	        const traceK = {{ x: binLabels, y: indices.map(i => kappa[i]), name: 'κ', type: 'bar', marker: {{ color: '#f7b731' }} }};
-	        const layout = {{
-	            ...darkLayout,
-	            height: 280,
-	            title: {{ text: 'Top-' + TOP_K_BINS + ' bins (scan ' + scanIdx + ') — w_b, N, κ', font: {{color: '#00d4ff'}} }},
-	            xaxis: {{ ...darkLayout.xaxis, title: 'Bin' }},
-	            yaxis: {{ ...darkLayout.yaxis, title: 'Value' }},
-	            barmode: 'group',
-	            showlegend: true,
-	            legend: {{ orientation: 'h', y: 1.02 }},
-	            margin: {{ t: 40, b: 40, l: 50, r: 30 }},
-	        }};
-	        Plotly.react('topk-bins', [traceW, traceN, traceK], layout, {{responsive: true}});
-	    }}
+		        const traces = [];
+		        const hasAny = (arr) => arr && arr.some(v => v !== 0);
+
+		        // Row 1: Rotation info (stacked)
+		        let anyRot = false;
+		        factors.forEach((f, idx) => {{
+		            const y = timelineData['I_rot_' + f.id];
+		            if (hasAny(y)) {{
+		                anyRot = true;
+		                traces.push({{
+		                    x: timelineData.scan_idx, y: y, name: f.label + ' (rot)',
+		                    stackgroup: 'rot', fill: (idx === 0 ? 'tozeroy' : 'tonexty'),
+		                    line: {{color: f.color, width: 1}},
+		                    mode: 'lines', xaxis: 'x', yaxis: 'y'
+		                }});
+		            }}
+		        }});
+
+		        // Row 2: XY translation info (stacked)
+		        let anyXy = false;
+		        factors.forEach((f, idx) => {{
+		            const y = timelineData['I_xy_' + f.id];
+		            if (hasAny(y)) {{
+		                anyXy = true;
+		                traces.push({{
+		                    x: timelineData.scan_idx, y: y, name: f.label + ' (xy)',
+		                    stackgroup: 'xy', fill: (idx === 0 ? 'tozeroy' : 'tonexty'),
+		                    line: {{color: f.color, width: 1}},
+		                    mode: 'lines', xaxis: 'x2', yaxis: 'y2'
+		                }});
+		            }}
+		        }});
+
+		        // Row 3: Z info leak (lines; should be ~0 for LiDAR on planar robots)
+		        const zTotal = timelineData.scan_idx.map((_, i) =>
+		            (timelineData.I_z_lidar[i] || 0) +
+		            (timelineData.I_z_odom[i] || 0) +
+		            (timelineData.I_z_imu[i] || 0) +
+		            (timelineData.I_z_gyro[i] || 0) +
+		            (timelineData.I_z_preint[i] || 0)
+		        );
+		        traces.push({{
+		            x: timelineData.scan_idx, y: zTotal, name: 'Z total (α·Lzz sum)',
+		            mode: 'lines', line: {{color: '#ffffff', width: 2}},
+		            xaxis: 'x3', yaxis: 'y3'
+		        }});
+		        factors.forEach((f) => {{
+		            const y = timelineData['I_z_' + f.id];
+		            if (hasAny(y)) {{
+		                traces.push({{
+		                    x: timelineData.scan_idx, y: y, name: f.label + ' (z)',
+		                    mode: 'lines', line: {{color: f.color, width: 1, dash: 'dot'}},
+		                    xaxis: 'x3', yaxis: 'y3'
+		                }});
+		            }}
+		        }});
+
+		        if (!anyRot && !anyXy) {{
+		            traces.push({{ x: timelineData.scan_idx, y: timelineData.scan_idx.map(() => 0), name: 'No factor data', line: {{color: '#888'}}, xaxis: 'x', yaxis: 'y' }});
+		        }}
+
+		        const layout = {{
+		            ...darkLayout,
+		            height: 420,
+		            showlegend: true,
+		            legend: {{ orientation: 'h', y: 1.06, x: 0.5, xanchor: 'center' }},
+		            grid: {{ rows: 3, columns: 1, pattern: 'independent', roworder: 'top to bottom' }},
+		            xaxis: {{ ...darkLayout.xaxis, anchor: 'y', domain: [0, 1], showticklabels: false }},
+		            xaxis2: {{ ...darkLayout.xaxis, anchor: 'y2', domain: [0, 1], showticklabels: false }},
+		            xaxis3: {{ ...darkLayout.xaxis, anchor: 'y3', domain: [0, 1], title: 'Scan Index' }},
+		            yaxis: {{ ...darkLayout.yaxis, title: 'ΔI_rot (α·tr L_rot)' }},
+		            yaxis2: {{ ...darkLayout.yaxis, title: 'ΔI_xy (α·tr L_xy)' }},
+		            yaxis3: {{ ...darkLayout.yaxis, title: 'ΔI_z (α·Lzz)' }},
+		            margin: {{ t: 50, b: 40, l: 70, r: 40 }},
+		            shapes: createVerticalLines(currentScan, 3),
+		        }};
+		        Plotly.react('factor-stacked', traces, layout, {{responsive: true}});
+		    }}
+
+		    function createTopKBins(scanIdx) {{
+		        const N = N_bins[scanIdx] || Array(48).fill(0);
+		        const kS = kappa_bins[scanIdx] || Array(48).fill(0);
+		        const kM = (kappa_map_bins && kappa_map_bins[scanIdx]) ? kappa_map_bins[scanIdx] : Array(48).fill(0);
+		        const planM = (map_planarity && map_planarity[scanIdx]) ? map_planarity[scanIdx] : Array(48).fill(0);
+		        const anisoM = (map_aniso && map_aniso[scanIdx]) ? map_aniso[scanIdx] : Array(48).fill(0);
+
+		        const w_b = N.map((n, i) => n * kS[i]);
+		        const indices = [...Array(48).keys()].sort((a, b) => w_b[b] - w_b[a]).slice(0, TOP_K_BINS);
+		        const binLabels = indices.map(i => 'b' + i);
+
+		        // Left axis: mass-like quantities
+		        const traceW = {{
+		            x: binLabels, y: indices.map(i => w_b[i]),
+		            name: 'w_b = N×κ_scan', type: 'bar',
+		            marker: {{ color: '#00d4ff' }},
+		            yaxis: 'y'
+		        }};
+		        const traceN = {{
+		            x: binLabels, y: indices.map(i => N[i]),
+		            name: 'N', type: 'bar',
+		            marker: {{ color: '#4ecdc4' }},
+		            yaxis: 'y'
+		        }};
+
+		        // Right axis: normalized 0..1 sentinels so κ/aniso/planarity are visible
+		        const kMax = Math.max(...indices.map(i => kS[i])) + 1e-12;
+		        const kMaxM = Math.max(...indices.map(i => kM[i])) + 1e-12;
+		        const kS_norm = indices.map(i => kS[i] / kMax);
+		        const kM_norm = indices.map(i => kM[i] / kMaxM);
+
+		        const traceKs = {{
+		            x: binLabels, y: kS_norm,
+		            name: 'κ_scan (norm)', type: 'scatter', mode: 'lines+markers',
+		            marker: {{ color: '#f7b731' }},
+		            line: {{ color: '#f7b731' }},
+		            yaxis: 'y2',
+		            hovertemplate: 'κ_scan=%{{customdata:.3f}}<extra></extra>',
+		            customdata: indices.map(i => kS[i]),
+		        }};
+		        const traceKm = {{
+		            x: binLabels, y: kM_norm,
+		            name: 'κ_map (norm)', type: 'scatter', mode: 'lines+markers',
+		            marker: {{ color: '#a55eea' }},
+		            line: {{ color: '#a55eea', dash: 'dot' }},
+		            yaxis: 'y2',
+		            hovertemplate: 'κ_map=%{{customdata:.3f}}<extra></extra>',
+		            customdata: indices.map(i => kM[i]),
+		        }};
+		        const tracePlan = {{
+		            x: binLabels, y: indices.map(i => planM[i]),
+		            name: 'planarity(map)', type: 'scatter', mode: 'lines+markers',
+		            marker: {{ color: '#26de81' }},
+		            line: {{ color: '#26de81', dash: 'dot' }},
+		            yaxis: 'y2'
+		        }};
+		        const traceAniso = {{
+		            x: binLabels, y: indices.map(i => anisoM[i]),
+		            name: 'aniso(map)', type: 'scatter', mode: 'lines+markers',
+		            marker: {{ color: '#ff6b6b' }},
+		            line: {{ color: '#ff6b6b', dash: 'dot' }},
+		            yaxis: 'y2'
+		        }};
+
+		        const layout = {{
+		            ...darkLayout,
+		            height: 320,
+		            title: {{ text: 'Top-' + TOP_K_BINS + ' bins (scan ' + scanIdx + ') — mass vs (κ/aniso/planarity)', font: {{color: '#00d4ff'}} }},
+		            xaxis: {{ ...darkLayout.xaxis, title: 'Bin' }},
+		            yaxis: {{ ...darkLayout.yaxis, title: 'w_b / N' }},
+		            yaxis2: {{ ...darkLayout.yaxis, title: 'normalized / 0..1', overlaying: 'y', side: 'right', range: [0, 1.05] }},
+		            barmode: 'group',
+		            showlegend: true,
+		            legend: {{ orientation: 'h', y: 1.05 }},
+		            margin: {{ t: 50, b: 40, l: 60, r: 60 }},
+		        }};
+		        Plotly.react('topk-bins', [traceW, traceN, traceKs, traceKm, tracePlan, traceAniso], layout, {{responsive: true}});
+		    }}
 
     // =====================================================================
     // Update all panels when slider changes
@@ -807,13 +1074,16 @@ def create_full_dashboard(
 	        document.getElementById('info-rot-lidar').textContent = timelineData.rot_err_lidar_deg_post[scanIdx].toFixed(2);
 
         // Update timeline vertical lines
-        Plotly.relayout('timeline', {{ shapes: createVerticalLines(scanIdx, 5) }});
+        Plotly.relayout('timeline', {{ shapes: createVerticalLines(scanIdx, TIMELINE_ROWS) }});
 
         // Update heatmap and Z leak
         createHeatmap(scanIdx);
 
         // Update trajectory
         createTrajectory(scanIdx);
+
+        // Update factor ledger vertical lines
+        Plotly.relayout('factor-stacked', {{ shapes: createVerticalLines(scanIdx, 3) }});
 
         // Update top-K bins bar chart
         createTopKBins(scanIdx);

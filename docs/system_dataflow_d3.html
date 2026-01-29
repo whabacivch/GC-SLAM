@@ -274,11 +274,11 @@
             { id: "S04", label: "S04: BinSoftAssign", sub: "48 bins", x: 641, y: 366, w: 150, h: 55, type: "exact" },
             { id: "S05", label: "S05: MomentMatch", sub: "map_stats", x: 430, y: 370, w: 150, h: 55, type: "exact" },
             { id: "S06", label: "S06: Kappa", sub: "κ_map, κ_scan", x: 213, y: 373, w: 150, h: 55, type: "exact" },
-            { id: "S07", label: "S07: WahbaSVD", sub: "Rotation R̂", x: 213, y: 464, w: 150, h: 55, type: "exact" },
-            { id: "S08", label: "S08: TranslationWLS", sub: "Translation t̂", x: 643, y: 460, w: 150, h: 55, type: "exact" },
+            { id: "S07", label: "S07: MatrixFisherRotation", sub: "Rotation R̂", x: 213, y: 464, w: 150, h: 55, type: "exact" },
+            { id: "S08", label: "S08: PlanarTranslation", sub: "Translation t̂", x: 643, y: 460, w: 150, h: 55, type: "exact" },
             
             // Evidence
-            { id: "S09D", label: "S09d: LidarQuadratic", sub: "Pose info", x: 752, y: 584, w: 170, h: 55, type: "evidence" },
+            { id: "S09D", label: "S09d: LidarEvidence", sub: "MF + planar", x: 752, y: 584, w: 170, h: 55, type: "evidence" },
             
             // === IMU LANE ===
             { id: "BAG_IMU", label: "/livox/mid360/imu", sub: "200 Hz", x: 550, y: 40, w: 150, h: 45, type: "active" },
@@ -287,7 +287,7 @@
             { id: "IMU_BUF", label: "IMU Buffer", sub: "4000 msgs", x: 847, y: 177, w: 130, h: 65, type: "buffer" },
             
             // Evidence from IMU
-            { id: "S09B", label: "S09b: ImuVMFGravity", sub: "vMF S²", x: 332, y: 577, w: 170, h: 55, type: "approx" },
+            { id: "S09B", label: "S09b: ImuVMFGravityTimeResolved", sub: "vMF S²", x: 332, y: 577, w: 170, h: 55, type: "approx" },
             { id: "S09C", label: "S09c: ImuGyroRot", sub: "Gaussian SO(3)", x: 547, y: 576, w: 170, h: 55, type: "evidence" },
             
             // === FUSION (reverse direction) ===

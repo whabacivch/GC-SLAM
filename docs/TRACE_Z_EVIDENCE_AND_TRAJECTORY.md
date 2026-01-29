@@ -1,6 +1,11 @@
-# Trace: Where Does Z in the Pose and Trajectory Come From?
+# Trace: Where Does Z in the Pose and Trajectory Come From? (Legacy analysis + current fixes)
 
-We observe **large z movement** in the estimated trajectory and non-negligible z in the pose evidence. The robot is planar (x, y, yaw); odom explicitly does not trust z (covariance 1e6 m²). So where is z coming from? This doc traces from **raw data and pipeline math** to the **final z** in the state.
+We observed **large z movement** in the estimated trajectory in a **legacy pipeline** run (pre‑planarization). The robot is planar (x, y, yaw); odom explicitly does not trust z (covariance 1e6 m²). This doc traces the **legacy mechanism** and notes the **current fixes** now in code.
+
+**Current status (in code):**
+- **Planar translation evidence** with self‑adaptive z precision (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/matrix_fisher_evidence.py:502`)
+- **Always‑on planar priors** on z and v_z (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`)
+- **Map update planar z** (forces `t_hat[2]=0`) (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`)
 
 **References:** `docs/PIPELINE_MESSAGE_TRACE_MESSAGE_5.md`, `docs/RAW_MEASUREMENTS_VS_PIPELINE.md`, `tools/inspect_odom_covariance.py`, odom/IMU/LiDAR operators.
 
@@ -28,12 +33,12 @@ So **odom gives very weak z evidence**: we pull z toward odom_z with strength **
 
 ---
 
-## 2. LiDAR translation evidence: full 3D, no z-downweighting
+## 2. Legacy LiDAR translation evidence: full 3D, no z-downweighting
 
-### 2.1 TranslationWLS (translation estimate)
+### 2.1 Legacy TranslationWLS (translation estimate)
 
 - **Model:** `c_map_b = R_hat @ p_bar_scan_b + t + noise` (per bin). We solve for **t_hat** (3,) and **t_cov** (3×3) in **world frame**.
-- **t_hat** is the **full 3D** translation (x, y, **z**). There is no separate treatment of z; the same WLS fit gives t_hat[0], t_hat[1], **t_hat[2]**.
+- **t_hat** is the **full 3D** translation (x, y, **z**). In the legacy pipeline there was no separate treatment of z; the same WLS fit gave t_hat[0], t_hat[1], **t_hat[2]**.
 - **t_cov** is 3×3. It comes from **A = Σ_b w_b * inv(Sigma_b)** where **Sigma_b = Sigma_c_map + Sigma_scan_rotated + Sigma_meas**. **Sigma_meas** is **isotropic**: `GC_LIDAR_SIGMA_MEAS = 0.01` m² (same for x, y, z). So we do **not** inflate z uncertainty in the WLS.
 - Geometry: If bins are distributed in 3D (e.g. forward, left, right, some height spread), **A** is well-conditioned in all three dimensions and **t_cov** has similar magnitude in (2,2) as in (0,0) and (1,1). So **t_hat[2]** is estimated with similar precision as t_hat[0] and t_hat[1].
 
@@ -41,7 +46,7 @@ So **odom gives very weak z evidence**: we pull z toward odom_z with strength **
 
 - **Translation block:** We build **H_trans = inv(t_cov)** (after PSD and rotation to body). So **H_trans[2,2]** is the information for **z** (1/m²).
 - **L_lidar[0:3, 0:3] = info_scale * H_trans.** So we add **full 3D** translation evidence, including **z**, with strength set by **t_cov[2,2]**.
-- There is **no** z-downweighting, no planar constraint, and no “z unobserved” prior. So **LiDAR is the only source of strong z evidence** in the pipeline.
+- Legacy pipeline: **no** z‑downweighting, no planar constraint, and no “z unobserved” prior. So **LiDAR was the only source of strong z evidence**.
 
 ### 2.3 Where does t_hat[2] (LiDAR z) get its value?
 
@@ -53,10 +58,11 @@ So **odom gives very weak z evidence**: we pull z toward odom_z with strength **
 So:
 
 1. **First scan:** Map is built with belief at origin (0,0,0). Map centroids have z ≈ 0.78 m (lidar height). **t_hat** is the body position in world; if we’re at origin, **t_hat ≈ (0, 0, 0)** and z stays ~0.
-2. **Later scans:** If at any point **belief_z** becomes non-zero (e.g. from odom’s weak pull, or from numerical/geometry effects in t_hat), the **map** is updated with that z. Then **c_map** has that z offset. The next TranslationWLS fit gives **t_hat[2]** consistent with that map. We then feed **t_hat** (including **t_hat[2]**) into LiDAR evidence with **full weight** (inv(t_cov)). So we **reinforce** z every scan: **belief_z → map z → t_hat[2] → LiDAR evidence → belief_z**.
+2. **Later scans (legacy):** If at any point **belief_z** becomes non-zero (e.g. from odom’s weak pull, or from numerical/geometry effects in t_hat), the **map** is updated with that z. Then **c_map** has that z offset. The next TranslationWLS fit gives **t_hat[2]** consistent with that map. We then feed **t_hat** (including **t_hat[2]**) into LiDAR evidence with **full weight** (inv(t_cov)). So we **reinforce** z every scan: **belief_z → map z → t_hat[2] → LiDAR evidence → belief_z**.  
+**Current pipeline:** map update forces `t_hat[2]=0` and translation z precision is downweighted, so this loop is broken.
 3. **Centroid mismatch:** Any systematic z offset between scan and map (e.g. different lidar height, calibration, or drift) produces a non-zero **t_hat[2]** and thus a z pull with **strong** weight (inverse of t_cov[2,2], which is not large).
 
-**Conclusion:** **LiDAR translation evidence is the dominant source of z.** We treat z like x and y (full 3D, isotropic Sigma_meas, no planar prior). Once z appears in the map (from belief), it is reinforced by the next scan’s t_hat[2] and strong L_lidar[2,2].
+**Legacy conclusion:** **LiDAR translation evidence was the dominant source of z.** We treated z like x and y (full 3D, isotropic Sigma_meas, no planar prior). Once z appeared in the map (from belief), it was reinforced by the next scan’s t_hat[2] and strong L_lidar[2,2].
 
 ---
 
@@ -81,7 +87,7 @@ So:
 | Step | What happens to z | Units / values |
 |------|-------------------|----------------|
 | **Odom** | We use odom_pose[2] (tz) and cov[2,2] = 1e6 m². L_pose[2,2] = 1e-6 1/m². Residual = odom_z − pred_z (m). | Very weak pull toward odom_z (e.g. −0.028 m relative). |
-| **LiDAR** | TranslationWLS returns t_hat (3D), t_cov (3×3). Sigma_meas isotropic 0.01 m². H_trans = inv(t_cov) → full 3D. L_lidar[0:3,0:3] = info_scale * H_trans. | **Strong** z evidence from t_hat[2] and t_cov[2,2]. No z-downweighting. |
+| **LiDAR (legacy)** | TranslationWLS returns t_hat (3D), t_cov (3×3). Sigma_meas isotropic 0.01 m². H_trans = inv(t_cov) → full 3D. L_lidar[0:3,0:3] = info_scale * H_trans. | **Strong** z evidence from t_hat[2] and t_cov[2,2]. No z-downweighting. |
 | **Map update** | Map centroids = f(belief pose, scan). If belief_z ≠ 0, map has z offset. | belief_z → map z → next t_hat[2] → reinforces z. |
 | **Process** | Q trans block = diag(1e-4, 1e-4, 1e-4) m²/s. Prediction adds same diffusion to x, y, z. | z uncertainty grows like x, y; no planar damping. |
 | **Velocity** | State has vel (3D). IMU preintegration gives delta_v (3D). No “vel_z = 0” constraint. | Any vel_z or delta_v_z gets fused and propagated. |
@@ -94,4 +100,5 @@ So:
 3. **Feedback:** belief_z ≠ 0 → map gets z → next t_hat[2] matches that → LiDAR evidence pulls z again with **full** weight.
 4. **Growth:** Process noise and velocity propagation allow z to drift like x and y; there is no planar constraint.
 
-**Summary:** **Z in the pose matrix and trajectory is driven primarily by LiDAR translation evidence (full 3D t_hat/t_cov with no z-downweighting) and then reinforced by map–scan feedback and process/velocity. Odom contributes only a very small z term (1e-6).** To reduce z we would need to: (1) downweight or zero z in LiDAR translation evidence (e.g. planar prior or inflate t_cov[2,2]), and/or (2) add a planar process/prior (e.g. smaller Q for z, or vel_z = 0), and/or (3) build the map and TranslationWLS in a way that does not reinforce z (e.g. constrain map to z = const or use only horizontal bins for translation).
+**Legacy summary:** **Z in the pose matrix and trajectory was driven primarily by LiDAR translation evidence (full 3D t_hat/t_cov with no z‑downweighting) and then reinforced by map–scan feedback and process/velocity. Odom contributed only a very small z term (1e-6).**  
+**Current status:** Planar translation + planar priors + planar map update now prevent the z feedback loop; z should stay bounded near z_ref.

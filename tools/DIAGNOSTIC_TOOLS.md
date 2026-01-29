@@ -147,9 +147,10 @@ This will tell you:
 ## Current Known Issues
 
 ### LiDAR Frame Convention
-- **Documentation says**: `livox_frame` is Z-down, needs `[π, 0, 0]` rotation
-- **Code has**: `[0, 0, 0]` (identity) - reverted pending verification
-- **Action**: Run `diagnose_coordinate_frames.py` to verify
+- **Single source of truth**: `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` (LiDAR subsection). For M3DGR Dynamic01 it states `livox_frame` is **Z-up** and `T_base_lidar` rotation is identity.
+- **Conflict**: `docs/BAG_TOPICS_AND_USAGE.md` previously said Z-down (generic Livox); reconciled to defer to FRAME_AND_QUATERNION and the diagnostic.
+- **Code**: `T_base_lidar` rotation = `[0, 0, 0]` in `gc_rosbag.launch.py` and `config/gc_unified.yaml` (assumes Z-up).
+- **Evaluation**: If ATE rotation is ~180° with dominant roll error, run `diagnose_coordinate_frames.py`; if it reports Z-down, set `T_base_lidar` rotation to `[3.141593, 0.0, 0.0]` and update the frame doc. See `docs/PIPELINE_DESIGN_GAPS.md` §5.5.
 
 ### IMU Frame Convention
 - **Current**: `T_base_imu = [0, 0, 0, -0.015586, 0.489293, 0.0]`

@@ -1,5 +1,7 @@
 # M3DGR Dataset Status
 
+**Official repo:** [github.com/sjtuyinjie/M3DGR](https://github.com/sjtuyinjie/M3DGR) (IROS 2025; GT in TUM format from RTK/Mocap; evaluation via evo; "TF tree method" for trajectory in TUM). See `docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md` for trajectory/GT frame trace.
+
 ## ✓ Completed
 
 1. **Downloaded M3DGR Dynamic01 sequence** (2.2 GB, 175 seconds)

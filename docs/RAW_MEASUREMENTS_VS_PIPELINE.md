@@ -9,15 +9,16 @@ This doc captures what the SLAM pipeline **actually uses** from odom and IMU ver
 |-------|------------------|-------------------|
 | **Pose** (position x,y,z, orientation quat) | Parent frame (e.g. odom_combined); T_{parent←child} | **Yes** — pose relative to first odom, covariance → Gaussian evidence (odom_evidence) |
 | **Pose covariance** (6×6) | [x,y,z,roll,pitch,yaw] | **Yes** — inverse as information for pose evidence |
-| **Twist** (vx, vy, vz, wx, wy, wz) | **Child/body frame** (e.g. base_footprint) | **No** — not read anywhere |
+| **Twist** (vx, vy, vz, wx, wy, wz) | **Child/body frame** (e.g. base_footprint) | **Yes** — velocity factor + yaw-rate factor + pose–twist consistency |
 
-So: we use **pose only**. We never use **twist** (velocity in body frame, angular rate in body frame). That means we throw away:
-- Forward/lateral/vertical speed (vx, vy, vz)
-- Turn rate (wz) and roll/pitch rate (wx, wy)
+So: we use **pose + twist**. Twist is fused as:
+- **Body velocity factor** (vx, vy, vz) into the velocity block
+- **Yaw‑rate factor** (wz) against gyro‑derived yaw rate
+- **Pose–twist kinematic consistency** across the scan dt
 
 ### Implications
-- **Lateral (y)**: Our odom evidence is on full 6D pose. The odom *pose* encodes where the robot is; the *twist* would tell us “moving forward at vx, turning at wz”. We don’t use twist, so we don’t explicitly separate “forward motion” vs “lateral motion” from odom — we just get a pose observation. The dead-reckon comparison showed that odom *pose* over time (via vx + wz integration) gives small lateral y; IMU-only gives large lateral y from integrating lateral accel. The pipeline doesn’t use vx/wz to form a “forward/lateral” decomposition or to cross-check IMU.
-- **Consistency checks**: We could compare odom twist (vx, wz) with IMU (preintegrated delta, gyro) to detect disagreement (e.g. scale, frame, or bias) before fusing. We don’t.
+- **Lateral (y)**: Our odom evidence includes **pose + twist**. We still do not explicitly separate “forward motion” vs “lateral motion” beyond the twist factors, nor do we model a dedicated cross‑sensor lateral consistency likelihood.
+- **Consistency checks**: We now include yaw‑rate evidence (odom wz vs gyro‑derived yaw rate), but broader cross‑sensor consistency checks (e.g., integrated Δyaw vs odom Δyaw vs LiDAR Δyaw as an explicit likelihood) are still **diagnostics only**.
 
 ---
 
@@ -33,10 +34,10 @@ So: we use **pose only**. We never use **twist** (velocity in body frame, angula
 ### How we use it
 - **Gyro**: Integrated over scan-to-scan window → delta rotation → gyro evidence (rotation block) and preintegration (position/velocity delta).
 - **Accel**: (1) vMF on gravity direction (attitude); (2) preintegration with gravity cancellation → delta position/velocity.
-- We do **not** use: raw accel/gyro for explicit “lateral vs forward” decomposition, or for a direct cross-check with odom twist (e.g. “does integrated gyro match odom yaw change?” is only in diagnostics dyaw_gyro / dyaw_odom, not in the fusion model).
+- We do **not** use: raw accel/gyro for explicit “lateral vs forward” decomposition, or a full multi‑sensor Δyaw consistency likelihood (gyro vs odom vs LiDAR) beyond diagnostics.
 
 ### Implications
-- **Lateral (y)**: IMU lateral accel (ay in body) double-integrates to large y if there is bias; odom pose doesn’t provide lateral velocity, so we never “correct” IMU lateral drift with odom twist. The pipeline fuses pose observations and IMU evidence but doesn’t use odom vx/vy/wz to constrain velocity or to downweight inconsistent lateral motion.
+- **Lateral (y)**: IMU lateral accel (ay in body) double‑integrates to large y if there is bias; odom **does** provide vx/vy, which now constrains velocity, but we still do not explicitly decompose “forward vs lateral” motion or model cross‑sensor lateral consistency.
 - **Frame / bias**: compare_accel_odom showed accel (gravity direction) agrees with odom orientation (dot ~0.99). We don’t feed that agreement or its failure back into the model (e.g. as a soft constraint or a diagnostic that changes weighting).
 
 ---
@@ -131,6 +132,6 @@ So: we use **pose only**. We never use **twist** (velocity in body frame, angula
 ## Summary
 
 - **Odom**: Pipeline uses **pose + covariance** only. **Twist (vx, vy, vz, wx, wy, wz) is never used.** So we are not using “how fast and in which direction” from odom, only “where the robot is.” Raw pose covariance is read per message; use `tools/inspect_odom_covariance.py` to see if it is fixed or varies in your bag.
-- **IMU**: We use gyro and accel for preintegration, gravity (vMF), and gyro evidence. We do **not** use message covariances (we use IW). We do not explicitly use “forward vs lateral” or use odom twist to cross-check or constrain IMU.
+- **IMU**: We use gyro and accel for preintegration, gravity (vMF), and gyro evidence. We do **not** use IMU message covariances (we use IW). We do not explicitly use “forward vs lateral” or full cross‑sensor consistency beyond the yaw‑rate factor.
 - **LiDAR**: We use x, y, z, timebase, time_offset, ring, tag, and **range-based weights** (not intensity). We do **not** use intensity for weighting or features. We pass **zeros** for per-point covariance (message has none); measurement noise is IW-adaptive.
 - **Overall**: The raw measurements (and the dumps/scripts) show there is more structure (twist, body frame, lateral vs forward, intensity, consistency between sensors) that could be used for better fusion and insight; the current pipeline uses only part of the available information and may not be using it in the most informative way.

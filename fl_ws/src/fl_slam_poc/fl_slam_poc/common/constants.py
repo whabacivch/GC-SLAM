@@ -50,6 +50,9 @@ GC_K_HYP = 4  # Number of hypotheses, always present
 GC_HYP_WEIGHT_FLOOR = 0.0025  # 0.01 / K_HYP, minimum hypothesis weight
 GC_B_BINS = 48  # Atlas bins (fixed)
 GC_N_POINTS_CAP = 8192  # Max LiDAR points per scan per hypothesis (fixed)
+# IMU preintegration: slice to integration window and pad to this length (JIT fixed size).
+# At 200 Hz, 512 samples ≈ 2.5 s; covers typical scan-to-scan + deskew window.
+GC_MAX_IMU_PREINT_LEN = 512
 
 # Epsilon constants (domain stabilization)
 GC_EPS_PSD = 1e-12  # Minimum eigenvalue for PSD projection
@@ -87,6 +90,12 @@ GC_C_FROB = 1.0  # Frobenius strength blending constant
 # Anchor drift parameters (continuous reanchoring)
 GC_ANCHOR_DRIFT_M0 = 0.5  # Position drift threshold (meters)
 GC_ANCHOR_DRIFT_R0 = 0.2  # Rotation drift threshold (radians)
+
+# Smoothed initial anchor: IMU stability weights (no gates; smooth downweighting).
+# w_k ∝ exp(-c_gyro ‖ω_k‖²) · exp(-c_accel (‖a_k‖ - g)²)
+GC_INIT_ANCHOR_GYRO_SCALE = 0.5   # c_gyro: downweight high gyro magnitude (rad²/s²)
+GC_INIT_ANCHOR_ACCEL_SCALE = 2.0  # c_accel: downweight when ‖a‖ far from g (s⁴/m²)
+GRAVITY_MAG = 9.81  # m/s² for stability score
 
 # State slice indices (0-based, per spec Section 1.1)
 # NEW CONVENTION: [trans, rot] ordering (same as se3_jax and ROS)

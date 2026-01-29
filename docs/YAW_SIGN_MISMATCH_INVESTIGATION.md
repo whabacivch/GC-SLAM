@@ -1,17 +1,18 @@
 # Yaw Sign Mismatch Deep Dive Investigation
 
 **Date**: 2026-01-27  
-**Issue**: Gyro and Wahba (LiDAR) yaw increments have opposite signs 95.7% of the time  
-**Evidence**: Invariant test shows correlation -0.271 between gyro and Wahba yaw increments
+**Issue**: Gyro and **Matrix Fisher (LiDAR)** yaw increments have opposite signs 95.7% of the time (legacy test)  
+**Evidence**: Invariant test shows correlation -0.271 between gyro and LiDAR rotation increments (legacy Wahba test)
 
 ## Executive Summary
 
 The invariant test reveals a **clear sign inversion** in gyro processing:
-- **Gyro ↔ Wahba**: Only 4.3% same sign (67/70 scans opposite)
+- **Gyro ↔ Matrix Fisher**: Only 4.3% same sign (67/70 scans opposite) *(legacy Wahba run)*
 - **Correlation**: -0.271 (strong negative correlation = opposite directions)
-- **Mean magnitudes**: Gyro 37.80°, Wahba 41.99° (similar magnitudes, opposite signs)
+- **Mean magnitudes**: Gyro 37.80°, LiDAR 41.99° (similar magnitudes, opposite signs)
 
-This indicates the gyro is rotating in the **opposite direction** from what LiDAR observes.
+This indicates the gyro is rotating in the **opposite direction** from what LiDAR observes.  
+**Update:** The pipeline now uses **Matrix Fisher rotation** instead of Wahba; rerun the invariant test and treat “Wahba” below as “LiDAR rotation” unless otherwise stated.
 
 ---
 
@@ -154,7 +155,7 @@ gyro = np.array(
 
 ### Sign Mismatch Hypothesis
 
-If gyro and Wahba have **opposite signs**, one of these is wrong:
+If gyro and LiDAR rotation (Matrix Fisher) have **opposite signs**, one of these is wrong:
 
 **Option 1**: Gyro Z-axis sign is flipped
 ```python
@@ -179,7 +180,7 @@ gyro = self.R_base_imu @ gyro
 gyro[2] = -gyro[2]  # Negate yaw after rotation
 ```
 
-**Expected result**: Gyro and Wahba should have **same sign** (correlation becomes positive).
+**Expected result**: Gyro and LiDAR rotation (Matrix Fisher) should have **same sign** (correlation becomes positive).
 
 ---
 

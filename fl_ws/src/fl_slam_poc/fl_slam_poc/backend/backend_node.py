@@ -105,6 +105,45 @@ def _smooth_window_weight(dist: float, min_r: float, max_r: float, sigma: float)
     return float(w_min * w_max)
 
 
+def _polar_so3(M: np.ndarray) -> np.ndarray:
+    """Project 3x3 matrix to SO(3) via polar decomposition (one SVD). R_bar = polar(M)."""
+    U, _S, Vh = np.linalg.svd(M)
+    R = U @ Vh
+    if np.linalg.det(R) < 0:
+        U_c = U.copy()
+        U_c[:, -1] *= -1
+        R = U_c @ Vh
+    return R
+
+
+def _imu_stability_weights(
+    stamps: List[float],
+    imu_buffer: List[Tuple[float, np.ndarray, np.ndarray]],
+    c_gyro: float,
+    c_accel: float,
+    g: float,
+) -> List[float]:
+    """
+    Per-timestamp stability weight from IMU: w_k ∝ exp(-c_gyro ‖ω_k‖²) · exp(-c_accel (‖a_k‖ - g)²).
+    No gates; smooth downweighting when robot is ringing at bag start.
+    imu_buffer entries are (stamp_sec, gyro_3, accel_3).
+    """
+    if not imu_buffer:
+        return [1.0] * len(stamps)
+    ts = np.array([t for t, _, _ in imu_buffer], dtype=np.float64)
+    weights = []
+    for s in stamps:
+        i = np.argmin(np.abs(ts - s))
+        _t, gyro, accel = imu_buffer[i]
+        gyro = np.asarray(gyro, dtype=np.float64)
+        accel = np.asarray(accel, dtype=np.float64)
+        w_gyro = np.exp(-c_gyro * float(np.dot(gyro, gyro)))
+        a_norm = float(np.linalg.norm(accel))
+        w_accel = np.exp(-c_accel * (a_norm - g) ** 2)
+        weights.append(w_gyro * w_accel)
+    return weights
+
+
 def _pointfield_to_dtype(datatype: int) -> np.dtype:
     """Map sensor_msgs.msg.PointField datatype to numpy dtype."""
     if datatype == PointField.INT8:
@@ -266,6 +305,8 @@ class GoldenChildBackend(Node):
         self.declare_parameter("imu_gravity_scale", 1.0)
         # Deskew rotation-only mode: removes hidden IMU translation leak through deskew
         self.declare_parameter("deskew_rotation_only", False)
+        # Smoothed initial reference: buffer first K odom, then set first_odom_pose = aggregate (PIPELINE_DESIGN_GAPS §5.4.1)
+        self.declare_parameter("init_window_odom_count", 10)
 
     def _init_state(self):
         """Initialize Golden Child state."""
@@ -318,6 +359,8 @@ class GoldenChildBackend(Node):
         self.get_logger().info(f"IMU gravity scale: {self.config.imu_gravity_scale:.6f}")
         self.config.deskew_rotation_only = bool(self.get_parameter("deskew_rotation_only").value)
         self.get_logger().info(f"Deskew rotation-only: {self.config.deskew_rotation_only}")
+        self.init_window_odom_count = int(self.get_parameter("init_window_odom_count").value)
+        self.get_logger().info(f"Init window: first_odom_pose = aggregate of first {self.init_window_odom_count} odom")
 
         # Initialize hypotheses with identity prior
         self.hypotheses: List[BeliefGaussianInfo] = []
@@ -345,10 +388,13 @@ class GoldenChildBackend(Node):
         self.last_odom_twist = jnp.zeros(6, dtype=jnp.float64)  # (6,) [vx, vy, vz, wx, wy, wz]
         self.last_odom_twist_cov = 1e12 * jnp.eye(6, dtype=jnp.float64)  # (6,6) huge covariance
 
-        # First odom pose reference (for relative transformation)
-        # All subsequent odom poses will be transformed relative to this
-        self.first_odom_pose = None  # (6,) SE3 pose [trans, rotvec]
-        
+        # Explicit anchor A (anchor-to-world). Belief lives in anchor frame; export uses A.
+        # Provisional A0 = first odom sample (no scan drops); after K samples, A_smoothed from polar + weighted mean.
+        self.first_odom_pose = None  # (6,) SE3 = A0 then unchanged; odom_relative = first_odom^{-1} ∘ odom_absolute
+        self.odom_init_buffer: List[Tuple[float, jnp.ndarray]] = []  # (stamp, pose_6d) for first K
+        self.anchor_correction = se3_identity()  # (6,) SE3: pose_export = anchor_correction ∘ pose_belief (identity until A_smoothed set)
+        self._anchor_smoothed_done = False  # True after first K odom → A_smoothed and anchor_correction set
+
         # IMU buffer for high-rate prediction
         # CRITICAL: Must be large enough to cover scan-to-scan intervals.
         # At 200Hz IMU and up to 20s scan intervals, need ~4000 samples.
@@ -520,24 +566,52 @@ class GoldenChildBackend(Node):
             jnp.array([pos.x, pos.y, pos.z], dtype=jnp.float64),
         )
         
-        # Store first odom pose as reference (makes it effectively at origin)
+        # Explicit anchor: provisional A0 on first odom (no scan drops); after K samples, set anchor_correction from A_smoothed
         if self.first_odom_pose is None:
-            self.first_odom_pose = odom_pose_absolute
-            # One-shot log to audit frame semantics and yaw sign.
-            yaw_deg = float(R_parent_child.as_euler("xyz", degrees=True)[2])
+            self.first_odom_pose = odom_pose_absolute  # A0 = first sample (provisional anchor)
+            self.odom_init_buffer.append((stamp_sec, odom_pose_absolute))
             self.get_logger().info(
-                "First odom pose stored as reference: "
-                f"frame_id='{msg.header.frame_id}' child_frame_id='{msg.child_frame_id}' "
-                f"trans=({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}) yaw={yaw_deg:+.2f}deg "
-                "(interpreting pose as T_parent<-child; no inversion)"
+                "Anchor A0 (provisional) set from first odom: "
+                f"frame_id='{msg.header.frame_id}' child_frame_id='{msg.child_frame_id}'"
             )
-        
-        # Transform odom to be relative to first odom pose
-        # odom_relative = first_odom^{-1} ∘ odom_absolute
-        # This makes the first odom effectively at origin
+        else:
+            if not self._anchor_smoothed_done:
+                self.odom_init_buffer.append((stamp_sec, odom_pose_absolute))
+            if not self._anchor_smoothed_done and len(self.odom_init_buffer) >= self.init_window_odom_count:
+                # Closed-form smoothed anchor: weighted t̄ + polar(M) for R̄ (PIPELINE_DESIGN_GAPS §5.4.1)
+                A0 = self.first_odom_pose
+                stamps = [s for s, _ in self.odom_init_buffer]
+                poses = [p for _, p in self.odom_init_buffer]
+                weights = _imu_stability_weights(
+                    stamps, self.imu_buffer,
+                    constants.GC_INIT_ANCHOR_GYRO_SCALE,
+                    constants.GC_INIT_ANCHOR_ACCEL_SCALE,
+                    constants.GRAVITY_MAG,
+                )
+                trans_mean = np.average(
+                    [np.array(p[:3], dtype=np.float64) for p in poses],
+                    axis=0, weights=weights,
+                )
+                R_matrices = [Rotation.from_rotvec(np.array(p[3:6], dtype=np.float64)).as_matrix() for p in poses]
+                M = np.average(R_matrices, axis=0, weights=weights)
+                R_polar = _polar_so3(M)
+                rotvec_mean = Rotation.from_matrix(R_polar).as_rotvec()
+                A_smoothed = se3_from_rotvec_trans(
+                    jnp.array(rotvec_mean, dtype=jnp.float64),
+                    jnp.array(trans_mean, dtype=jnp.float64),
+                )
+                self.anchor_correction = se3_compose(se3_inverse(A_smoothed), A0)
+                self.odom_init_buffer.clear()
+                self._anchor_smoothed_done = True
+                yaw_deg = float(Rotation.from_matrix(R_polar).as_euler("xyz", degrees=True)[2])
+                self.get_logger().info(
+                    f"Anchor smoothed: K={self.init_window_odom_count}, A_smoothed set; "
+                    f"trans=({trans_mean[0]:.3f}, {trans_mean[1]:.3f}, {trans_mean[2]:.3f}) yaw={yaw_deg:+.2f}deg"
+                )
+
+        # odom_relative = first_odom^{-1} ∘ odom_absolute (belief stays in A0 frame)
         first_odom_inv = se3_inverse(self.first_odom_pose)
         self.last_odom_pose = se3_compose(first_odom_inv, odom_pose_absolute)
-        
         self.last_odom_stamp = stamp_sec
         # Pose covariance is row-major 6x6: [x,y,z,roll,pitch,yaw]
         # Note: Covariance is unchanged by the relative transformation (same uncertainty)
@@ -678,20 +752,30 @@ class GoldenChildBackend(Node):
         # Apply forgetting to map stats
         self.map_stats = apply_forgetting(self.map_stats, self.forgetting_factor)
 
-        # Build fixed-size IMU arrays (pads with zeros; contributions are controlled by continuous weights only)
-        M = self.max_imu_buffer
-        imu_stamps = np.zeros((M,), dtype=np.float64)
-        imu_gyro = np.zeros((M, 3), dtype=np.float64)
-        imu_accel = np.zeros((M, 3), dtype=np.float64)
-        tail = self.imu_buffer[-M:]
-        for i, (t, g, a) in enumerate(tail):
+        # Slice IMU to integration window only (PIPELINE_DESIGN_GAPS §5.6): avoids 4000-step scan.
+        # Window = [min(t_last_scan, scan_start), max(t_scan, scan_end)]; pad to GC_MAX_IMU_PREINT_LEN.
+        t_min = min(t_last_scan, scan_start_time)
+        t_max = max(t_scan, scan_end_time)
+        eps_t = 1e-9
+        window = [
+            (t, g, a)
+            for (t, g, a) in self.imu_buffer
+            if t_min - eps_t <= t <= t_max + eps_t
+        ]
+        if len(window) > constants.GC_MAX_IMU_PREINT_LEN:
+            window = window[-constants.GC_MAX_IMU_PREINT_LEN:]
+        M_preint = constants.GC_MAX_IMU_PREINT_LEN
+        imu_stamps = np.zeros((M_preint,), dtype=np.float64)
+        imu_gyro = np.zeros((M_preint, 3), dtype=np.float64)
+        imu_accel = np.zeros((M_preint, 3), dtype=np.float64)
+        for i, (t, g, a) in enumerate(window):
             imu_stamps[i] = float(t)
             imu_gyro[i, :] = np.array(g)
             imu_accel[i, :] = np.array(a)
         imu_stamps_j = jnp.array(imu_stamps, dtype=jnp.float64)
         imu_gyro_j = jnp.array(imu_gyro, dtype=jnp.float64)
         imu_accel_j = jnp.array(imu_accel, dtype=jnp.float64)
-        
+
         # Diagnostic: log IMU buffer state
         n_valid_imu = int(np.sum(imu_stamps > 0.0))
         if n_valid_imu > 0:
@@ -913,8 +997,9 @@ class GoldenChildBackend(Node):
             raise
 
     def _publish_state_from_pose(self, pose_6d: jnp.ndarray, stamp_sec: float):
-        """Publish state from a 6D pose [trans, rotvec]."""
-        rotvec, trans = se3_to_rotvec_trans(pose_6d)
+        """Publish state from a 6D pose [trans, rotvec] in anchor frame. Export uses anchor_correction ∘ pose."""
+        pose_export = se3_compose(self.anchor_correction, pose_6d)
+        rotvec, trans = se3_to_rotvec_trans(pose_export)
         R = Rotation.from_rotvec(np.array(rotvec))
         quat = R.as_quat()
         

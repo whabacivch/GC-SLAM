@@ -89,3 +89,6 @@ gc_backend:
 
     # Map forgetting
     forgetting_factor: 0.99
+
+    # Smoothed initial anchor (PIPELINE_DESIGN_GAPS §5.4.1): buffer first K odom, then A_smoothed = weighted t̄ + polar(R); export = anchor_correction ∘ pose_belief
+    init_window_odom_count: 10

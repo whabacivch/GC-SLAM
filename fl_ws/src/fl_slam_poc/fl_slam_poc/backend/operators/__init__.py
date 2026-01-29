@@ -40,22 +40,6 @@ from fl_slam_poc.backend.operators.kappa import (
     KappaResult,
 )
 
-from fl_slam_poc.backend.operators.wahba import (
-    wahba_svd,
-    WahbaResult,
-)
-
-from fl_slam_poc.backend.operators.translation import (
-    translation_wls,
-    TranslationWLSResult,
-)
-
-from fl_slam_poc.backend.operators.lidar_evidence import (
-    lidar_quadratic_evidence,
-    LidarEvidenceResult,
-    MapBinStats as LidarMapBinStats,
-)
-
 from fl_slam_poc.backend.operators.odom_evidence import (
     odom_quadratic_evidence,
     OdomEvidenceResult,
@@ -115,16 +99,6 @@ __all__ = [
     # Kappa
     "kappa_from_resultant_v2",
     "KappaResult",
-    # Wahba
-    "wahba_svd",
-    "WahbaResult",
-    # Translation
-    "translation_wls",
-    "TranslationWLSResult",
-    # LiDAR evidence
-    "lidar_quadratic_evidence",
-    "LidarEvidenceResult",
-    "LidarMapBinStats",
     # Odom evidence
     "odom_quadratic_evidence",
     "OdomEvidenceResult",

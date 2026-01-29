@@ -1,8 +1,17 @@
 # Pipeline Design Gaps (Known Limitations)
 
-This doc records **known design gaps** in the Golden Child SLAM v2 pipeline, based on the raw-measurements audit, message trace, and covariance inspection. The pipeline underuses available information and treats measurements as more independent than they are; the 6D pose evidence structure does not reflect kinematics or twist.
+This doc records **known design gaps** in the Golden Child SLAM v2 pipeline, based on the raw-measurements audit, message trace, and covariance inspection.
 
-**References:** `docs/RAW_MEASUREMENTS_VS_PIPELINE.md`, `docs/PIPELINE_TRACE_SINGLE_DOC.md`, `docs/TRACE_Z_EVIDENCE_AND_TRAJECTORY.md`, `tools/inspect_odom_covariance.py`.
+## Audit status (source of truth)
+
+**Code is the source of truth.** This document was audited against the currently running backend pipeline code on **2026-01-29**.
+
+Key code anchors (actual behavior):
+- Backend sensor handling: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py` (IMU buffering at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:466`, odom twist read at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:547`, LiDAR parsing at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:129`).
+- Per-scan evidence assembly: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py` (time-resolved accel evidence at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:713`, planar translation at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:633`, planar priors at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`, odom twist evidence at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:884`).
+- Map update planar z fix: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py` (sets `t_hat[2]=0` at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`).
+
+**References (design context, may be stale vs code):** `docs/RAW_MEASUREMENTS_VS_PIPELINE.md`, `docs/PIPELINE_TRACE_SINGLE_DOC.md`, `docs/TRACE_Z_EVIDENCE_AND_TRAJECTORY.md`, `tools/inspect_odom_covariance.py`.
 
 ---
 
@@ -11,8 +20,8 @@ This doc records **known design gaps** in the Golden Child SLAM v2 pipeline, bas
 | Source | What we use | What we leave on the table |
 |--------|-------------|----------------------------|
 | **Odom** | Pose (x,y,z, quat) + pose covariance (6×6). **Twist (vx, vy, vz, wx, wy, wz) + twist covariance (6×6)** — **now used** (velocity factor, yaw-rate factor, pose–twist kinematic consistency; see Phase 2 odom twist evidence). | — (twist is now read and fused.) |
-| **IMU** | Gyro, accel (scaled, rotated to base); preintegration; vMF gravity; gyro evidence; preint factor. | **Message covariances** (orientation, angular_velocity, linear_acceleration) — not read in backend; we use IW only. **Orientation** (if present) — not used. No explicit forward/lateral decomposition. |
-| **LiDAR** | x, y, z, timebase, time_offset, ring, tag; range-based weights. | **Intensity (reflectivity)** — parsed for stride but not returned or used for weighting/features. **Per-point covariance** — message has none; we pass zeros. |
+| **IMU** | Gyro, accel (scaled, rotated to base); preintegration; vMF gravity; gyro evidence; preint factor. | **Message covariances** (orientation, angular_velocity, linear_acceleration) — carried through the frontend but not consumed by the backend (backend `on_imu()` reads angular_velocity and linear_acceleration only; see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:466`). **Orientation** (if present) — not used in backend. No explicit forward/lateral decomposition. |
+| **LiDAR** | x, y, z, timebase, time_offset, ring, tag; range-based weights; bucket reliability (ring/tag). | **Intensity (reflectivity)** — present in PointCloud2 schema but not returned/used by the backend parser (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:129`). **Per-point covariance** — message has none; backend passes zeros (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:555`). |
 
 So we still underuse IMU (no message cov, no orientation) and LiDAR (no intensity). Odom twist is now used.
 
@@ -25,7 +34,12 @@ Physically, **pose and twist are related** by kinematics:
 - **dp/dt = R @ v** (world velocity = R × body velocity)
 - **dR/dt = R @ ω̂** (orientation rate from body angular rate)
 
-So if we are moving forward (vx > 0) and yawing (wz ≠ 0), we **should** see motion in x and y over time. The odom message gives us both **pose** and **twist** at the same time; they are **not** independent. **We now use twist** (Phase 2: odom velocity evidence, yaw-rate evidence, pose–twist kinematic consistency). Remaining: we do not yet feed gyro ∫ vs odom Δyaw agreement into the fusion model (diagnostics only). Previously: we never said “this pose change is consistent (or not) with the reported velocity and yaw rate.”
+So if we are moving forward (vx > 0) and yawing (wz ≠ 0), we **should** see motion in x and y over time. The odom message gives us both **pose** and **twist** at the same time; they are **not** independent.
+
+**What the code does now (partial fix):**
+- Adds odom twist evidence (velocity factor + yaw-rate factor) and a pose–twist kinematic consistency factor (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:884`).
+
+**Remaining gap:** we still do not treat odom pose and odom twist as a single *joint* observation with a declared pose–twist cross-covariance. We also do not include an explicit likelihood term for **gyro-integrated Δyaw vs odom Δyaw**; yaw increment agreement is logged as diagnostics (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:756`) but not fused as evidence.
 Similarly, **odom pose** and **IMU preintegration** are related: integrated gyro should match odom yaw change; integrated accel + gravity should be consistent with odom position change. We log dyaw_gyro / dyaw_odom / dyaw_wahba for diagnostics but **do not** feed that consistency (or inconsistency) into the fusion model. So we treat odom pose, IMU gyro, and IMU accel as separate evidence streams without modeling their dependence.
 
 ---
@@ -39,13 +53,13 @@ Current design:
 - **Covariance:** Whatever the bag publishes (in our bag: diagonal 0.001, 0.001, 1e6, 1e6, 1e6, 1000 in [x,y,z,roll,pitch,yaw] with units m² and rad²; later messages can switch to different diagonals, e.g. yaw 1e-9). We do **not**:
   - Use twist to shape or validate the pose residual (e.g. “pose change should align with integrated twist”).
   - Model pose–twist coupling (e.g. joint observation on [pose; twist] or pose given twist).
-  - Enforce planar structure (e.g. z, roll, pitch weakly or structurally constrained) beyond what the message covariance says.
+  - Enforce planar structure inside the **odom pose factor** beyond what the message covariance says (the pipeline does add separate planar priors on z and v_z; see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`).
   - Use forward/lateral decomposition (vx, vy, wz) so that motion in x/y is tied to “moving forward while turning.”
 
 So the “pose 6 matrix of evidence” is just **inverse(message 6×6 pose covariance)** applied to a 6D pose error. It is not designed around:
 
 - Kinematic coupling (pose ↔ twist).
-- Use of twist (vx, vy, vz, wx, wy, wz).
+- Joint pose↔twist modeling (including pose–twist cross-covariance and conditioning).
 - Consistency with IMU (gyro ∫ vs Δyaw; velocity vs integrated accel).
 
 That is what we mean by “poorly designed”: it uses only part of the odom message and does not account for how pose and twist (and IMU) depend on each other.
@@ -54,58 +68,125 @@ That is what we mean by “poorly designed”: it uses only part of the odom mes
 
 ## 4. What we are not doing that we need for a better design
 
-1. **Odom twist (DONE)** — We now read vx, vy, vz, wx, wy, wz and twist covariance; feed them as velocity factor, yaw-rate factor, and pose–twist kinematic consistency. Remaining: use gyro ∫ vs odom Δyaw inside the model.
+1. **Odom twist (DONE)** — We now read vx, vy, vz, wx, wy, wz and twist covariance and feed velocity/yaw-rate/pose–twist consistency factors (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:884`).
 
-2. **Model pose–twist dependence**
+2. **Planar z / map-z feedback break (DONE)** — The pipeline adds planar priors on z and v_z (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`), and the map update forces `t_hat[2]=0` before writing scan stats into the map (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`).
+
+3. **Time-resolved accel tilt evidence (DONE)** — Accel evidence is time-resolved with transport-consistency weighting (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:713`).
+
+4. **Model pose–twist dependence (still missing as a declared joint observation)**
    - Either: joint observation on [pose; twist] with a covariance that reflects kinematics, or
    - Pose observation conditioned on twist (e.g. “pose change given twist” residual), so we don’t treat pose as independent of how the robot is moving.
 
-3. **Reflect kinematics in the evidence**
-   - “Moving forward + yaw” should imply motion in x and y; the 6D evidence (or a richer observation model) should be structured so that translation and rotation are consistent with velocity and yaw rate (e.g. dp/dt = R @ v, dR/dt = R @ ω̂).
+5. **Reflect kinematics in the evidence (still incomplete)**
+   - “Moving forward + yaw” should imply motion in x and y; the observation model should enforce that structure beyond separate scalar-ish factors.
 
-4. **Use forward/lateral structure**
-   - Decompose motion into forward (vx), lateral (vy), and yaw (wz) from odom; optionally from IMU (ax, ay in body). Fuse in a way that respects that structure (e.g. separate or coupled blocks for forward vs lateral vs yaw) instead of one opaque 6D pose Gaussian.
+6. **Use forward/lateral structure (still missing)**
+   - Decompose motion into forward (vx), lateral (vy), and yaw (wz) from odom; optionally from IMU (ax, ay in body). Fuse in a way that respects that structure instead of one opaque 6D pose Gaussian.
 
-5. **Consistency between sensors**
-   - Use dyaw_gyro vs dyaw_odom vs dyaw_wahba (and, if added, velocity consistency) inside the model: e.g. soft constraints, or weighting that depends on agreement, not only diagnostics.
+7. **Consistency between sensors (still mostly diagnostics)**
+   - Use dyaw_gyro vs dyaw_odom vs dyaw_mf agreement inside the model (currently logged as diagnostics; see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:756`).
 
-6. **Use more of the raw message**
-   - Odom: twist + twist covariance — **now used**.
-   - IMU: message covariances (orientation, angular_velocity, linear_acceleration) — not read in backend; use IW only.
-   - LiDAR: intensity — parsed for stride but not returned or used for weighting/features.
+8. **Use more of the raw message (still missing)**
+   - IMU: message covariances and orientation are not consumed by the backend (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:466`).
+   - LiDAR: intensity is present in the schema but not returned/used by the backend parser (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:129`).
 
 ---
 
 ## 5. Summary
 
-- **Odom:** Twist and twist covariance **are now used**. **Underuse of info:** We do not use IMU message covariances or orientation; we do not use LiDAR intensity for weighting or features.
-- **Independence assumption:** We treat odom pose, IMU evidence, and LiDAR evidence as separate; we do not model kinematic coupling (pose ↔ twist) or consistency (e.g. gyro ∫ vs odom Δyaw).
-- **6D pose evidence:** It is “pose residual + inverse(message 6×6 covariance)” with no twist, no pose–twist coupling, and no design for planar or forward/lateral structure. So the pose 6 matrix of evidence is poorly matched to what we need.
+- **Odom:** Twist and twist covariance **are now used** (velocity/yaw-rate/pose–twist consistency factors). **Underuse of info:** We do not use IMU message covariances or orientation; we do not use LiDAR intensity for weighting or features.
+- **Independence assumption:** We now couple pose and twist via kinematic consistency; we still do not feed dyaw_gyro / dyaw_odom / dyaw_mf agreement into fusion (diagnostics only).
+- **6D pose evidence:** Odom pose evidence remains “pose residual + inverse(message 6×6 covariance)” and is supplemented by separate twist factors and planar priors. Forward/lateral structure and declared joint pose–twist covariance remain open design gaps.
 
-These gaps should be addressed when redesigning the observation model and evidence structure (pose + twist, kinematics, and use of all relevant fields from the raw messages).
+These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can be addressed in future observation-model work.
+
+---
+
+### 5.4.1 Initial alignment: smoothed reference from first odom/IMU (design note)
+
+**Idea:** Right now we anchor the whole trajectory to the **first single odom message** (`first_odom_pose = odom_pose_absolute` on first callback). If that sample is noisy or an outlier (bag start, robot not yet stable), the reference frame is biased and the entire trajectory is shifted/rotated relative to ground truth. Evaluation then shows a mix of that **initial anchor error** and real drift.
+
+**Data availability:** In typical bags (e.g. M3DGR Dynamic01), IMU and odom start before or with the first LiDAR. At 200 Hz IMU and ~10 Hz LiDAR, even a short delay to first scan (e.g. 0.5 s) gives **on the order of 100 IMU samples** before the first LiDAR callback; we also get several odom messages in that window. So we already have plenty of pre–first-scan data to form a smoothed initial reference (mean position + quaternion mean over first K odom, optionally gravity/bias from first T_init seconds of IMU) without delaying the pipeline.
+
+**Proposal:** Form the initial reference from a **fixed window** of the first few odom (and optionally IMU) measurements, instead of a single sample.
+
+- **Odom:** Buffer the first K odom poses (or first T_init seconds). Then set `first_odom_pose` to an **aggregate** of that buffer, e.g.:
+  - Translation: mean of positions.
+  - Orientation: mean quaternion (e.g. Markley quaternion mean) of the buffer poses.
+  Then all subsequent odom is still `odom_relative = first_odom^{-1} ∘ odom_absolute`; we only change how `first_odom_pose` is chosen.
+- **IMU (optional):** Use the first T_init seconds of IMU (when the robot is often stationary) to compute mean accel (gravity direction) and mean gyro (bias). That could refine initial orientation or `T_base_imu` before we start integrating, instead of relying on a single sample or the preconfigured extrinsic only.
+
+**By construction:** No heuristic gating. Define a **fixed initialization window** (e.g. `init_window_sec` or `init_window_odom_count`) and a **fixed procedure** (e.g. mean position + quaternion mean over that window). Pipeline does not run (or odom is not used for reference) until the window is full; then we set the reference once and proceed. No "if first N then smooth else don't" — we always use the same init procedure. The window size is a **prior/budget** (e.g. 0.5 s or 10 odom messages), not data-dependent.
+
+**Where it would go:** `backend_node.py`: in the odom callback, if `first_odom_pose` is not yet set, either (a) buffer this pose and, once the buffer has K poses (or T_init has elapsed), compute the aggregate and set `first_odom_pose`, or (b) delay starting the pipeline until the init window is full, then set reference and start. LiDAR scans that arrive before the reference is set would need a defined policy (e.g. drop, or use identity relative to first odom and then re-anchor when reference is set — the latter is trickier). Prefer (a) with a small buffer (e.g. 10 odom messages) so the first few scans still get odom (e.g. relative to first sample) and we only commit the **reference** once the buffer is full; that requires defining "relative to first sample" vs "relative to smoothed reference" for the interval before the reference is set (e.g. use first sample as temporary reference, then switch to smoothed reference and apply a constant correction to existing state — or simply delay pipeline start until smoothed reference is ready).
+
+**Why it might help:** A more stable initial frame could reduce the constant rotation/translation offset we see vs GT (part of which may be "first sample was bad") and improve time alignment in evaluation. It does not fix drift over time but can improve the anchor.
+
+**Implemented (2026-01-28):** Explicit anchor A; provisional A0 on first odom (no scan drops); after K odom, A_smoothed = weighted t̄ + polar(M) with IMU stability weights; export uses `anchor_correction ∘ pose_belief`. See `backend_node.py` (A0, odom_init_buffer, anchor_correction, _polar_so3, _imu_stability_weights), `constants.py` (GC_INIT_ANCHOR_*), `gc_unified.yaml` (init_window_odom_count).
+
+---
+
+### 5.5 Frame or axis convention mismatch (investigation)
+
+**Report first (code vs docs):**
+
+- **BAG_TOPICS_AND_USAGE.md** (line 79): "`livox_frame` uses **Z-down** convention; requires 180° rotation about X-axis to convert to Z-up `base_footprint` frame."
+- **FRAME_AND_QUATERNION_CONVENTIONS.md** (lines 72, 165–177): "`livox_frame` is **Z-up** for this dataset (ground normal points +Z)" and "`T_base_lidar` rotation is identity (rotvec=[0,0,0])."
+- **Code:** `backend_node.py:585` applies `pts_base = R_base_lidar @ pts_np.T + t_base_lidar`; `gc_rosbag.launch.py:149` and `gc_unified.yaml:78` set `T_base_lidar = [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]` (rotation identity). So the code assumes livox_frame is Z-up.
+
+**Observed (evaluation):** See TRACE_TRAJECTORY_AND_GROUND_TRUTH.md for frame correction (wheel vs body, anchor smoothing).
+
+**Interpretation:** If livox_frame is actually Z-down and we use identity, all geometry (points, gravity alignment) is Z-flipped; the estimated pose would be in a frame that is 180° about X from base_footprint.
+
+**Recommendation:** Run `tools/diagnose_coordinate_frames.py` on the bag; align `FRAME_AND_QUATERNION_CONVENTIONS.md` and `T_base_lidar` with the result (see TRACE_TRAJECTORY_AND_GROUND_TRUTH.md for export/GT frame).
+
+---
+
+### 5.6 Compute bottleneck on scan throughput
+
+**What limits how many scans we can process per second:**
+
+1. **IMU preintegration `jax.lax.scan` over a fixed 4000-step buffer** (dominant)
+   - **Code:** `backend_node.py` passes `imu_stamps_j`, `imu_gyro_j`, `imu_accel_j` of length `M = max_imu_buffer = 4000` every scan (`backend_node.py:755–767`). `preintegrate_imu_relative_pose_jax` in `imu_preintegration.py` runs `jax.lax.scan(step, ...)` over that full length.
+   - **Per scan:** The pipeline calls preintegration **twice per hypothesis** (deskew within-scan + scan-to-scan interval). With `K_HYP = 4` that is **4 × 2 × 4000 = 32,000** scan iterations per LiDAR scan. Only a small fraction of slots (e.g. ~20–200) have non-zero weight; the rest are zero-padded. So the bottleneck is **fixed-cost 4000-length scan** instead of a variable-length scan over only the valid time window.
+   - **Mitigation (by construction):** Slice IMU arrays to the actual integration window (e.g. indices where `t_last_scan ≤ stamp ≤ t_scan` for scan-to-scan, and similarly for within-scan deskew) and pass only that slice so `jax.lax.scan` runs over ~20–200 steps instead of 4000. Requires fixed upper bound on window size for JIT (e.g. max 512 or 1024 steps) and padding to that size if smaller.
+
+2. **Top-level pipeline not JITted**
+   - `process_scan_single_hypothesis` (`pipeline.py:275`) is a **plain Python function**. Each scan triggers many small JIT kernel dispatches (preintegrate, Wahba SVD, Matrix Fisher, Cholesky solve, etc.). Python overhead and multiple kernel launches per scan add up. A single JIT-compiled “scan pipeline” (with fixed sizes) would reduce dispatch and could improve throughput.
+
+3. **First-scan JIT compilation**
+   - The eval script notes “First-scan JIT compilation may take ~30s”. The first time each JIT kernel is hit (preintegrate, Wahba, evidence, etc.) it is traced and compiled. One-time cost; subsequent scans use cached compilations.
+
+4. **Point cloud size**
+   - Binning and soft assignment are vectorized over N points (e.g. 10k–50k). Cost is O(N × B_BINS). Typically secondary to the 4000-step IMU scan unless N is very large.
+
+**Summary:** The main compute bottleneck was the **fixed 4000-step IMU preintegration scan**. **Fixed:** IMU is now sliced to the integration window `[min(t_last_scan, scan_start), max(t_scan, scan_end)]`, capped at `GC_MAX_IMU_PREINT_LEN = 512`, and padded to 512; preintegration runs over 512 steps instead of 4000 (`backend_node.py`, `constants.GC_MAX_IMU_PREINT_LEN`). **Wahba removed:** Pipeline uses Matrix Fisher only; `wahba.py` moved to `archive/legacy_operators/`, removed from operators `__init__` and tests.
 
 ---
 
 ## 6. Operator-by-operator improvement plan
 
-Below is a concrete improvement plan that (1) fixes the known structural failures in the current single-hypothesis pipeline, (2) extends it cleanly to **MHT**, and (3) shows where **2nd/3rd-order tensors, higher derivatives, and information-geometry / Hessian / Monge–Ampère ideas** can be used—separating **production-safe** from **high-risk research**.
+Below is a concrete improvement plan that (1) fixes the known structural failures in the current fixed-cost, single-path pipeline (run per hypothesis), (2) extends it cleanly to **MHT**, and (3) shows where **2nd/3rd-order tensors, higher derivatives, and information-geometry / Hessian / Monge–Ampère ideas** can be used—separating **production-safe** from **high-risk research**.
 
 ### 6.0 What the pipeline currently is (and why it fails)
 
-**Key structural facts (from this doc and the trace):**
+**Key structural facts (from current code):**
 
 - The pipeline is **fixed-cost and branch-free**: every LiDAR scan runs the same steps in order.
 - State is a **22D tangent chart** with blocks [t, θ, v, b_g, b_a, dt, ex].
-- **Odom twist is available but not used anywhere.**
-- Accel evidence is a **single vMF on mean direction**, Laplace-approximated and **PSD-projected**, placed only in the rotation block (pitch/roll only).
-- LiDAR translation WLS is done in **full 3D**, with isotropic measurement noise, and the resulting **z** is fused strongly—then baked into the map, creating a feedback loop.
+- Runtime always maintains **K_HYP=4 hypotheses** (fixed budget) and combines them via a continuous barycenter projection; current code keeps **uniform hypothesis weights** (no scoring/prune/merge yet).
+- **Odom twist is used**: velocity factor + yaw-rate factor + pose–twist kinematic consistency factor (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:884`).
+- Accel evidence is **time-resolved** with transport-consistency weighting; it is still vMF-derived, Laplace-approximated, and **PSD-projected**, and it lives in the rotation block only (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:713`).
+- LiDAR evidence uses **Matrix Fisher rotation** + **planarized translation evidence** with self-adaptive z precision scaling (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:613` and `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/matrix_fisher_evidence.py:502`).
+- The z feedback loop (“map z = belief_z”) is explicitly broken: map update uses `t_hat[2]=0` (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`), while belief z is constrained by always-on planar priors (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`).
 - Fusion is **additive info-form** with an **α** computed from pose-block conditioning/support + excitation scaling on dt/extrinsic, then PSD projection.
 
 **Failure modes implied (model-class errors, not “bugs”):**
 
-1. **Z instability is designed behavior:** z is treated like x,y; LiDAR injects strong z; map stores belief_z; next scan aligns to that map and reinforces it.
-2. **Dynamics are underconstrained** because the strongest kinematic measurements (odom twist) are ignored.
-3. **Nonlinear likelihoods are forced into a quadratic mold** (vMF → Laplace + PSD projection). That is workable only when the approximation is locally valid; otherwise it produces overconfident wrong pulls.
+1. **Cross-sensor dependence is still under-modeled:** several “agreement checks” (e.g., gyro Δyaw vs odom Δyaw vs LiDAR Δyaw) are diagnostics rather than likelihood terms (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:756`).
+2. **Nonlinear likelihoods are still quadraticized** (vMF → Laplace + PSD projection; Matrix Fisher → Gaussian info embedding). When the local approximation is invalid, this can produce overconfident wrong pulls.
+3. **Available uncertainty metadata is still ignored:** IMU message covariances/orientation and LiDAR intensity are not consumed by the backend (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:466`, `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py:129`).
 
 ---
 
@@ -117,15 +198,15 @@ Below is a concrete improvement plan that (1) fixes the known structural failure
 
 **Changes:**
 
-- **TranslationWLS in (x,y) only** (or equivalently, inflate t_cov[2,2] → huge; zero-out z rows/cols before building L_lidar). The trace explicitly calls out isotropic 3D WLS as the z screw-up.
-- Add a **planar process prior:** set Q_z small, enforce v_z ≈ 0 (soft), and/or add a direct factor z = z_0 if the platform is level. The trace says we never damp z / never enforce v_z = 0.
-- **Map update must not reinforce vertical drift:** store map in a local tangent plane; or project bin centroids onto the plane before accumulation; or maintain a separate map-z gauge that does not equal belief_z. The trace shows “map z = belief_z + …” as the feedback loop.
+- **DONE in code:** planar translation evidence with downweighted z precision (self-adaptive) replaces full-3D isotropic translation evidence (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/matrix_fisher_evidence.py:502`).
+- **DONE in code:** always-on planar priors `z ≈ z_ref` and `v_z ≈ 0` (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`).
+- **DONE in code:** map update prevents z feedback by forcing the map translation to live in z=0 (`fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`).
 
 **Acceptance test:** z stays bounded near the true robot height instead of running to -50 to -80 m (as in the trace).
 
-#### 6.1.2 Add the odom twist factors (currently throwing away the best constraints)
+#### 6.1.2 Odom twist factors (implemented)
 
-**Add 3 new evidence operators:**
+**Implemented 3 evidence operators:**
 
 1. **Body velocity factor** (child frame): \( r_v = v_b - v^{\text{odom}}_b \). Inject into the **vel block [6:9]**, with cov from wheel model (or learned IW).
 2. **Yaw-rate factor:** \( r_{\omega_z} = (\omega_{b,z} - b_{g,z}) - \omega^{\text{odom}}_z \). Inject into **gyro-bias / rotation dynamics** (helps stabilize yaw under turning).
@@ -133,13 +214,15 @@ Below is a concrete improvement plan that (1) fixes the known structural failure
 
 **Net effect:** Stop asking LiDAR to do everything; reduce sensitivity to wrong scan-matching.
 
+**Status:** Implemented in code (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:884` and `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/odom_twist_evidence.py`).
+
 #### 6.1.3 Replace “single accel mean vMF” with time-resolved, consistency-weighted tilt evidence
 
-**Current model:** One vMF on mean direction → Laplace at δθ = 0 → PSD projection; only constrains pitch/roll.
+**Current model (code):** Time-resolved vMF-style accel direction evidence with transport-consistency weighting → Laplace at δθ = 0 → PSD projection; only constrains pitch/roll (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:713`).
 
-**Keep vMF, but fix the data model:** Instead of collapsing all samples to one mean direction, compute a reliability weight per IMU sample (or short window) from gyro–accel transport consistency: \( e_k = \dot f_{b,k} + \omega_{b,k} \times f_{b,k} \). Aggregate a **weighted directional likelihood:** high weight when |e_k| small (gravity-dominant), low weight when dynamic/slip/vibration. This gives continuous soft weighting instead of hoping the single mean vector represents “gravity.”
+**Status:** Implemented (time-resolved, transport-consistency-weighted tilt evidence; see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:713`).
 
-**Also fix the approximation:** Stop PSD-projecting as the default repair. If curvature is too high, use either a robust likelihood (Student-t directional) or a better local approximation (see 3rd-order section).
+**Remaining:** PSD projection is mandated by the branch-free numeric contract. The practical goal is to reduce the *magnitude* of PSD projection deltas by improving the local approximation and/or using robust likelihoods upstream (e.g., Student‑t directional), rather than treating PSD projection as a “repair step.”
 
 #### 6.1.4 Make evidence strength depend on measurement quality
 
@@ -151,15 +234,15 @@ Fusion is additive info-form and depends heavily on L magnitudes. If any operato
 
 ### 6.2 Turning this into MHT (multiple hypothesis tracking)
 
-The current pipeline is branch-free. MHT means introducing branching and weight management correctly.
+The pipeline math path is branch-free. Runtime has a fixed K_HYP hypothesis container (budgeted), but current code does not implement MHT semantics (no per-scan scoring/prune/merge/branching; hypothesis weights are currently uniform). MHT means introducing branching and weight management correctly.
 
 #### 6.2.1 What a “hypothesis” is
 
-Each hypothesis must contain **everything that affects future evidence:** belief (L, h, z_lin, X_anchor, …), **map_stats** (map drives next scan’s Wahba/WLS), **noise state (IW)** (affects Q and Σ in future steps), any latent calibration that varies (dt, extrinsic). So a hypothesis is **pose + map + noise + calibration**, not just pose.
+Each hypothesis must contain **everything that affects future evidence:** belief (L, h, z_lin, X_anchor, …), **map_stats** (map drives next scan’s LiDAR alignment: Matrix Fisher rotation + planar translation), **noise state (IW)** (affects Q and Σ in future steps), any latent calibration that varies (dt, extrinsic). So a hypothesis is **pose + map + noise + calibration**, not just pose.
 
 #### 6.2.2 When to branch (practical triggers)
 
-Branch when there is **structural ambiguity:** scan matching has multiple comparable solutions (symmetry/corridor), Wahba has competing maxima, translation WLS is ill-conditioned, evidence conditioning is bad (α already uses conditioning).
+Branch when there is **structural ambiguity:** scan matching has multiple comparable solutions (symmetry/corridor), LiDAR rotation evidence has competing maxima, translation evidence is ill-conditioned, evidence conditioning is bad (α already uses conditioning).
 
 #### 6.2.3 How to score and prune hypotheses (log-evidence in information form)
 
@@ -190,7 +273,7 @@ vMF conversion uses an approximate Hessian and then PSD projection. When PSD pro
 **Upgrade options:**
 
 - **Cubic-regularized Newton** (uses 3rd-order Lipschitz bound rather than explicit tensor): stabilizes steps when curvature changes fast; reduces reliance on PSD projection.
-- **Explicit 3rd-order correction** (research): compute the 3rd derivative tensor of the directional log-likelihood w.r.t. δθ; apply a cubic Taylor correction to the local model. Use only for accel vMF (and maybe Wahba residual) where curvature is high and approximation stress is already seen.
+- **Explicit 3rd-order correction** (research): compute the 3rd derivative tensor of the directional log-likelihood w.r.t. δθ; apply a cubic Taylor correction to the local model. Use only for accel vMF (and maybe Matrix Fisher residual) where curvature is high and approximation stress is already seen.
 
 ---
 
@@ -219,22 +302,23 @@ Use 2nd/3rd derivatives of accel (ḟ, f̈, f⃛) to detect wheel slip, impacts,
 | Step | Change |
 |------|--------|
 | **Step 2 (PredictDiffusion)** | Make Q anisotropic for planar vehicle: constrain z, optionally v_z. If keeping SE(3), enforce a gauge (z prior or v_z = 0 soft factor). |
-| **Step 3 (DeskewConstantTwist)** | Use odom twist as alternative or complementary deskew twist when IMU is inconsistent. In MHT: branch if IMU-vs-odom twist disagreement exceeds a robust threshold. |
-| **Step 8 (TranslationWLS)** | Solve translation in (x,y) only; or inflate t_cov[2,2] massively before building LiDAR evidence. |
-| **Step 9 (Evidence)** | Add: odom twist (v_b, ω_b) factors; gravity vMF time-resolved + consistency-weighted (replace single mean vMF); planar constraints (z, roll/pitch) as soft priors if physically valid. |
+| **Step 3 (DeskewConstantTwist)** | Use odom twist as alternative or complementary deskew twist when IMU is inconsistent. In MHT: branch via **soft responsibilities** (no hard thresholds) based on IMU↔odom twist disagreement. |
+| **Step 8 (PlanarTranslationEvidence)** | **DONE:** planarized z precision (self-adaptive) in LiDAR translation evidence (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/matrix_fisher_evidence.py:502`). |
+| **Step 9 (Evidence)** | **DONE:** odom twist factors, time-resolved tilt evidence, and planar priors are present. **Remaining:** add explicit cross-sensor consistency likelihoods (beyond diagnostics) and use IMU message covariances / LiDAR intensity. |
 | **Steps 10–11 (α + additive fusion)** | Keep additive fusion; compute α per-subspace (translation vs rotation) so one weak axis does not nuke everything; replace PSD projection “repair” with robust weighting upstream (Student-t weights per factor/per bin). |
-| **Step 13 (PoseCovInflationPushforward + map update)** | Stop writing belief_z into map z directly. Maintain a planar map frame, or store map points in a ground-referenced frame. |
+| **Step 13 (PoseCovInflationPushforward + map update)** | **DONE:** map update forces `t_hat[2]=0` (planar map z) to avoid z feedback (see `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`). |
 | **Hypothesis layer (new, wraps Steps 2–13)** | Per scan: run Steps 2–13 per hypothesis; compute log-evidence increment; normalize weights; prune/merge to keep B bounded; optionally delay map updates until a hypothesis survives K steps (prevents map poisoning). |
 
 ---
 
 ### 6.6 Recommended ROI sequence
 
-1. **Planarize z** (TranslationWLS + map update + process model).
-2. **Use odom twist** (new factors) to restore kinematic observability.
-3. **Fix accel evidence** (time-resolved, consistency weighted) to avoid fragile vMF–Laplace pulls.
-4. Add **MHT with strict caps and delayed map commit**.
+1. **Planarize z** — **DONE** (planar priors + planar translation + planar map z).
+2. **Use odom twist** — **DONE** (velocity/yaw-rate/pose–twist consistency factors).
+3. **Fix accel evidence** — **DONE** (time-resolved, transport-consistency-weighted tilt evidence).
+4. Add **MHT with strict caps and delayed map commit** (future; requires scoring/prune/merge/branching semantics beyond the current fixed K_HYP container).
+5. Next ROI after MHT: consume IMU message covariances/orientation, use LiDAR intensity, and add explicit cross-sensor consistency likelihoods (beyond diagnostics).
 
 Everything “Monge–Ampère / higher-order IG” becomes meaningful only after 1–3 stop the current runaway feedback loops.
 
-**Patch plan:** A literal patch plan keyed to code entrypoints (e.g. `translation_wls`, `imu_vmf_gravity_evidence`, `odom_quadratic_evidence`, fusion operators)—including which blocks in the 22D state each new factor writes into, and how to compute log-evidence per hypothesis from (L, h)—can be derived from this section and the pipeline trace.
+**Patch plan:** A literal patch plan keyed to code entrypoints (e.g. `planar_translation_evidence`, `imu_vmf_gravity_evidence_time_resolved`, `odom_quadratic_evidence`, fusion operators)—including which blocks in the 22D state each new factor writes into, and how to compute log-evidence per hypothesis from (L, h)—can be derived from this section and the pipeline trace.
