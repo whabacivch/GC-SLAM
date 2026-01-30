@@ -4,6 +4,89 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-30: Production-readiness assessment (splat pipeline)
+
+- **docs/PRODUCTION_READINESS_SPLAT_PIPELINE.md:** New doc identifying what would need to change to put LiDAR–camera splat fusion and BEV OT into production. Covers: current state (backend subscribes only to lidar/odom/imu; no camera; no splat/OT in pipeline); topics and frontend (canonical camera topic, camera normalizer, fail-fast); backend params and state (T_base_camera, intrinsics, optional Lambda_prev for temporal smoothing); end-to-end data flow (image → extractor → depth fusion → splat_prep → BEV → pack_splat_batch → Sinkhorn → OT fusion); pipeline options (output-only vs evidence vs new steps); config and RuntimeManifest; frame/ID consistency; performance; tests; docs. Recommends starting with output-only splat branch in on_lidar.
+
+## 2026-01-30: Packed splat batch + integration-risk refinements
+
+- **Packed splat batch (common/splat_batch.py):** Standardized internal structure: fixed caps N_max, M_max, K_max; `PackedSplatBatch` now includes `K_max` and always-allocated `neighbor_indices_cam` (N_max × K_max), -1 = invalid. `pack_splat_batch(..., K_max=GC_OT_K_STENCIL, neighbor_indices_cam=None)` pads neighbor indices when provided; shape consistency for JIT / no dynamic sizes. Added constant `GC_OT_K_MAX`.
+- **Route B (lidar_camera_depth_fusion.py):** Config doc note: when |n'r̂| is very small, σz² becomes huge (precision → 0); `depth_sigma_max_sq` caps for float safety (no blow-up). Continuous z and reliability already in place (softplus clamp, w_behind).
+- **Sinkhorn (sinkhorn_ot.py):** Cost normalization already applied in `sinkhorn_ot_bev`: `cost_subtract_row_min`, optional `cost_scale_by_median` (config); numerical conditioning, not gating.
+- **OT fusion (ot_fusion.py):** Module doc: recommend `confidence_tempered_gamma(π, γ, α, m0)` and pass as `gamma_per_row` to weighted_fusion_* for row-mass confidence γ_i = γ·σ(α(m_i−m0)). Wishart and temporal_smooth_lambda doc: apply in consistent coordinate chart (e.g. BEV/map frame); temporal smoothing requires stable feature IDs (map primitives), not per-frame features without re-association.
+
+## 2026-01-30: LiDAR–camera splat fusion and BEV OT (plan: lidar-camera_splat_fusion_and_bev_ot)
+
+- **Visual extractor (minimal):** Per-feature meta now exposes depth for fusion: `depth_sigma_c_sq`, `depth_Lambda_c`, `depth_theta_c` (invalid depth: Lambda_c=0, theta_c=0). Module docstring updated.
+- **Depth fusion:** New `frontend/sensors/lidar_camera_depth_fusion.py`: `depth_natural_params(z_hat, sigma_sq)`, `fuse_depth_natural_params(Lambda_c, theta_c, Lambda_ell, theta_ell)`; optional w_c, w_ell (continuous); `LidarCameraDepthFusionConfig`. Route A: `lidar_ray_depth_route_a(...)` — project LiDAR to camera, per-(u,v) median/nearest depth and sigma_ell_sq; `backproject_camera`, `backprojection_cov_camera` for splat_prep.
+- **BEV pushforward:** New `common/bev_pushforward.py`: `pushforward_gaussian_3d_to_2d(mu, Sigma, P)`, oblique `P(φ)` from config, stub `pushforward_vmf_to_s1_stub`.
+- **Sinkhorn OT:** New `backend/operators/sinkhorn_ot.py`: cost W2² + β H²_vMF, fixed-K Sinkhorn (no convergence check), `SinkhornOTResult`, `CertBundle` with `sinkhorn_fixed_iter`; `SinkhornOTConfig`; no external OT lib.
+- **OT fusion:** New `backend/operators/ot_fusion.py`: `coupling_to_weights(pi)` (continuous; no threshold), `weighted_fusion_gaussian_bev`, `weighted_fusion_vmf_bev`; `OTFusionConfig` (gamma, epsilon).
+- **Splat prep:** New `frontend/sensors/splat_prep.py`: `splat_prep_fused(extraction_result, points_camera_frame, intrinsics, config)` → list of fused `Feature3D`; callable from script; no backend_node/pipeline edits.
+- **Rules:** OT fusion uses continuous w_ij = π_ij/(Σ_j π_ij + ε); no "fuse only if > 0.2" gate. Sinkhorn loop bound by K_SINKHORN; CertBundle/ExpectedEffect returned.
+- **Deferred (not implemented):** LiDAR surfels, unbalanced Sinkhorn (τ_a, τ_b), post Wishart / temporal α in ot_fusion, rendering (EWA, vMF shading, fBm). Wiring LiDAR into backend_node/pipeline deferred until modules are exercised from script.
+
+## 2026-01-30: Route B (ray–plane) and MA hex web
+
+- **Route B (lidar_camera_depth_fusion.py):** `lidar_ray_depth_route_b(...)` — gather points near ray (pixel radius + K nearest to ray), fit plane via SVD (fixed-cost), intersect ray with plane → ẑℓ; σ_ℓ² from plane fit residuals; continuous weight w_plane = 1/(1 + (residual_rms/prior)²). Config: `lidar_ray_plane_fit_max_points`, `plane_fit_residual_prior_m`, `plane_fit_cos_min`. No gate; no RANSAC.
+- **splat_prep:** Optional `use_route_b=True`; when set, uses Route B and scales Λℓ by plane-fit weight.
+- **MA hex web (common/ma_hex_web.py):** Hex cell keys a1=(1,0), a2=(1/2,√3/2); s_k = a_k·y, cell = floor(s/h); h = hex_scale_factor × median(√λ_max(Σ)). Fixed bucket `MAHexBucket` [num_cells, max_occupants]; stencil K=64 (8×8); `poe_denoise_2d` (Gaussian PoE over cell + stencil); `convexity_weight(mu, mu_poe, tau)`. Config: `MAHexWebConfig`. No edits to existing binning/pipeline.
+
+## 2026-01-30: Unbalanced Sinkhorn, Route B weighted plane, W2² SPD guards
+
+- **Unbalanced Sinkhorn (sinkhorn_ot.py):** `sinkhorn_unbalanced_fixed_k(C, a, b, epsilon, tau_a, tau_b, K)` — KL relaxation on marginals (τ_a KL(π1|a), τ_b KL(πᵀ1|b)); updates u = (a/(Kv))^(1/(1+τ_a/ε)), v = (b/(Kᵀu))^(1/(1+τ_b/ε)). No threshold; continuous. Config: `tau_a`, `tau_b` (default 0.5); when τ_a>0 or τ_b>0, `sinkhorn_ot_bev` uses unbalanced. Reduces bad matches under partial camera↔LiDAR overlap.
+- **W2² SPD guards (sinkhorn_ot.py):** Symmetrize S ← (S+Sᵀ)/2 and eigen clamp (eig_min) before matrix sqrt; `w2_eig_min` in config. Domain projection, not gating. `cost_matrix_bev` passes `eig_min` to `w2_sq_2d`.
+- **Route B weighted plane (lidar_camera_depth_fusion.py):** Weighted PCA plane: min sum w_k (n'x_k+d)²; weighted centroid, weighted cov S; n = eigenvector of λ_min. `_fit_plane_weighted(points, weights)` → centroid, normal, eigvals, sigma_perp_sq. Intersection (continuous): z* = n'x̄/(n'r̂+δ) with `plane_intersection_delta` (no division-by-zero). σz,ℓ² = σ⊥²/((n'r̂)²+δ). Continuous reliability: w_angle = sigmoid(α(|n'r̂|−t)), w_planar = sigmoid(β(ρ−ρ0)) with ρ = λ2/(λ3+ε), w_res = exp(−γ σ⊥²); weight_plane = w_angle * w_planar * w_res; scale Λℓ by weight_plane (no gate). Config: `plane_intersection_delta`, `plane_angle_sigmoid_alpha/t`, `plane_planarity_sigmoid_beta/rho0`, `plane_residual_exp_gamma`, `plane_fit_eps`. Removed hard `plane_fit_cos_min` skip; intersection always defined via δ.
+
+## 2026-01-30: LiDAR surfels, post Wishart + temporal α, optional rendering
+
+- **LiDAR surfels (frontend/sensors/lidar_surfels.py):** Voxel downsample (voxel_size_m), plane fit per voxel via _fit_plane_weighted; Gaussian mean = centroid, Σ from plane residuals + sensor noise; vMF B=3 (normal + two in-plane directions); Wishart Λ_reg = Λ + nu/psi_scale * I. `LidarSurfel` dataclass (xyz, cov_xyz, info_xyz, canonical_theta, mu_app (3,3), kappa_app (3,)); same natural-param interface as camera splats. Config: `LidarSurfelConfig`. No edits to livox_converter.
+- **ot_fusion (backend/operators/ot_fusion.py):** Post-fusion Wishart: `wishart_regularize_2d(Lambda, nu, psi_scale)` — Λ_reg = Λ + nu * Psi^{-1}, Psi = psi_scale * I. Temporal smoothing: `temporal_smooth_lambda(Lambda_t, Lambda_prev, alpha)` — Λ_smoothed = Λ_t + alpha * Λ_prev; caller holds Λ_prev. Config: `wishart_nu`, `wishart_psi_scale`, `temporal_alpha`.
+- **Optional rendering (frontend/sensors/splat_rendering.py):** EWA splatting: `ewa_splat_weight`, `ewa_splat_weights_at_point`, `render_tile_ewa` (tile 32×32). Multi-lobe vMF shading: `vmf_shading_multi_lobe(v, mu_app, kappa_app, pi_b)`. fBm: `fbm_value_noise(x, y, octaves=5, gain=0.5)` (deterministic hash-based value noise). `opacity_from_logdet`. Config: `SplatRenderingConfig`. Fixed loops; no JAX requirement.
+
+## 2026-01-29: Visual feature extractor — 16-item enhancement (plan)
+
+- **Must-fix:** Wired `canonical_theta` and `canonical_log_partition` in all `Feature3D` constructions (natural-parameter fusion API, item 9).
+- **Config:** Extended `VisualFeatureExtractorConfig` with hex depth, quad fit, Wishart prior, Student-t, MA convexity, kappa scheduling, FR/score beta, 3DGS export, and diagnostics; named constants `MAD_NORMAL_SCALE`, `VMF_LOG_NORM_4PI`, `LOG_2PI`.
+- **Depth (1):** Hexagonal 7-sample stencil (`depth_sample_mode="hex"`), robust depth = median, scale = MAD; `_depth_sample` returns optional sample list for Student-t.
+- **Quadratic fit (2):** `_quadratic_fit(depth, u, v, z_hat)` → `QuadFitResult` (grad_z, H, normal, K, ma, lam_min); optional in extract loop.
+- **Student-t (10):** `_student_t_effective_var(z_hat, sigma_z2, zs)`; effective variance used in backprojection cov.
+- **MA convexity (11):** `_ma_convexity_weight(lam_min)`; Sigma inflated by `(1 - w_ma) * delta`; kappa scaled by w_ma.
+- **Wishart (5):** Optional `Lambda' = Lambda + nu Psi^{-1}` in `_precision_and_logdet` when `prior_nu > 0`.
+- **Kappa scheduling (12):** Per-feature `kappa_app` from reliability rho and |K|; optional `mu_app`/`kappa_app` on `Feature3D`.
+- **vMF / Hellinger (3):** `A_vmf(k)`, `hellinger2_vmf(mu1,k1, mu2,k2)`; Fisher-Rao (4): `fr_cov`, `fr_gauss`; orthogonal score (15): `orthogonal_score(...)`.
+- **3DGS export (7):** `feature_to_splat_3dgs(feat, color)` → dict(mean, scale, rot, opacity, color).
+- **Heatmaps (8):** `_build_hellinger_heatmap_base64`, `_build_fr_heatmap_base64`; attached to op_report metrics when `debug_plots=True` and matplotlib available.
+- **Diagnostics (16):** Per-feature `logdet_cov`, `trace(info_xyz)`, `rel_depth_noise`, `lam_min_H`; distributions in final OpReportEvent metrics.
+- **BC LUT (13):** Precomputed BC on grid (kappa_1, kappa_2, cos theta); `hellinger2_vmf_lut(...)` for fast association.
+- **Mixture vMF (14):** `mixture_vmf_to_single(mus, kappas, weights)` moment-match to single vMF.
+- **Batching (6):** Single numpy per-feature loop (fixed-cost); no GPU path; explicit backend selection if added later.
+- **File:** `fl_ws/src/fl_slam_poc/fl_slam_poc/frontend/sensors/visual_feature_extractor.py`.
+
+## 2026-01-30: Kimera_Data ROS bag prep (ROS1 decompression + ROS2 conversion)
+
+- Organized raw ROS 1 bags into `rosbags/Kimera_Data/ros1_raw/`.
+- Generated uncompressed ROS 1 bags in `rosbags/Kimera_Data/ros1_uncompressed/`.
+- Converted all Kimera_Data bags to ROS 2 sqlite3 format under `rosbags/Kimera_Data/ros2/`.
+- Added dataset manifests: `rosbags/Kimera_Data/manifest.json` and `rosbags/Kimera_Data/manifest.csv`.
+- Added bag↔GT↔extrinsics mapping `rosbags/Kimera_Data/dataset_ready_manifest.yaml` for eval swap-in.
+- Updated prep notes in `rosbags/Kimera_Data/PREP_README.md` to reflect the new layout and scope.
+- Organized Kimera calibration + extrinsics under `rosbags/Kimera_Data/calibration/` with per-robot extrinsics and summary manifests.
+- Added `tools/run_gc_kimera.sh` to launch GC v2 against Kimera bags with topics/extrinsics pulled from the manifest, and parameterized `gc_rosbag.launch.py` (topics, extrinsics, config path) to allow non-M3DGR datasets.
+
+## 2026-01-29: Frame/planar Z conventions — base_footprint Z=0, correct evidence residual signs
+
+- **Root cause:** M3DGR `/odom` does not observe Z (odom Z ~30m garbage, cov ~1e6), and M3DGR GT is reported in `camera_imu` (Z ≈ 0.85m) while GC v2 state is `base_footprint` by contract.
+- **Fix (by construction):**
+  - Treat GC state/body frame as `base_footprint` ⇒ planar Z reference is **0.0 m** (`GC_PLANAR_Z_REF = 0.0`). Evaluate against GT by transforming wheel-frame estimate to body frame via `config/m3dgr_body_T_wheel.yaml` (`tools/transform_estimate_to_body_frame.py`).
+  - Make unary “pull-to-measurement” evidence residuals consistent: **residual = measurement − prediction** for planar priors and odom twist evidence (previously several operators used prediction − measurement, which pushes away from the measurement).
+- **Code:**
+  - `fl_ws/src/fl_slam_poc/fl_slam_poc/common/constants.py`: set `GC_PLANAR_Z_REF = 0.0` and document wheel vs body (GT) frames.
+  - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/planar_prior.py`: fix sign so MAP increment drives z toward `z_ref` and v_z toward 0.
+  - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/odom_twist_evidence.py`: fix sign for velocity, yaw-rate, and pose–twist consistency residuals.
+  - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/backend_node.py`: odom pose anchor Z uses `GC_PLANAR_Z_REF` (no use of raw odom Z).
+  - `tools/diagnose_coordinate_frames.py`, `tools/diagnose_frames_detailed.py`: remove erroneous `/1000` scaling (Dynamic01_ros2 `livox_ros_driver2/CustomMsg` points are already meters).
+
 ## 2026-01-29: ROADMAP.md updated to match current codebase
 
 - **ROADMAP.md**: Brought in line with current GC v2: 22D state, 14-step pipeline, `gc_sensor_hub` → `gc_backend_node`, `/gc/sensors/*` topics, `gc_rosbag.launch.py`, `gc_unified.yaml`. Completed milestones and §1 (GC v2 status) rewritten; immediate priorities aligned with `docs/PIPELINE_DESIGN_GAPS.md`; removed/updated stale refs (15D→22D, `run_and_evaluate.sh`→`run_and_evaluate_gc.sh`, `poc_m3dgr_rosbag`→`gc_rosbag`, `phase2/` paths). Roadmap Summary and Future semantic section clarified. Historical Phase 1–6 detail retained with note that current architecture is summarized in §1 and Completed Milestones.

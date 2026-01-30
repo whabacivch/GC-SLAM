@@ -16,7 +16,7 @@ import time
 from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.geometry import se3_jax
-from fl_slam_poc.common.belief import BeliefGaussianInfo, D_Z, HypothesisSet
+from fl_slam_poc.common.belief import BeliefGaussianInfo
 from fl_slam_poc.common.certificates import (
     CertBundle,
     ExpectedEffect,
@@ -27,16 +27,11 @@ from fl_slam_poc.common.certificates import (
 from fl_slam_poc.backend.structures.bin_atlas import (
     BinAtlas,
     MapBinStats,
-    create_fibonacci_atlas,
     compute_map_derived_stats,
-    apply_forgetting,
 )
 
 # Import all operators
-from fl_slam_poc.backend.operators.point_budget import (
-    point_budget_resample,
-    PointBudgetResult,
-)
+from fl_slam_poc.backend.operators.point_budget import point_budget_resample
 from fl_slam_poc.backend.operators.predict import (
     predict_diffusion,
 )
@@ -44,17 +39,11 @@ from fl_slam_poc.backend.operators.imu_preintegration import (
     smooth_window_weights,
     preintegrate_imu_relative_pose_jax,
 )
-from fl_slam_poc.backend.operators.deskew_constant_twist import (
-    deskew_constant_twist,
-    DeskewConstantTwistResult,
-)
+from fl_slam_poc.backend.operators.deskew_constant_twist import deskew_constant_twist
 from fl_slam_poc.backend.operators.binning import (
     bin_soft_assign,
     scan_bin_moment_match,
-    create_bin_atlas,
-    ScanBinStats,
 )
-from fl_slam_poc.backend.operators.kappa import kappa_from_resultant_v2
 from fl_slam_poc.backend.operators.matrix_fisher_evidence import (
     matrix_fisher_rotation_evidence,
     planar_translation_evidence,
@@ -72,10 +61,7 @@ from fl_slam_poc.backend.operators.odom_twist_evidence import (
     odom_yawrate_evidence,
     pose_twist_kinematic_consistency,
 )
-from fl_slam_poc.backend.operators.imu_evidence import (
-    imu_vmf_gravity_evidence_time_resolved,
-    TimeResolvedImuResult,
-)
+from fl_slam_poc.backend.operators.imu_evidence import imu_vmf_gravity_evidence_time_resolved
 from fl_slam_poc.backend.operators.planar_prior import (
     planar_z_prior,
     velocity_z_prior,
@@ -541,8 +527,7 @@ def process_scan_single_hypothesis(
     _omega_avg_np = np.array(omega_avg)
     if not np.all(np.isfinite(_omega_avg_np)):
         raise ValueError(f"omega_avg contains non-finite values: {_omega_avg_np}")
-    _omega_avg_norm = float(np.linalg.norm(_omega_avg_np))
-    
+
     iw_meas_gyro_dPsi, iw_meas_gyro_dnu = imu_gyro_meas_iw_suffstats_from_avg_rate_jax(
         imu_gyro=imu_gyro,
         weights=w_imu_int_valid,
@@ -634,10 +619,6 @@ def process_scan_single_hypothesis(
         eps_mass=config.eps_mass,
         eps_psd=config.eps_psd,
     )
-    
-    # Compute scan mean directions (batched, no per-bin host sync)
-    s_norms = jnp.linalg.norm(scan_bins.s_dir, axis=1, keepdims=True)
-    mu_scan = scan_bins.s_dir / (s_norms + config.eps_mass)
 
     # =========================================================================
     # Step 7: Matrix Fisher Rotation Evidence (replaces WahbaSVD)

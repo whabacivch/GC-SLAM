@@ -73,7 +73,8 @@ def odom_velocity_evidence(
 
     The evidence constrains the velocity block [6:9] of the 22D state.
 
-    r_v = R_body_world @ v_pred_world - v_odom_body
+    Residual uses measurement - prediction:
+        r_v = v_odom_body - (R_body_world @ v_pred_world)
 
     State ordering: [trans(0:3), rot(3:6), vel(6:9), bg(9:12), ba(12:15), dt(15:16), ex(16:22)]
     Velocity is at indices 6:9.
@@ -100,8 +101,8 @@ def odom_velocity_evidence(
     R_body_world = R_world_body.T
     v_pred_body = R_body_world @ v_pred_world
 
-    # Velocity residual in body frame
-    r_vel = v_pred_body - v_odom_body
+    # Velocity residual in body frame: measurement - prediction
+    r_vel = v_odom_body - v_pred_body
 
     # Get precision matrix from covariance
     Sigma_v_psd = domain_projection_psd(Sigma_v, eps_psd).M_psd
@@ -197,8 +198,8 @@ def odom_yawrate_evidence(
     omega_z_odom = float(omega_z_odom)
     sigma_wz = float(sigma_wz)
 
-    # Yaw rate residual
-    r_wz = omega_z_pred - omega_z_odom
+    # Yaw rate residual: measurement - prediction
+    r_wz = omega_z_odom - omega_z_pred
 
     # Precision
     precision_wz = 1.0 / (sigma_wz ** 2)
@@ -280,9 +281,9 @@ def pose_twist_kinematic_consistency(
     The pose change should be consistent with integrated twist. This factor
     penalizes inconsistency, providing a soft kinematic constraint.
 
-    Residuals:
-        r_trans = (t_curr - t_prev) - R_prev @ v_body * dt
-        r_rot = Log(R_prev^T @ R_curr) - omega_body * dt
+    Residuals (measurement - prediction):
+        r_trans = (R_prev @ v_body * dt) - (t_curr - t_prev)
+        r_rot = (omega_body * dt) - Log(R_prev^T @ R_curr)
 
     Information is scaled by 1/dt² (covariance scales with dt for integrated
     quantities) and by the twist covariances.
@@ -330,9 +331,9 @@ def pose_twist_kinematic_consistency(
     R_rel = R_prev.T @ R_curr
     dtheta_actual = se3_jax.so3_log(R_rel)
 
-    # Residuals: actual - predicted
-    r_trans = dp_actual - dp_pred  # (3,)
-    r_rot = dtheta_actual - dtheta_pred  # (3,)
+    # Residuals: measurement - actual (so MAP increment reduces the residual)
+    r_trans = dp_pred - dp_actual  # (3,)
+    r_rot = dtheta_pred - dtheta_actual  # (3,)
 
     # ==========================================================================
     # Covariance scaling: integrated twist covariance scales with dt²

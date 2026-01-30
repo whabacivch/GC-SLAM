@@ -83,22 +83,36 @@ class ImageDecompressNode final : public rclcpp::Node
     qos_reliability_ = to_lower(get_parameter("qos_reliability").as_string());
 
     pub_rgb_ = create_publisher<sensor_msgs::msg::Image>(rgb_out_, kQueueDepth);
-    pub_depth_ = create_publisher<sensor_msgs::msg::Image>(depth_out_, kQueueDepth);
 
     auto qos_profiles = build_qos_profiles(qos_reliability_);
     for (const auto & qos : qos_profiles) {
       sub_rgb_.push_back(create_subscription<sensor_msgs::msg::CompressedImage>(
         rgb_in_, qos,
         std::bind(&ImageDecompressNode::on_rgb_compressed, this, std::placeholders::_1)));
-      sub_depth_.push_back(create_subscription<sensor_msgs::msg::CompressedImage>(
-        depth_in_, qos,
-        std::bind(&ImageDecompressNode::on_depth_compressed, this, std::placeholders::_1)));
     }
 
-    RCLCPP_INFO(get_logger(),
-                "Image decompression node started:\n  RGB:   %s -> %s\n  Depth: %s -> %s\n  QoS reliability: %s",
-                rgb_in_.c_str(), rgb_out_.c_str(), depth_in_.c_str(), depth_out_.c_str(),
-                qos_reliability_.c_str());
+    const bool enable_depth = !depth_in_.empty();
+    if (enable_depth) {
+      pub_depth_ = create_publisher<sensor_msgs::msg::Image>(depth_out_, kQueueDepth);
+      for (const auto & qos : qos_profiles) {
+        sub_depth_.push_back(create_subscription<sensor_msgs::msg::CompressedImage>(
+          depth_in_, qos,
+          std::bind(&ImageDecompressNode::on_depth_compressed, this, std::placeholders::_1)));
+      }
+    } else {
+      pub_depth_ = nullptr;
+    }
+
+    if (enable_depth) {
+      RCLCPP_INFO(get_logger(),
+                  "Image decompression node started:\n  RGB:   %s -> %s\n  Depth: %s -> %s\n  QoS reliability: %s",
+                  rgb_in_.c_str(), rgb_out_.c_str(), depth_in_.c_str(), depth_out_.c_str(),
+                  qos_reliability_.c_str());
+    } else {
+      RCLCPP_INFO(get_logger(),
+                  "Image decompression node started (RGB only):\n  RGB: %s -> %s\n  Depth: disabled (empty topic)\n  QoS reliability: %s",
+                  rgb_in_.c_str(), rgb_out_.c_str(), qos_reliability_.c_str());
+    }
   }
 
  private:
@@ -164,6 +178,9 @@ class ImageDecompressNode final : public rclcpp::Node
 
   void on_depth_compressed(const sensor_msgs::msg::CompressedImage::SharedPtr msg)
   {
+    if (pub_depth_ == nullptr) {
+      return;
+    }
     if (is_duplicate("depth", msg->header.stamp)) {
       return;
     }
@@ -308,7 +325,7 @@ class ImageDecompressNode final : public rclcpp::Node
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> sub_rgb_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> sub_depth_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_rgb_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_depth_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_depth_;  // null if depth_compressed_topic empty
 
   std::unordered_map<std::string, std::pair<int32_t, uint32_t>> last_stamps_;
 

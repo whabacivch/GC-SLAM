@@ -1,0 +1,26 @@
+[2026-01-30T13:42:28.576Z] [INFO] [SYSTEM] MCP Server Transport Connecting DATA: {
+  "transport": "stdio"
+}
+[2026-01-30T13:42:28.576Z] [INFO] [SYSTEM] MCP Server Ready DATA: {
+  "directory": "/home/will/Documents/Coding/Phantom Fellowship MIT/Impact_Project_v1",
+  "transport": "stdio",
+  "toolsCount": 26,
+  "readyTime": 1769780548576
+}
+[2026-01-30T13:42:28.710Z] [ERROR] [AGENT_INIT] Background agent initialization failed DATA: {
+  "error": "The module '/home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/node_modules/better-sqlite3/build/Release/better_sqlite3.node'\nwas compiled against a different Node.js version using\nNODE_MODULE_VERSION 137. This version of Node.js requires\nNODE_MODULE_VERSION 115. Please try re-compiling or re-installing\nthe module (for instance, using `npm rebuild` or `npm install`)."
+} STACK: Error: The module '/home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/node_modules/better-sqlite3/build/Release/better_sqlite3.node'
+was compiled against a different Node.js version using
+NODE_MODULE_VERSION 137. This version of Node.js requires
+NODE_MODULE_VERSION 115. Please try re-compiling or re-installing
+the module (for instance, using `npm rebuild` or `npm install`).
+    at Module._extensions..node (node:internal/modules/cjs/loader:1661:18)
+    at Module.load (node:internal/modules/cjs/loader:1266:32)
+    at Module._load (node:internal/modules/cjs/loader:1091:12)
+    at Module.require (node:internal/modules/cjs/loader:1289:19)
+    at require (node:internal/modules/helpers:182:18)
+    at bindings (/home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/node_modules/bindings/bindings.js:112:48)
+    at new Database (/home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/node_modules/better-sqlite3/lib/database.js:48:64)
+    at _SQLiteManager.initialize (file:///home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/dist/index.js:3780:19)
+    at file:///home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/dist/index.js:56594:21
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)

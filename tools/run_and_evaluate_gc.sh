@@ -13,6 +13,9 @@ cd "$PROJECT_ROOT"
 # CONFIGURATION (single IMU gravity scale for evidence + preintegration)
 IMU_GRAVITY_SCALE="${IMU_GRAVITY_SCALE:-1.0}"
 DESKEW_ROTATION_ONLY="${DESKEW_ROTATION_ONLY:-false}"
+# Rosbag playback: 1/4 speed gives 4x wall-clock time per scan; first 60s of bag only
+BAG_PLAY_RATE="${BAG_PLAY_RATE:-0.25}"
+BAG_DURATION="${BAG_DURATION:-60}"
 
 # ============================================================================
 BAG_PATH="$PROJECT_ROOT/rosbags/m3dgr/Dynamic01_ros2"
@@ -110,7 +113,7 @@ echo -e "${BOLD}╔════════════════════�
 echo -e "${BOLD}║       ${CYAN}GOLDEN CHILD SLAM v2${NC}${BOLD} — Evaluation Pipeline            ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "Bag:     ${CYAN}$(basename "$BAG_PATH")${NC}"
+echo -e "Bag:     ${CYAN}$(basename "$BAG_PATH")${NC} (play rate ${BAG_PLAY_RATE}, first ${BAG_DURATION}s)"
 echo -e "Results: ${CYAN}$RESULTS_DIR${NC}"
 
 # Clean previous
@@ -225,6 +228,8 @@ ros2 launch fl_slam_poc gc_rosbag.launch.py \
   diagnostics_export_path:="$DIAGNOSTICS_FILE" \
   imu_gravity_scale:="$IMU_GRAVITY_SCALE" \
   deskew_rotation_only:="$DESKEW_ROTATION_ONLY" \
+  bag_play_rate:="$BAG_PLAY_RATE" \
+  bag_duration:="$BAG_DURATION" \
   > "$LOG_FILE" 2>&1 &
 LAUNCH_PID=$!
 

@@ -49,38 +49,6 @@ class ScanBinStats:
 
 
 # =============================================================================
-# Bin Atlas Creation
-# =============================================================================
-
-
-def create_bin_atlas(n_bins: int = constants.GC_B_BINS) -> jnp.ndarray:
-    """
-    Create Fibonacci lattice bin directions.
-    
-    Args:
-        n_bins: Number of bins
-        
-    Returns:
-        Bin directions (n_bins, 3)
-    """
-    indices = jnp.arange(n_bins, dtype=jnp.float64) + 0.5
-    phi = jnp.arccos(1 - 2 * indices / n_bins)
-    theta = jnp.pi * (1 + jnp.sqrt(5)) * indices
-    
-    x = jnp.sin(phi) * jnp.cos(theta)
-    y = jnp.sin(phi) * jnp.sin(theta)
-    z = jnp.cos(phi)
-    
-    dirs = jnp.stack([x, y, z], axis=1)
-    
-    # Normalize
-    norms = jnp.linalg.norm(dirs, axis=1, keepdims=True)
-    dirs = dirs / (norms + constants.GC_EPS_MASS)
-    
-    return dirs
-
-
-# =============================================================================
 # Bin Soft Assign Operator
 # =============================================================================
 

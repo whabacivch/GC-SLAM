@@ -25,11 +25,10 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import PointCloud2, Imu, PointField
 from std_msgs.msg import String
 
-from fl_slam_poc.common.jax_init import jax, jnp
+from fl_slam_poc.common.jax_init import jnp
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.belief import (
     BeliefGaussianInfo,
-    D_Z,
     se3_identity,
     se3_from_rotvec_trans,
     se3_to_rotvec_trans,
@@ -69,14 +68,12 @@ from fl_slam_poc.backend.operators.lidar_bucket_noise_iw_jax import (
     lidar_bucket_iw_apply_suffstats_jax,
 )
 from fl_slam_poc.backend.structures.bin_atlas import (
-    BinAtlas,
-    MapBinStats,
     create_fibonacci_atlas,
     create_empty_map_stats,
     apply_forgetting,
     update_map_stats,
 )
-from fl_slam_poc.backend.diagnostics import ScanDiagnostics, DiagnosticsLog
+from fl_slam_poc.backend.diagnostics import DiagnosticsLog
 
 from scipy.spatial.transform import Rotation
 
@@ -569,9 +566,14 @@ class GoldenChildBackend(Node):
         #
         # Therefore: DO NOT invert here. Downstream code treats odom_pose as a pose in the
         # parent/world frame of the body, consistent with LiDAR/Wahba and IMU operators.
+        #
+        # Planar robot: wheel odom does not observe Z (M3DGR bag has garbage Z ~30m, cov ~1e6).
+        # By construction our state body frame is `base_footprint`, so base height is ~0.
+        # Use the planar Z reference (GC_PLANAR_Z_REF) so anchor and trajectory are not polluted.
+        z_planar = float(constants.GC_PLANAR_Z_REF)
         odom_pose_absolute = se3_from_rotvec_trans(
             jnp.array(rotvec, dtype=jnp.float64),
-            jnp.array([pos.x, pos.y, pos.z], dtype=jnp.float64),
+            jnp.array([pos.x, pos.y, z_planar], dtype=jnp.float64),
         )
         
         # Explicit anchor: provisional A0 on first odom (no scan drops); after K samples, set anchor_correction from A_smoothed
@@ -600,6 +602,8 @@ class GoldenChildBackend(Node):
                     [np.array(p[:3], dtype=np.float64) for p in poses],
                     axis=0, weights=weights,
                 )
+                # Planar: anchor Z is a reference, not average of odom Z (odom Z is unobserved).
+                trans_mean[2] = float(constants.GC_PLANAR_Z_REF)
                 R_matrices = [Rotation.from_rotvec(np.array(p[3:6], dtype=np.float64)).as_matrix() for p in poses]
                 M = np.average(R_matrices, axis=0, weights=weights)
                 R_polar = _polar_so3(M)

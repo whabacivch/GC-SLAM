@@ -235,9 +235,11 @@ def main() -> int:
                         points_list = []
                         for point in msg.points:
                             if point.line < 6:
-                                x = point.x / 1000.0  # mm to m
-                                y = point.y / 1000.0
-                                z = point.z / 1000.0
+                                # Dynamic01_ros2 livox_ros_driver2/CustomMsg points are already in meters.
+                                # Do NOT apply a mm→m conversion here (it collapses the cloud to ~cm scale).
+                                x = float(point.x)
+                                y = float(point.y)
+                                z = float(point.z)
                                 points_list.append([x, y, z])
                         
                         if len(points_list) < 100:

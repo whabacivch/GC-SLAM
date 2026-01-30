@@ -25,13 +25,20 @@ Topic Naming Convention:
     /livox/mid360/lidar     →   /gc/sensors/lidar_points
     /odom                   →   /gc/sensors/odom
     /livox/mid360/imu       →   /gc/sensors/imu
+
+Camera (optional, enable_camera:=true):
+    Kimera bag: RGB compressed, depth raw.
+    - image_decompress_cpp: rgb_compressed_topic -> /gc/sensors/camera_image (rgb8)
+    - depth_passthrough: depth_raw_topic -> /gc/sensors/camera_depth (32FC1 m)
+    Defaults: /acl_jackal/forward/color/image_raw/compressed, /acl_jackal/forward/depth/image_rect_raw
 """
 
 import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 from ament_index_python.packages import get_package_share_directory
@@ -90,15 +97,110 @@ def generate_launch_description():
         description="Record per-stage timings (ms) in diagnostics for bottleneck analysis.",
     )
 
+    bag_play_rate_arg = DeclareLaunchArgument(
+        "bag_play_rate",
+        default_value="0.25",
+        description="Rosbag playback rate (1.0 = realtime; 0.25 = 1/4 speed to allow more processing time per scan).",
+    )
+
+    bag_duration_arg = DeclareLaunchArgument(
+        "bag_duration",
+        default_value="60",
+        description="Play only the first N seconds of the bag (bag timeline).",
+    )
+    config_path_arg = DeclareLaunchArgument(
+        "config_path",
+        default_value=os.path.join(get_package_share_directory("fl_slam_poc"), "config", "gc_unified.yaml"),
+        description="GC config file (sensor hub defaults).",
+    )
+    lidar_topic_arg = DeclareLaunchArgument("lidar_topic", default_value="/gc/sensors/lidar_points")
+    odom_topic_arg = DeclareLaunchArgument("odom_topic", default_value="/gc/sensors/odom")
+    imu_topic_arg = DeclareLaunchArgument("imu_topic", default_value="/gc/sensors/imu")
+    base_frame_arg = DeclareLaunchArgument("base_frame", default_value="base_footprint")
+    T_base_lidar_arg = DeclareLaunchArgument("T_base_lidar", default_value="[-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]")
+    T_base_imu_arg = DeclareLaunchArgument("T_base_imu", default_value="[0.0, 0.0, 0.0, -0.015586, 0.489293, 0.0]")
+
+    # Camera (e.g. Kimera bag: RGB compressed, depth raw)
+    enable_camera_arg = DeclareLaunchArgument(
+        "enable_camera",
+        default_value="false",
+        description="If true, run image_decompress_cpp (RGB) and optionally depth_passthrough (raw depth).",
+    )
+    camera_rgb_compressed_arg = DeclareLaunchArgument(
+        "camera_rgb_compressed_topic",
+        default_value="/acl_jackal/forward/color/image_raw/compressed",
+        description="Compressed RGB topic (e.g. Kimera: /acl_jackal/forward/color/image_raw/compressed).",
+    )
+    camera_rgb_output_arg = DeclareLaunchArgument(
+        "camera_rgb_output_topic",
+        default_value="/gc/sensors/camera_image",
+        description="Canonical RGB output (sensor_msgs/Image rgb8).",
+    )
+    camera_depth_compressed_arg = DeclareLaunchArgument(
+        "camera_depth_compressed_topic",
+        default_value="",
+        description="Compressed depth topic (empty for Kimera; bag has raw depth).",
+    )
+    camera_depth_output_arg = DeclareLaunchArgument(
+        "camera_depth_output_topic",
+        default_value="/gc/sensors/camera_depth",
+        description="Canonical depth output (sensor_msgs/Image 32FC1 m).",
+    )
+    camera_depth_raw_arg = DeclareLaunchArgument(
+        "camera_depth_raw_topic",
+        default_value="/acl_jackal/forward/depth/image_rect_raw",
+        description="Raw depth topic for passthrough (e.g. Kimera: .../depth/image_rect_raw). Empty = no passthrough.",
+    )
+
+    # =========================================================================
+    # Image decompression (C++): compressed RGB -> canonical; optional compressed depth
+    # =========================================================================
+    image_decompress_cpp = Node(
+        package="fl_slam_poc",
+        executable="image_decompress_cpp",
+        name="image_decompress_cpp",
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("enable_camera", default="false")),
+        parameters=[
+            {
+                "rgb_compressed_topic": LaunchConfiguration("camera_rgb_compressed_topic"),
+                "rgb_output_topic": LaunchConfiguration("camera_rgb_output_topic"),
+                "depth_compressed_topic": LaunchConfiguration("camera_depth_compressed_topic"),
+                "depth_output_topic": LaunchConfiguration("camera_depth_output_topic"),
+                "depth_scale_mm_to_m": True,
+                "qos_reliability": "best_effort",
+            }
+        ],
+    )
+
+    # Depth passthrough: raw depth (e.g. Kimera 16UC1) -> canonical 32FC1 m
+    depth_passthrough = Node(
+        package="fl_slam_poc",
+        executable="depth_passthrough",
+        name="depth_passthrough",
+        output="screen",
+        condition=IfCondition(
+            PythonExpression(
+                [
+                    "'", LaunchConfiguration("enable_camera", default="false"), "' == 'true' and '",
+                    LaunchConfiguration("camera_depth_raw_topic", default=""), "' != ''",
+                ]
+            )
+        ),
+        parameters=[
+            {
+                "depth_raw_topic": LaunchConfiguration("camera_depth_raw_topic"),
+                "depth_output_topic": LaunchConfiguration("camera_depth_output_topic"),
+                "scale_mm_to_m": True,
+                "qos_depth": 10,
+            }
+        ],
+    )
+
     # =========================================================================
     # Sensor Hub (single process)
     # =========================================================================
 
-    unified_config_path = os.path.join(
-        get_package_share_directory("fl_slam_poc"),
-        "config",
-        "gc_unified.yaml",
-    )
     gc_sensor_hub = Node(
         package="fl_slam_poc",
         executable="gc_sensor_hub",
@@ -106,7 +208,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "config_path": unified_config_path,
+                "config_path": LaunchConfiguration("config_path"),
                 "livox_input_msg_type": LaunchConfiguration("livox_input_msg_type"),
                 "executor_threads": 4,
             }
@@ -139,23 +241,17 @@ def generate_launch_description():
         parameters=[
             {
                 # Backend subscribes ONLY to canonical topics
-                "lidar_topic": "/gc/sensors/lidar_points",
-                "odom_topic": "/gc/sensors/odom",
-                "imu_topic": "/gc/sensors/imu",
+                "lidar_topic": LaunchConfiguration("lidar_topic"),
+                "odom_topic": LaunchConfiguration("odom_topic"),
+                "imu_topic": LaunchConfiguration("imu_topic"),
                 # Other params
                 "trajectory_export_path": LaunchConfiguration("trajectory_export_path"),
                 "diagnostics_export_path": LaunchConfiguration("diagnostics_export_path"),
                 "odom_frame": "odom",
-                # Bag truth for M3DGR Dynamic01: odom child_frame_id is base_footprint.
-                "base_frame": "base_footprint",
+                "base_frame": LaunchConfiguration("base_frame"),
                 # No-TF extrinsics (T_{base<-sensor}) in [x,y,z,rx,ry,rz] rotvec (rad).
-                # LiDAR: Z-up confirmed (diagnose_coordinate_frames.py) - rotation [0,0,0] is correct.
-                # IMU: 154.5° rotation from gravity alignment. UNDER INVESTIGATION.
-                # CRITICAL: Must match gc_unified.yaml! Wrong rotation causes constant yaw drift.
-                "T_base_lidar": [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0],
-                # IMU extrinsic: 28° rotation to align IMU gravity with base +Z
-                # Restored to match good run (2026-01-26 22:06:57) values
-                "T_base_imu": [0.0, 0.0, 0.0, -0.015586, 0.489293, 0.0],
+                "T_base_lidar": LaunchConfiguration("T_base_lidar"),
+                "T_base_imu": LaunchConfiguration("T_base_imu"),
                 "status_check_period_sec": 5.0,
                 "forgetting_factor": 0.99,
                 "imu_gravity_scale": LaunchConfiguration("imu_gravity_scale"),
@@ -176,7 +272,8 @@ def generate_launch_description():
                     "ros2", "bag", "play",
                     LaunchConfiguration("bag"),
                     "--clock",
-                    "--rate", "1.0",
+                    "--rate", LaunchConfiguration("bag_play_rate"),
+                    "--playback-duration", LaunchConfiguration("bag_duration"),
                 ],
                 output="screen",
             ),
@@ -193,6 +290,24 @@ def generate_launch_description():
         imu_gravity_scale_arg,
         deskew_rotation_only_arg,
         enable_timing_arg,
+        bag_play_rate_arg,
+        bag_duration_arg,
+        config_path_arg,
+        lidar_topic_arg,
+        odom_topic_arg,
+        imu_topic_arg,
+        base_frame_arg,
+        T_base_lidar_arg,
+        T_base_imu_arg,
+        enable_camera_arg,
+        camera_rgb_compressed_arg,
+        camera_rgb_output_arg,
+        camera_depth_compressed_arg,
+        camera_depth_output_arg,
+        camera_depth_raw_arg,
+        # Camera: decompress RGB (C++); passthrough raw depth (Python) when camera_depth_raw_topic set
+        image_decompress_cpp,
+        depth_passthrough,
         # Sensor Hub (single process)
         gc_sensor_hub,
         # Audit / observability

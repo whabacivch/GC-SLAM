@@ -54,7 +54,7 @@ class VelocityZPriorResult:
 
 def planar_z_prior(
     belief_pred_pose: jnp.ndarray,  # (6,) [trans, rotvec]
-    z_ref: float,  # Reference z height (e.g., 0.86m for M3DGR)
+    z_ref: float,  # Reference world Z for base/body frame (e.g., 0.0m for base_footprint)
     sigma_z: float,  # Soft constraint std dev (e.g., 0.1m)
     eps_psd: float = constants.GC_EPS_PSD,
     chart_id: str = constants.GC_CHART_ID,
@@ -89,9 +89,10 @@ def planar_z_prior(
     """
     belief_pred_pose = jnp.asarray(belief_pred_pose, dtype=jnp.float64).reshape(-1)
 
-    # Extract z from pose (index 2 in [tx, ty, tz, rx, ry, rz])
+    # Extract z from pose (index 2 in [tx, ty, tz, rx, ry, rz]).
     z_pred = belief_pred_pose[2]
-    r_z = float(z_pred - z_ref)
+    # Residual is measurement - prediction so the MAP increment moves toward z_ref.
+    r_z = float(z_ref - z_pred)
 
     # Information precision on z
     precision_z = 1.0 / (sigma_z ** 2)
@@ -102,12 +103,9 @@ def planar_z_prior(
     L_planar = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
     L_planar = L_planar.at[2, 2].set(precision_z)
 
-    # Information vector: h = L @ delta_z where we want delta_z[2] to drive z toward z_ref
-    # For a Gaussian N(z_ref, sigma_z^2), the information form is:
-    #   h = L @ mu = precision_z * z_ref
-    # But we want to express as a residual update, so:
-    #   h[2] = precision_z * r_z = (z_pred - z_ref) / sigma_z^2
-    # This pulls the estimate toward z_ref
+    # Information vector: h = L @ delta, where delta is the desired increment.
+    # For this unary prior, the desired pose increment is delta_z = (z_ref - z_pred),
+    # so h[2] = precision_z * (z_ref - z_pred).
     h_planar = jnp.zeros((D_Z,), dtype=jnp.float64)
     h_planar = h_planar.at[2].set(precision_z * r_z)
 
@@ -169,6 +167,8 @@ def velocity_z_prior(
         Tuple of (VelocityZPriorResult, CertBundle, ExpectedEffect)
     """
     v_z_pred = float(v_z_pred)
+    # Residual is measurement - prediction so the MAP increment moves toward 0.
+    r_vz = -v_z_pred
 
     # Information precision on vel_z
     precision_vz = 1.0 / (sigma_vz ** 2)
@@ -177,12 +177,12 @@ def velocity_z_prior(
     L_vz = jnp.zeros((D_Z, D_Z), dtype=jnp.float64)
     L_vz = L_vz.at[8, 8].set(precision_vz)
 
-    # Information vector: h[8] = precision * v_z_pred (pulling toward 0)
+    # Information vector: h[8] = precision * (0 - v_z_pred) (pulling toward 0)
     h_vz = jnp.zeros((D_Z,), dtype=jnp.float64)
-    h_vz = h_vz.at[8].set(precision_vz * v_z_pred)
+    h_vz = h_vz.at[8].set(precision_vz * r_vz)
 
     # NLL proxy
-    nll_proxy = 0.5 * v_z_pred ** 2 * precision_vz
+    nll_proxy = 0.5 * r_vz ** 2 * precision_vz
 
     # Build certificate
     cert = CertBundle.create_approx(

@@ -25,7 +25,7 @@ import os
 import signal
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import rclpy
 from rclpy.node import Node

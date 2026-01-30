@@ -30,7 +30,6 @@ from fl_slam_poc.backend.operators.deskew_constant_twist import (
 from fl_slam_poc.backend.operators.binning import (
     bin_soft_assign,
     scan_bin_moment_match,
-    create_bin_atlas,
     BinSoftAssignResult,
     ScanBinStats,
 )
@@ -78,6 +77,21 @@ from fl_slam_poc.backend.operators.hypothesis import (
     HypothesisProjectionResult,
 )
 
+from fl_slam_poc.backend.operators.sinkhorn_ot import (
+    sinkhorn_ot_bev,
+    SinkhornOTResult,
+    SinkhornOTConfig,
+)
+
+from fl_slam_poc.backend.operators.ot_fusion import (
+    coupling_to_weights,
+    weighted_fusion_gaussian_bev,
+    weighted_fusion_vmf_bev,
+    wishart_regularize_2d,
+    temporal_smooth_lambda,
+    OTFusionConfig,
+)
+
 __all__ = [
     # Point budget
     "point_budget_resample",
@@ -93,7 +107,6 @@ __all__ = [
     # Binning
     "bin_soft_assign",
     "scan_bin_moment_match",
-    "create_bin_atlas",
     "BinSoftAssignResult",
     "ScanBinStats",
     # Kappa
@@ -123,4 +136,15 @@ __all__ = [
     # Hypothesis
     "hypothesis_barycenter_projection",
     "HypothesisProjectionResult",
+    # Sinkhorn OT (BEV splat association)
+    "sinkhorn_ot_bev",
+    "SinkhornOTResult",
+    "SinkhornOTConfig",
+    # OT fusion
+    "coupling_to_weights",
+    "weighted_fusion_gaussian_bev",
+    "weighted_fusion_vmf_bev",
+    "wishart_regularize_2d",
+    "temporal_smooth_lambda",
+    "OTFusionConfig",
 ]

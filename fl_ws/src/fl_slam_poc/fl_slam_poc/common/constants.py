@@ -266,9 +266,15 @@ GC_IW_RHO_MEAS_LIDAR = 0.99
 # The z feedback loop (LiDAR z treated same as x,y + map feedback) causes
 # drift to -50 to -80m without these constraints.
 
-# Reference z height for M3DGR dataset (meters)
-# Ground truth z is approximately 0.86m throughout the trajectory
-GC_PLANAR_Z_REF = 0.86
+# Reference z height in the GC "body/base" frame (meters).
+#
+# IMPORTANT (frame contract): in Dynamic01_ros2 our state/body frame is `base_footprint`
+# (wheel/base frame). Therefore, world Z of the base origin should be ~0 (ground contact).
+#
+# NOTE: M3DGR ground truth is reported in a different body frame (`camera_imu`) with Z ≈ 0.85m.
+# Evaluation should compare in that frame by transforming the wheel-frame estimate via
+# `config/m3dgr_body_T_wheel.yaml` (see `tools/transform_estimate_to_body_frame.py`).
+GC_PLANAR_Z_REF = 0.0
 
 # Soft z constraint std dev (meters)
 # Smaller = stronger constraint pulling z toward z_ref

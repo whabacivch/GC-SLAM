@@ -35,7 +35,6 @@ setup(
         "console_scripts": [
             # Golden Child backend (branch-free implementation)
             "gc_backend_node = fl_slam_poc.backend.backend_node:main",
-            "backend_node = fl_slam_poc.backend.backend_node:main",
             # Sensor Hub (single process with all frontend nodes)
             "gc_sensor_hub = fl_slam_poc.frontend.hub.gc_sensor_hub:main",
             # Individual sensor nodes (can also run standalone)
@@ -45,6 +44,8 @@ setup(
             # Audit / accountability
             "gc_dead_end_audit_node = fl_slam_poc.frontend.audit.dead_end_audit_node:main",
             "wiring_auditor = fl_slam_poc.frontend.audit.wiring_auditor:main",
+            # Camera: depth passthrough for bags with raw depth (e.g. Kimera)
+            "depth_passthrough = fl_slam_poc.frontend.sensors.depth_passthrough:main",
         ],
     },
 )

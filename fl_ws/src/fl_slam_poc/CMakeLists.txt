@@ -38,7 +38,6 @@ install(TARGETS image_decompress_cpp
 # Install Python node entrypoints into the ROS 2 "libexec" location so that
 # `ros2 launch` can resolve Node(executable=...) for this package.
 install(PROGRAMS
-  scripts/backend_node
   scripts/gc_backend_node
   scripts/gc_sensor_hub
   scripts/livox_converter
