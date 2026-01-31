@@ -987,12 +987,13 @@ class GoldenChildBackend(Node):
             self._publish_state_from_pose(pose_6d, stamp)
             self._pending_publish = None
 
-        # Camera required: fail fast if RGB or depth not yet received (no optional path).
+        # Camera required: skip this scan until we have at least one RGB and one depth (ordering race).
         if self._latest_rgb is None or self._latest_depth is None:
-            raise RuntimeError(
-                "Camera RGB and depth required; not yet received. "
-                "Ensure camera_image and camera_depth topics are published and received before LiDAR."
+            self.get_logger().warn(
+                "Skipping scan %d: camera not yet received (rgb=%s depth=%s); waiting for topics."
+                % (self.scan_count, self._latest_rgb is not None, self._latest_depth is not None)
             )
+            return
         stamp_rgb, rgb = self._latest_rgb
         _stamp_depth, depth = self._latest_depth
         if rgb.shape[:2] != depth.shape[:2]:

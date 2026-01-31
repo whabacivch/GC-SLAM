@@ -8,14 +8,12 @@
 
 gc_dead_end_audit:
   ros__parameters:
-    # Topics present in M3DGR Dynamic01_ros2 bag but not used by GC v2 pipeline today.
+    # Topics present in some bags but not used by GC v2 pipeline (Kimera/VLP-16 default).
     topic_specs:
       - "/camera/imu|sensor_msgs/msg/Imu"
       - "/camera/color/image_raw/compressed|sensor_msgs/msg/CompressedImage"
       - "/camera/aligned_depth_to_color/image_raw/compressedDepth|sensor_msgs/msg/CompressedImage"
       - "/vrpn_client_node/UGV/pose|geometry_msgs/msg/PoseStamped"
-      - "/livox/avia/imu|sensor_msgs/msg/Imu"
-      - "/livox/avia/lidar|livox_ros_driver/msg/CustomMsg"
 
     # Optional fail-fast: list topics here to require them within the timeout.
     # Default is empty so the audit node can be reused across bags/datasets.

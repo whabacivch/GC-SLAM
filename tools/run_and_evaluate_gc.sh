@@ -209,6 +209,18 @@ print_ok "All preflight checks passed"
 # ============================================================================
 print_stage 1 5 "Build Package (Fresh)"
 
+# Drop stale paths (e.g. removed livox_ros_driver2) so colcon does not warn
+filter_existing_paths() {
+  local var_name="$1"
+  local IFS=':' val= result=
+  for val in ${!var_name}; do
+    [ -d "$val" ] && result="${result:+$result:}$val"
+  done
+  export "$var_name=$result"
+}
+filter_existing_paths AMENT_PREFIX_PATH
+filter_existing_paths CMAKE_PREFIX_PATH
+
 source /opt/ros/jazzy/setup.bash
 cd "$PROJECT_ROOT/fl_ws"
 

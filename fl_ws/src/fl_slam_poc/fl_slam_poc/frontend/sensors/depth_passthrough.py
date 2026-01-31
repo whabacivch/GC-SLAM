@@ -8,6 +8,7 @@ Single path; no fallbacks. Params from ROS.
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
 
 
@@ -29,6 +30,13 @@ def main():
         rclpy.shutdown()
         return
 
+    # Sensor bags often use BEST_EFFORT; use it for subscription so we receive from bag.
+    qos_sensor = QoSProfile(
+        reliability=ReliabilityPolicy.BEST_EFFORT,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=qos_depth,
+        durability=DurabilityPolicy.VOLATILE,
+    )
     pub = node.create_publisher(Image, depth_out, qos_depth)
     import numpy as np
 
@@ -49,10 +57,10 @@ def main():
         else:
             pub.publish(msg)
 
-    sub = node.create_subscription(Image, depth_in, cb, qos_depth)
+    sub = node.create_subscription(Image, depth_in, cb, qos_sensor)
     node.get_logger().info(
-        "Depth passthrough: %s -> %s (scale_mm_to_m=%s)",
-        depth_in, depth_out, scale_mm_to_m,
+        "Depth passthrough: %s -> %s (scale_mm_to_m=%s)"
+        % (depth_in, depth_out, scale_mm_to_m)
     )
     rclpy.spin(node)
     rclpy.shutdown()

@@ -11,6 +11,13 @@ This file tracks all significant changes, design decisions, and implementation m
 - **Clean target:** `make clean` removes results/gc_*, results/gc_slam_diagnostics.npz, fl_ws/build, fl_ws/install, fl_ws/log to reduce bulk.
 - **Minimal-files audit:** docs/MINIMAL_OPERATIONAL_FILES_AUDIT.md lists minimal set for fully operational system (Kimera bag → run + evaluate). validate_livox_converter.py moved to archive.
 
+## 2026-01-31: Eval camera/depth handling; open issue — depth never received
+
+- **Camera ordering:** Backend no longer raises when the first LiDAR scan arrives before camera; it skips that scan (warn + return) and waits for at least one RGB and one depth frame. Avoids crash when bag message order delivers LiDAR before camera.
+- **rclpy logger:** Backend and depth_passthrough use a single formatted string for `get_logger().warn()` / `get_logger().info()` (rclpy expects one message string, not multiple args).
+- **depth_passthrough:** Logger fix so the node no longer crashes on startup. Subscription uses BEST_EFFORT QoS so it can receive from sensor-style (often best-effort) bag playback.
+- **Open issue — depth never received:** On Kimera eval (`run_and_evaluate_gc.sh`), backend reports `rgb=True depth=False` for the whole run; pipeline never runs (0 poses). The bag has `/acl_jackal/forward/depth/image_rect_raw` (34,720 Image messages). So either (1) depth_passthrough never receives from the bag, or (2) depth_passthrough receives but does not publish to `/gc/sensors/camera_depth`, or (3) backend never receives from `/gc/sensors/camera_depth`. To diagnose: with the same launch running, run `ros2 topic hz /acl_jackal/forward/depth/image_rect_raw` and `ros2 topic hz /gc/sensors/camera_depth`; identify which link (bag→depth_passthrough or depth_passthrough→backend) fails and fix QoS or topic wiring accordingly.
+
 ## 2026-01-30: GC v2 spine reorder; unbalanced Sinkhorn only; camera mandatory; bin path archived
 
 - **Pipeline reorder and z_lin:** Evidence uses pre-update map M_{t-1}. After predict/deskew, build IMU+odom evidence and solve for **z_lin** (IMU+odom-informed pose). Surfel + camera batch → map view → association (unbalanced Sinkhorn) → **visual_pose_evidence(M_{t-1}, π, z_lin_pose)** → fuse all evidence → recompose → **z_t**. Map update (fuse/insert/cull/forget) uses **z_t** (post-recompose pose) to transform measurements to world frame. See `docs/PIPELINE_ORDER_AND_EVIDENCE.md`.
