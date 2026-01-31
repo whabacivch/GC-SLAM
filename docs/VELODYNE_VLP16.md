@@ -100,6 +100,14 @@ Many open-source tools (ROS velodyne driver, PCL) have built-in VLP-16 support w
 
 ---
 
+## Noise prior for GC (lidar_sigma_meas)
+
+- **Range accuracy:** ±3 cm → variance per axis ≈ (0.03)² ≈ 9e-4 m².
+- **Angular:** ~0.15° → combined with range gives order ~1e-3 m²/axis for Cartesian noise.
+- **GC config:** Use `lidar_sigma_meas: 1e-3` (m² isotropic) in Kimera/VLP-16 profile (e.g. `config/gc_kimera.yaml`). See `docs/KIMERA_FRAME_MAPPING.md` and `docs/POINTCLOUD2_LAYOUTS.md`.
+
+---
+
 ## Relation to This Project
 
 - **Kimera-Multi-Data 10_14** (Campus-Outdoor): LiDAR point clouds are from **Velodyne VLP-16** (`/xxx/lidar_points`, `sensor_msgs/PointCloud2`). See `rosbags/Kimera_Data/TOPICS.md` and `PREP_README.md`.

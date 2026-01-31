@@ -1,0 +1,95 @@
+# =============================================================================
+# GC Kimera Profile - Golden Child SLAM v2 Configuration for Kimera-Multi-Data
+# =============================================================================
+#
+# Overlay for Kimera bags (e.g. 10_14 campus outdoor, Velodyne VLP-16).
+# Load this when PROFILE=kimera; frame names from docs/KIMERA_FRAME_MAPPING.md.
+#
+# Topic / frame names from Kimera bag sample (acl_jackal2):
+#   Odom: /acl_jackal/jackal_velocity_controller/odom
+#   LiDAR: /acl_jackal/lidar_points  (frame acl_jackal2/velodyne_link)
+#   IMU:   /acl_jackal/forward/imu    (frame acl_jackal2/forward_imu_optical_frame)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Sensor Hub Configuration (Kimera)
+# -----------------------------------------------------------------------------
+gc_sensor_hub:
+  ros__parameters:
+    pointcloud_passthrough:
+      input_topic: /acl_jackal/lidar_points
+      output_topic: /gc/sensors/lidar_points
+      qos_depth: 10
+
+    odom_normalizer:
+      input_topic: /acl_jackal/jackal_velocity_controller/odom
+      output_topic: /gc/sensors/odom
+      output_frame: ""  # Preserve acl_jackal2/odom
+      child_frame: ""   # Preserve acl_jackal2/base
+
+    imu_normalizer:
+      input_topic: /acl_jackal/forward/imu
+      output_topic: /gc/sensors/imu
+      output_frame: ""  # Preserve bag frame
+
+    # Dead-end audit: topics in bag not consumed by GC (accountability)
+    dead_end_audit:
+      topic_specs:
+        - "/acl_jackal/forward/color/image_raw/compressed|sensor_msgs/msg/CompressedImage"
+        - "/acl_jackal/forward/depth/image_rect_raw|sensor_msgs/msg/Image"
+        - "/acl_jackal/forward/infra1/image_rect_raw/compressed|sensor_msgs/msg/CompressedImage"
+        - "/acl_jackal/forward/infra2/image_rect_raw/compressed|sensor_msgs/msg/CompressedImage"
+      required_topics: []
+      required_timeout_sec: 10.0
+      status_publish_period_sec: 5.0
+      qos_reliability: best_effort
+      qos_depth: 10
+
+# -----------------------------------------------------------------------------
+# Backend Configuration (Kimera)
+# -----------------------------------------------------------------------------
+gc_backend:
+  ros__parameters:
+    lidar_topic: /gc/sensors/lidar_points
+    odom_topic: /gc/sensors/odom
+    imu_topic: /gc/sensors/imu
+
+    # Frame IDs from Kimera bag (docs/KIMERA_FRAME_MAPPING.md)
+    odom_frame: "acl_jackal2/odom"
+    base_frame: "acl_jackal2/base"
+
+    # PointCloud2 layout: VLP-16 (x, y, z, ring; optional t). See docs/POINTCLOUD2_LAYOUTS.md.
+    pointcloud_layout: vlp16
+
+    # LiDAR measurement noise prior (m² isotropic). VLP-16 ~1e-3; see docs/VELODYNE_VLP16.md.
+    lidar_sigma_meas: 1e-3
+
+    # Extrinsics: from Kimera_Data/calibration (tools/kimera_calibration_to_gc.py).
+    # T_base_lidar from T_baselink_lidar (full 6D); T_base_imu from T_cameralink_gyro (t) + bag-estimated rotation.
+    extrinsics_source: inline
+    T_base_lidar: [-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]
+    T_base_imu:   [-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.000000]
+
+    trajectory_export_path: /tmp/gc_slam_trajectory.tum
+    status_check_period_sec: 5.0
+    forgetting_factor: 0.99
+    init_window_odom_count: 10
+    enable_timing: false
+
+    # -----------------------------------------------------------------------------
+    # Map Backend Configuration (Stage 2: primitives only, bins deprecated)
+    # -----------------------------------------------------------------------------
+    # Map backend: "primitive_map" (probabilistic primitives) - bins removed
+    # Pose evidence: visual_pose_evidence from OT associations
+    map_backend: primitive_map
+    pose_evidence_backend: primitives
+
+    # Fixed budgets for measurement primitives
+    n_feat: 512
+    n_surfel: 1024
+    k_assoc: 8
+    k_sinkhorn: 50
+
+    # Primitive map capacity and maintenance
+    primitive_map_max_size: 50000
+    primitive_forgetting_factor: 0.999

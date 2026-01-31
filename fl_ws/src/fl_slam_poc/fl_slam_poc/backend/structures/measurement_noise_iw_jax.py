@@ -34,12 +34,17 @@ class MeasurementNoiseIWState(NamedTuple):
     block_dims: jnp.ndarray  # (3,) int32
 
 
-def create_datasheet_measurement_noise_state() -> MeasurementNoiseIWState:
+def create_datasheet_measurement_noise_state(
+    lidar_sigma_meas: float | None = None,
+) -> MeasurementNoiseIWState:
     """
-    Initialize measurement-noise IW states from constants.py.
+    Initialize measurement-noise IW states from constants.py (or overrides).
 
     Uses the same ν convention as process noise:
       nu = p + 1 + nu_extra,  Psi = Sigma_prior * nu_extra
+
+    lidar_sigma_meas: optional scalar (m²) for isotropic LiDAR covariance prior.
+      If None, uses C.GC_LIDAR_SIGMA_MEAS (M3DGR). Use 1e-3 for Kimera/VLP-16.
     """
     block_dims = MEAS_BLOCK_DIMS
     p = block_dims.astype(jnp.float64)
@@ -48,7 +53,8 @@ def create_datasheet_measurement_noise_state() -> MeasurementNoiseIWState:
 
     Sigma_gyro_psd = C.GC_IMU_GYRO_NOISE_DENSITY * jnp.eye(3, dtype=jnp.float64)
     Sigma_accel_psd = C.GC_IMU_ACCEL_NOISE_DENSITY * jnp.eye(3, dtype=jnp.float64)
-    Sigma_lidar_cov = C.GC_LIDAR_SIGMA_MEAS * jnp.eye(3, dtype=jnp.float64)
+    sigma_lidar = float(lidar_sigma_meas if lidar_sigma_meas is not None else C.GC_LIDAR_SIGMA_MEAS)
+    Sigma_lidar_cov = sigma_lidar * jnp.eye(3, dtype=jnp.float64)
 
     Psi_blocks = jnp.stack(
         [

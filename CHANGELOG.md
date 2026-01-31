@@ -4,6 +4,145 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-01-31: Livox removed; Kimera-only default; clean target; minimal-files audit
+
+- **Livox removed:** LiDAR path is pointcloud_passthrough only (PointCloud2 bags). livox_converter archived; livox_ros_driver2 removed from package.xml. gc_sensor_hub requires pointcloud_passthrough.input_topic; no Livox branch. Backend parses PointCloud2 via parse_pointcloud2_vlp16 only; parse_pointcloud2_vectorized (Livox-style) removed.
+- **Kimera default:** gc_unified.yaml and launch default to vlp16, Kimera-style topics (acl_jackal/*). imu_accel_scale default 1.0 (m/s²). Launch livox_input_msg_type removed.
+- **Clean target:** `make clean` removes results/gc_*, results/gc_slam_diagnostics.npz, fl_ws/build, fl_ws/install, fl_ws/log to reduce bulk.
+- **Minimal-files audit:** docs/MINIMAL_OPERATIONAL_FILES_AUDIT.md lists minimal set for fully operational system (Kimera bag → run + evaluate). validate_livox_converter.py moved to archive.
+
+## 2026-01-30: GC v2 spine reorder; unbalanced Sinkhorn only; camera mandatory; bin path archived
+
+- **Pipeline reorder and z_lin:** Evidence uses pre-update map M_{t-1}. After predict/deskew, build IMU+odom evidence and solve for **z_lin** (IMU+odom-informed pose). Surfel + camera batch → map view → association (unbalanced Sinkhorn) → **visual_pose_evidence(M_{t-1}, π, z_lin_pose)** → fuse all evidence → recompose → **z_t**. Map update (fuse/insert/cull/forget) uses **z_t** (post-recompose pose) to transform measurements to world frame. See `docs/PIPELINE_ORDER_AND_EVIDENCE.md`.
+- **Unbalanced Sinkhorn only:** `primitive_association` always calls `sinkhorn_unbalanced_fixed_k`; balanced path removed. Runtime manifest reports `sinkhorn_backend="unbalanced_fixed_k"`. `sinkhorn_balanced_fixed_k` deprecated in `sinkhorn_ot.py`.
+- **Camera mandatory:** Backend fails fast if RGB or depth not yet received (no optional path). Pipeline `camera_batch` is required (no default). Shape mismatch (rgb vs depth) raises.
+- **Cull as budgeting operator:** `primitive_map_cull` approximation_triggers include `"budgeting"` and `"mass_drop"`; docstring states resource constraint and mass_dropped logged.
+- **Depth contract:** New `docs/PIPELINE_DEPTH_CONTRACT.md`: camera_depth authoritative; LiDAR fused via lidar_depth_evidence in splat_prep_fused; one fused depth path.
+- **Bin path archived:** `bin_atlas.py` moved to `archive/bin_atlas.py` (not importable by package). `structures/__init__.py` exports only PrimitiveMap, MeasurementBatch, and primitive_map operators. BinAtlas, MapBinStats, create_fibonacci_atlas removed from package surface.
+- **Lidar bucket IW archived:** `lidar_bucket_noise_iw_jax` (structures + operators) moved to archive; pipeline and backend_node no longer use lidar_bucket state or accumulation. ScanPipelineResult keeps iw_lidar_bucket_dPsi/dnu as zero placeholders for diagnostic schema.
+- **Config:** `config/README.md` states use gc_unified.yaml only; gc_backend.yaml deprecated. Backend `__init__.py` docstring updated (structures: PrimitiveMap, MeasurementBatch, IW states; rendering deferred).
+
+## 2026-01-30: Camera mandatory; bins removed; backend config from YAML; full visual+LiDAR wiring
+
+- **Camera always on:** Launch no longer gates camera on `enable_camera`; `image_decompress_cpp` always runs. `depth_passthrough` runs when `camera_depth_raw_topic` is non-empty (node errors if empty).
+- **Backend config from YAML:** Launch uses `OpaqueFunction` to load `config_path` YAML and merge `gc_backend.ros__parameters` with launch overrides; backend node receives map_backend, pose_evidence_backend, n_feat, n_surfel, k_assoc, camera_K, T_base_camera, etc. from `gc_unified.yaml`.
+- **Bins removed:** BinAtlas and MapBinStats removed from backend state and pipeline. Pipeline signature: no `bin_atlas`/`map_stats`; added `camera_batch: Optional[MeasurementBatch]`. PrimitiveMap is always the canonical map; map_backend/pose_evidence_backend default to primitive_map/primitives.
+- **Camera wiring:** Backend subscribes to `/gc/sensors/camera_image` and `/gc/sensors/camera_depth`. Latest rgb/depth stored; on each LiDAR scan: VisualFeatureExtractor.extract(rgb, depth) → splat_prep_fused(extraction_result, points_camera_frame, intrinsics, config) → feature_list_to_camera_batch → camera_batch passed to pipeline. Pipeline merges camera_batch with LiDAR surfels via extract_lidar_surfels(..., base_batch=camera_batch).
+- **Fail-fast:** Backend requires camera_image_topic and camera_depth_topic (non-empty); camera_K and T_base_camera from params. New `backend/camera_batch_utils.py`: feature_list_to_camera_batch(List[Feature3D], timestamp_sec, ...) → MeasurementBatch (camera slice).
+- **gc_unified.yaml:** Added camera_image_topic, camera_depth_topic, camera_K, T_base_camera, ringbuf_len under gc_backend.ros__parameters.
+- **package.xml:** exec_depend cv_bridge for Python backend.
+
+## 2026-01-30: Bloat audit follow-up – restore ot_fusion, slim __init__, delete os
+
+- **ot_fusion.py:** Restored to `backend/operators/` from git (was mistakenly removed). BEV/OT fusion, splat, rendering, and visual feature code are **to be wired** into the pipeline (visual–LiDAR plan); not archived.
+- **operators/__init__.py:** Removed dead exports only: bin_soft_assign, scan_bin_moment_match, BinSoftAssignResult, ScanBinStats (binning already in archive); pos_cov_inflation_pushforward. Kept sinkhorn_ot_bev and ot_fusion exports for future wiring.
+- **archive/legacy_operators:** lidar_evidence.py now imports `from .binning import ScanBinStats`; added `__init__.py`.
+- **Root file `os`:** Deleted (large accidental PostScript); `/os` added to .gitignore.
+- **docs/BLOAT_AND_COMPLEXITY_AUDIT.md:** Updated to state binning/matrix_fisher archived only; BEV/splat/visual/ot_fusion kept and to be wired.
+
+## 2026-01-30: Rerun visualization (Wayland-friendly; replaces RViz)
+
+- **Rerun:** Visualization now uses [Rerun](https://rerun.io/) by default (Wayland-friendly). Backend logs map points (`gc/map/points`) and trajectory (`gc/trajectory`) to Rerun; no RViz dependency for viewing.
+- **Backend:** New params `use_rerun` (default true), `rerun_recording_path` (default `/tmp/gc_slam.rrd`), `rerun_spawn` (default false). When `use_rerun` is true and `rerun-sdk` is installed, data is recorded to the given path (or buffered if path empty); open with `rerun /path/to/gc_slam.rrd`. Set `rerun_spawn:=true` to spawn the Rerun viewer at startup.
+- **Launch:** `gc_rosbag.launch.py` exposes `use_rerun`, `rerun_recording_path`, `rerun_spawn`.
+- **RViz:** `rviz/gc_slam.rviz` no longer installed; ROS PointCloud2/Path topics are still published for tools that need them. `visualization_msgs` kept for optional MarkerArray (ellipsoids).
+
+## 2026-01-30: MA hex web replaces K-NN for OT candidate generation
+
+- **Candidate generation:** K-NN removed; `generate_candidates_ma_hex_web` in `fl_slam_poc.common.ma_hex_web` is the only candidate generator. BEV (x, y) hex cells with h = hex_scale_factor × median(√λ_max(Σ_bev)); map primitives binned by cell; per measurement, stencil of neighbor cells → collect map indices → take nearest k_assoc by squared distance. Fixed topology (stencil K=64, max_occupants per cell); single path, no legacy kNN.
+- **primitive_association:** Calls `generate_candidates_ma_hex_web(meas_positions, map_positions, map_covariances, k_assoc, MAHexWebConfig())`; `_generate_candidates_knn` deleted.
+- **OPERATOR_CONTRACTS:** associate_primitives_ot doc updated to "candidate gen = MA hex web".
+
+## 2026-01-30: Post-integration checklist audit
+
+- **Audit doc:** `docs/POST_INTEGRATION_CHECKLIST_AUDIT.md` — run-through of post-integration checklist (single path, legacy deletion, no multi-path depth, gating, evidence correctness, JAX hot path, Certificates/Frobenius, rendering, backwards-compatibility phrases). Result: **PASS** on minimal criteria with two **PARTIAL** items: (1) `responsibility_threshold` in `flatten_associations_for_fuse` (hard threshold 0.01 for “include in fuse”); (2) `np.array` in flatten (host round-trip per scan). Recommended follow-ups: remove dead import, continuous fuse weight or document sparse-fuse, JAX-only flatten, JAX Sinkhorn.
+- **Dead import removed:** Pipeline no longer imports `pos_cov_inflation_pushforward` (was unused; MapUpdateResult kept).
+
+## 2026-01-30: Operator contracts, manifest, validation tests (Visual LiDAR plan)
+
+- **Operator contracts:** New `docs/OPERATOR_CONTRACTS.md` — operator table with roles, fixed budgets (N_FEAT, N_SURFEL, K_ASSOC, K_SINKHORN, RINGBUF_LEN), CertBundle/approximation triggers, Frobenius policy; code anchors for pose evidence, OT, map maintenance, surfel extraction.
+- **Runtime manifest:** `RuntimeManifest` now has `pose_evidence_backend` and `map_backend` (from constants); included in `to_dict()`. When `pose_evidence_backend="primitives"`, `backends["lidar_evidence"]` set to visual_pose_evidence; when `map_backend="primitive_map"`, `backends["map_update"]` set to primitive_map. Backend node passes config values when publishing manifest.
+- **Validation tests:** New `test_visual_lidar_plan.py` — manifest (pose_evidence_backend, map_backend present and valid; primitives path sets lidar_evidence/map_update), single pose-evidence path, fixed-cost budgets (N_FEAT, N_SURFEL, K_ASSOC, K_SINKHORN, RINGBUF_LEN), CertBundle Frobenius policy (approximation_triggers ≠ ∅ ⇒ frobenius_applied). 13 tests.
+
+## 2026-01-30: PrimitiveMap publisher, RViz config, bins as derived (Visual LiDAR plan)
+
+- **Map publisher:** New `fl_slam_poc/backend/map_publisher.py`: `PrimitiveMapPublisher` publishes PrimitiveMap as PointCloud2 on `/gc/map/points` (xyz + intensity/weight). Optional MarkerArray `/gc/map/ellipsoids` (not yet populated). Uses `extract_primitive_map_view`; frame_id from node (e.g. odom).
+- **Backend integration:** When `map_backend=primitive_map`, backend_node creates `PrimitiveMapPublisher` and calls `publish(primitive_map, stamp_sec)` from `_publish_state_from_pose` (same time as state/path).
+- **RViz:** New `fl_ws/src/fl_slam_poc/rviz/gc_slam.rviz` — fixed frame odom, PointCloud2 `/gc/map/points`, Path `/gc/trajectory`. Installed to `share/fl_slam_poc/rviz/`. Added `visualization_msgs` to package.xml.
+- **Stage 3 (bins as derived):** Pipeline comment documents that bins (MapBinStats, B_BINS) are derived/legacy only: not used for pose evidence; MapUpdateResult bin-shaped for backend_node aggregation only (deltas zero); canonical map is PrimitiveMap.
+
+## 2026-01-30: Odom vs belief diagnostic (raw vs estimate)
+
+- **Backend:** New params `odom_belief_diagnostic_file` (path, default "") and `odom_belief_diagnostic_max_scans` (int, default 0 = all). When file is set, backend appends one CSV row per scan: scan, t_sec, raw odom (x, y, yaw_deg, vx, vy, wz), belief at scan start (x, y, yaw_deg, vx, vy), belief at scan end (x, y, yaw_deg, vx, vy). Helpers: `_yaw_deg_from_pose_6d`, `_belief_xyyaw_vel`.
+- **Launch:** `gc_rosbag.launch.py` declares and passes `odom_belief_diagnostic_file` and `odom_belief_diagnostic_max_scans` to the backend.
+- **Eval script:** `run_and_evaluate_gc.sh` sets `odom_belief_diagnostic_file:=$RESULTS_DIR/odom_belief_diagnostic.csv` and `odom_belief_diagnostic_max_scans:=200` so each run writes the diagnostic CSV under results (first 200 scans). Use it to compare raw odom vs belief and spot X/Y or scale mismatch.
+
+## 2026-01-30: Map and belief audit (Kimera 60s run)
+
+- **Eval run:** `results/gc_20260130_125224` (Kimera 10_14_acl_jackal-005, 60s, 160 scans). ATE trans 0.38 m, rot 0.65 deg; EST ptp X 0.97 m, Y 0.20 m vs GT ptp X 0.19 m, Y 0.32 m.
+- **Audit:** `docs/MAP_AND_BELIEF_AUDIT_2026-01-30.md` — pipeline trace (odom → evidence → fusion), map/belief notes, and root-cause hypothesis. Odom pose + twist + velocity + yaw rate + kinematic consistency are all in L_evidence at full strength (alpha=1.0). Likely cause: **frame/axis convention** (GT “forward” may be Y in GT frame while our odom/state “forward” is X), leading to X/Y displacement mismatch after initial-pose alignment. Checklist: verify GT vs odom frame, inspect odom covariances, log first odom vs belief poses, verify map/bin frame.
+
+## 2026-01-30: Splat rendering moved to backend (Option A)
+
+- **Rendering location:** `splat_rendering.py` moved from `frontend/sensors/` to `backend/rendering.py`. Rendering is output from state/map, not sensor input; backend owns inference, fusion, and outputs (trajectory, state, rendered view).
+- **Docs:** PRODUCTION_READINESS_SPLAT_PIPELINE.md updated: Frontend/sensors no longer lists splat_rendering; Backend lists rendering.py. Runtime manifest checklist includes rendering. CHANGELOG historical line updated to backend/rendering.py.
+- **Convention:** Frontend = sensor I/O + evidence extraction only; backend = inference + fusion + kernels + output (including rendering).
+
+## 2026-01-30: Default evaluation profile Kimera; M3DGR Dynamic01 archived
+
+- **Default profile:** `tools/run_and_evaluate_gc.sh` now defaults to `PROFILE=kimera` (Kimera bag and config). M3DGR Dynamic01 is no longer the default.
+- **Archive:** Added `archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md` with paths and usage for running with Dynamic01 via `PROFILE=m3dgr`. Updated `archive/README.md` to list it.
+- **Code/docs:** `fl_slam_poc/common/constants.py` frame comment is dataset-agnostic (no longer "Dynamic01_ros2"). README and run script comments updated to state default is Kimera.
+
+## 2026-01-30: Full fusion trust and odom pose + twist + time evidence
+
+- **Fusion trust:** Set GC_ALPHA_MIN = GC_ALPHA_MAX = 1.0 so fusion scale alpha is always full strength (no scaling down). L_post = L_pred + L_evidence; evidence is no longer damped by quality-based alpha.
+- **Odom evidence:** Pipeline already uses (1) odom pose (L_odom), (2) odom velocity (v_odom_body), (3) odom yaw rate (omega_z), (4) pose-twist kinematic consistency (pose change ≈ R @ v*dt, omega*dt). Documented in pipeline comments that twist+time gives distance/rotation evidence; message covariances (odom_twist_cov) control strength.
+
+## 2026-01-30: Kimera bag inspection and real extrinsics (no placeholders)
+
+- **Bag inspection:** Ran full inspection on `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005`. First-N messages, diagnose_coordinate_frames, estimate_lidar (ground plane), estimate_imu (gravity) all ran successfully.
+- **Findings:** LiDAR Z-UP confirmed; odom covariance ordering ROS [x,y,z,roll,pitch,yaw]; IMU specific force ~-Y (optical frame); IMU/odom covariances from bag recorded in KIMERA_FRAME_MAPPING.
+- **Extrinsics applied:** `gc_kimera.yaml` now has real rotations (no longer placeholders): T_base_lidar [0,0,0, 0.0217, 0.0080, 0] (small roll/pitch from ground plane); T_base_imu [0,0,0, -1.6027, 0.0026, 0] (~91.8° from gravity). Translation 0,0,0 (not estimated).
+- **Tooling:** `estimate_lidar_base_extrinsic_rotation_from_ground.py` supports PointCloud2 (VLP-16) when topic type is sensor_msgs/msg/PointCloud2. `tools/inspect_kimera_bag.py` runs all inspections and can `--apply` parsed extrinsics to config.
+
+## 2026-01-30: GC v2 Kimera frames, noise, eval, extrinsics, and sensor sanity
+
+- **Frame mapping:** `docs/KIMERA_FRAME_MAPPING.md` documents Kimera→GC frame names (odom_frame, base_frame, LiDAR/IMU frames), axis conventions, diagnostic results placeholder, discovery (extrinsics, LiDAR variance, IMU/odom cov, timing), extrinsics loading, config options, and camera topics. `FRAME_AND_QUATERNION_CONVENTIONS.md` points to Kimera frame mapping.
+- **PointCloud2:** `parse_pointcloud2_vlp16` in backend; `pointcloud_layout: livox | vlp16` in config and launch; fail-fast on wrong layout. `docs/POINTCLOUD2_LAYOUTS.md` documents Livox vs VLP-16 layouts.
+- **Config overlay:** `config/gc_kimera.yaml` for Kimera (odom_frame, base_frame, pointcloud_layout vlp16, lidar_sigma_meas 1e-3, extrinsics_source inline). Sensor hub uses pointcloud_passthrough and Kimera topics from config.
+- **Eval profile:** `run_and_evaluate_gc.sh` supports `PROFILE=kimera`: sets BAG_PATH, GT_FILE, CONFIG_PATH, odom_frame, base_frame, pointcloud_layout, lidar_sigma_meas; fails if bag or GT missing when profile is kimera.
+- **Extrinsics:** Backend params `extrinsics_source: inline | file`, `T_base_lidar_file`, `T_base_imu_file`; when file, load 6D from YAML (fail if missing). Launch and script pass them. `tools/check_extrinsics.py` prints T_base_lidar, T_base_imu and frame names from config.
+- **Noise:** Configurable `lidar_sigma_meas` (scalar m²); Kimera/VLP-16 1e-3, M3DGR 0.01. `create_datasheet_measurement_noise_state(lidar_sigma_meas=...)` and `create_datasheet_lidar_bucket_noise_state(lidar_sigma_meas=...)` accept override.
+- **Diagnose script:** `tools/diagnose_coordinate_frames.py` supports PointCloud2 (VLP-16) when lidar topic type is sensor_msgs/msg/PointCloud2; extracts x,y,z for Z-up/Z-down analysis.
+- **First-N summary:** `tools/first_n_messages_summary.py` emits first N messages summary (field names, frame_id, sample values) for PointCloud2, Imu, Odometry; output markdown or JSON per bag.
+
+## 2026-01-30: Unified LiDAR depth evidence (I0.2) and PoE fusion
+
+- **One LiDAR depth evidence API (I0.2):** `lidar_depth_evidence(points_camera_frame, uv_query, fx, fy, cx, cy, config, ...)` returns `(Λ_ell, θ_ell)` per query. Always defined, continuous; Λ_ell → 0, θ_ell → 0 when not applicable (camera-only behavior).
+- **Route A:** `_route_a_natural_params` returns (ΛA, θA) with reliability wA = w_cnt * w_mad * w_repr (point support sigmoid, MAD spread exp(−β σ²_A), reprojection exp(−γ r²)). MAD scale 1.4826 for robust σ_A.
+- **Route B:** Returns (ΛB, θB) via `_route_b_natural_params`; added w_z = σ(α_z(z* − z_min)) for behind/min-depth. Combined weight wB = w_angle * w_planar * w_res * w_z.
+- **Mixture-of-experts:** Λ_ell = ΛA + ΛB, θ_ell = θA + θB (optional gamma_lidar modality dial). No "choose A or B"; both contribute; weak experts vanish smoothly.
+- **Config:** Added point_support_n0, point_support_alpha, spread_mad_beta, repr_gamma (Route A); depth_min_sigmoid_alpha_z, gamma_lidar.
+- **splat_prep_fused:** Uses `lidar_depth_evidence` only; PoE Λf = w_c*Λc + w_ell*Λ_ell, θf = w_c*θc + w_ell*θ_ell; reliability scaling Λ←wΛ, θ←wθ. Removed use_route_b parameter.
+- **Legacy removed (no backward compat):** Dropped `lidar_ray_depth_route_a`, `lidar_ray_depth_route_b` (public), `depth_natural_params`, `fuse_depth_natural_params`. Route B logic kept as internal `_route_b_ray_plane`; single public API `lidar_depth_evidence` + `backproject_camera` / `backprojection_cov_camera`.
+
+## 2026-01-30: Kimera switch cleanup + MIT/Fellowship gitignore
+
+- **M3DGR-era docs archived:** Moved to `archive/docs/`: `TRACE_Z_EVIDENCE_AND_TRAJECTORY.md`, `RAW_MEASUREMENTS_VS_PIPELINE.md`, `TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`. Project switching to Kimera (`rosbags/Kimera_Data/`); z evidence and raw-measurements audits are M3DGR/race-specific. Refs updated in PIPELINE_DESIGN_GAPS, README, EVALUATION, PREINTEGRATION_STEP_BY_STEP, datasets/M3DGR_STATUS; archive/README lists new items.
+- **MIT/ and Fellowship/ removed:** `MIT/` (nested duplicate path + venv) and `Fellowship/` (Python venv) deleted from repo to reduce clutter; both remain in `.gitignore` if recreated.
+- **logs_llm/** added to `.gitignore`; directory removed from tree (MCP runtime logs).
+- **Cleanup audit executed (except VLP16 and config):** `TRAJECTORY_COMPARISONS.md` moved to `archive/docs/` (run-log of trajectory comparison images; links to gitignored `results/`). `docs/MCP_CODE_GRAPH_SETUP.md` moved to `tools/README_MCP.md`; README doc table and `tools/install_code_graph_rag_mcp.sh` now point to `tools/README_MCP.md`. `VELODYNE_VLP16.md` and `config/cyclonedds_*.xml` left as-is per request (VLP16 not archived; config still converting).
+- **docs/CLEANUP_AUDIT.md removed:** Audit completed; doc deleted to avoid bloat.
+
+## 2026-01-30: Camera wiring for Kimera bag (C++ decompress + depth passthrough)
+
+- **C++ image_decompress_node:** Depth subscription is optional: when `depth_compressed_topic` is empty, the node only subscribes to RGB and publishes decompressed rgb8 to `rgb_output_topic`. Enables Kimera bags (RGB compressed, depth raw) without requiring compressed depth.
+- **Launch (gc_rosbag.launch.py):** Added `enable_camera` (default false) and camera topic args: `camera_rgb_compressed_topic` (default `/acl_jackal/forward/color/image_raw/compressed`), `camera_rgb_output_topic` (`/gc/sensors/camera_image`), `camera_depth_compressed_topic` (default "" for Kimera), `camera_depth_output_topic` (`/gc/sensors/camera_depth`), `camera_depth_raw_topic` (default `/acl_jackal/forward/depth/image_rect_raw`). When `enable_camera:=true`, `image_decompress_cpp` runs (RGB only if depth_compressed empty). When `enable_camera:=true` and `camera_depth_raw_topic` non-empty, `depth_passthrough` runs.
+- **Depth passthrough (frontend/sensors/depth_passthrough.py):** New Python node: subscribes to raw depth (sensor_msgs/Image, e.g. 16UC1 mm), republishes to canonical topic with optional `scale_mm_to_m` (16UC1 → 32FC1 m). Entry point `depth_passthrough`. For Kimera bags that publish raw depth at `.../depth/image_rect_raw`.
+
+Usage (Kimera bag): `ros2 launch fl_slam_poc gc_rosbag.launch.py bag:=/path/to/kimera_ros2 enable_camera:=true` (defaults target acl_jackal topics; for acl_jackal2 use `camera_rgb_compressed_topic:=/acl_jackal2/forward/color/image_raw/compressed camera_depth_raw_topic:=/acl_jackal2/forward/depth/image_rect_raw`).
+
 ## 2026-01-30: Production-readiness assessment (splat pipeline)
 
 - **docs/PRODUCTION_READINESS_SPLAT_PIPELINE.md:** New doc identifying what would need to change to put LiDAR–camera splat fusion and BEV OT into production. Covers: current state (backend subscribes only to lidar/odom/imu; no camera; no splat/OT in pipeline); topics and frontend (canonical camera topic, camera normalizer, fail-fast); backend params and state (T_base_camera, intrinsics, optional Lambda_prev for temporal smoothing); end-to-end data flow (image → extractor → depth fusion → splat_prep → BEV → pack_splat_batch → Sinkhorn → OT fusion); pipeline options (output-only vs evidence vs new steps); config and RuntimeManifest; frame/ID consistency; performance; tests; docs. Recommends starting with output-only splat branch in on_lidar.
@@ -42,7 +181,7 @@ This file tracks all significant changes, design decisions, and implementation m
 
 - **LiDAR surfels (frontend/sensors/lidar_surfels.py):** Voxel downsample (voxel_size_m), plane fit per voxel via _fit_plane_weighted; Gaussian mean = centroid, Σ from plane residuals + sensor noise; vMF B=3 (normal + two in-plane directions); Wishart Λ_reg = Λ + nu/psi_scale * I. `LidarSurfel` dataclass (xyz, cov_xyz, info_xyz, canonical_theta, mu_app (3,3), kappa_app (3,)); same natural-param interface as camera splats. Config: `LidarSurfelConfig`. No edits to livox_converter.
 - **ot_fusion (backend/operators/ot_fusion.py):** Post-fusion Wishart: `wishart_regularize_2d(Lambda, nu, psi_scale)` — Λ_reg = Λ + nu * Psi^{-1}, Psi = psi_scale * I. Temporal smoothing: `temporal_smooth_lambda(Lambda_t, Lambda_prev, alpha)` — Λ_smoothed = Λ_t + alpha * Λ_prev; caller holds Λ_prev. Config: `wishart_nu`, `wishart_psi_scale`, `temporal_alpha`.
-- **Optional rendering (frontend/sensors/splat_rendering.py):** EWA splatting: `ewa_splat_weight`, `ewa_splat_weights_at_point`, `render_tile_ewa` (tile 32×32). Multi-lobe vMF shading: `vmf_shading_multi_lobe(v, mu_app, kappa_app, pi_b)`. fBm: `fbm_value_noise(x, y, octaves=5, gain=0.5)` (deterministic hash-based value noise). `opacity_from_logdet`. Config: `SplatRenderingConfig`. Fixed loops; no JAX requirement.
+- **Optional rendering (backend/rendering.py):** EWA splatting: `ewa_splat_weight`, `ewa_splat_weights_at_point`, `render_tile_ewa` (tile 32×32). Multi-lobe vMF shading: `vmf_shading_multi_lobe(v, mu_app, kappa_app, pi_b)`. fBm: `fbm_value_noise(x, y, octaves=5, gain=0.5)` (deterministic hash-based value noise). `opacity_from_logdet`. Config: `SplatRenderingConfig`. Fixed loops; no JAX requirement. (Rendering moved from frontend/sensors to backend — output from state, not sensor.)
 
 ## 2026-01-29: Visual feature extractor — 16-item enhancement (plan)
 
@@ -285,7 +424,7 @@ tail -20 /tmp/gc_slam_trajectory.tum | awk '{print $4}'  # Check z values
 
 ## 2026-01-28: Code Graph RAG MCP — GitHub-only install
 
-- **docs/MCP_CODE_GRAPH_SETUP.md**: Setup instructions for code-graph-rag-mcp using **GitHub Releases only** (no npm registry); Cursor MCP config uses global `code-graph-rag-mcp` binary.
+- **tools/README_MCP.md**: Setup instructions for code-graph-rag-mcp using **GitHub Releases only** (no npm registry); Cursor MCP config uses global `code-graph-rag-mcp` binary.
 - **tools/install_code_graph_rag_mcp.sh**: Script to download latest release `.tgz` from GitHub and run `npm install -g`.
 
 ## 2026-01-28: Critical Fix - Wahba Sign Flip (First Scan Frame Mismatch)

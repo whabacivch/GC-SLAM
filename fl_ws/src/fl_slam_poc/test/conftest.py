@@ -81,20 +81,13 @@ def m3dgr_topic_config() -> Dict[str, str]:
     
     This fixture reflects the **GC v2 evaluation wiring** (gc_rosbag.launch.py).
     
-    Topic naming convention:
-        Raw (from bag)              Canonical (for backend)
-        /livox/mid360/lidar     ->  /gc/sensors/lidar_points
-        /odom                   ->  /gc/sensors/odom
-        /livox/mid360/imu       ->  /gc/sensors/imu
-    
-    Backend subscribes ONLY to /gc/sensors/* (canonical topics).
+    Topic naming (Kimera default): pointcloud_passthrough, odom_normalizer, imu_normalizer
+        → /gc/sensors/* (canonical for backend).
     """
     return {
-        # Raw topics from rosbag (input to sensor hub)
-        "livox_custommsg_topic": "/livox/mid360/lidar",
-        "raw_odom_topic": "/odom",
-        "raw_imu_topic": "/livox/mid360/imu",
-        # Canonical topics (output from sensor hub, input to backend)
+        "raw_lidar_topic": "/acl_jackal/lidar_points",
+        "raw_odom_topic": "/acl_jackal/jackal_velocity_controller/odom",
+        "raw_imu_topic": "/acl_jackal/forward/imu",
         "lidar_topic": "/gc/sensors/lidar_points",
         "odom_topic": "/gc/sensors/odom",
         "imu_topic": "/gc/sensors/imu",

@@ -1,60 +1,12 @@
 # Golden Child SLAM v2 - Complete System Dataflow Diagram
 
-This document provides a comprehensive Mermaid diagram showing the complete dataflow of the Golden Child SLAM v2 system, including all nodes, topics, and dead-ended items.
+This document describes the complete dataflow of the Golden Child SLAM v2 system, including all nodes, topics, and dead-ended items.
 
-## Exporting the Diagram
+## Interactive Diagram
 
-**Note**: The diagram is generated using **Graphviz** and rendered as **vector graphics (SVG)**. SVG scales infinitely without quality loss!
+The diagram is available as an interactive HTML file:
 
-### Regenerating the Diagram
-
-The diagram source is in `system_dataflow.dot`. To regenerate:
-
-#### Export as SVG (Recommended)
-```bash
-cd docs
-dot -Tsvg system_dataflow.dot -o system_dataflow.svg
-```
-
-#### Export as PNG (High Resolution)
-```bash
-cd docs
-dot -Tpng system_dataflow.dot -o system_dataflow.png -Gdpi=300
-```
-
-#### Export as PDF
-```bash
-cd docs
-dot -Tpdf system_dataflow.dot -o system_dataflow.pdf
-```
-
-### Editing the Diagram
-
-Edit `system_dataflow.dot` with any text editor. The Graphviz DOT format is:
-- **Text-based** - easy to version control
-- **Deterministic** - same input always produces same output
-- **Reliable** - explicit rank constraints ensure correct vertical stacking
-
-After editing, regenerate the SVG using the commands above.
-
-## Complete System Dataflow
-
-The diagram below is embedded directly for preview. You can also view the standalone SVG file: [system_dataflow.svg](system_dataflow.svg)
-
-<div align="center">
-
-![System Dataflow Diagram](system_dataflow.svg)
-
-</div>
-
-**Source:** The diagram is generated from `system_dataflow.dot` using Graphviz. To regenerate:
-```bash
-cd docs && dot -Tsvg system_dataflow.dot -o system_dataflow.svg
-```
-
-**Note:** If the diagram doesn't render in your markdown preview, you can:
-- Open `docs/system_dataflow.svg` directly in your browser
-- View the PNG version: `docs/system_dataflow.png`
+- **View:** [system_dataflow_d3.html](system_dataflow_d3.html) — open in a browser for the full dataflow diagram.
 
 ## Topic Flow Details
 

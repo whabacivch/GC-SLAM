@@ -6,3 +6,4 @@ matplotlib
 setuptools<80
 typeguard
 pydantic>=2.0
+rerun-sdk>=0.15

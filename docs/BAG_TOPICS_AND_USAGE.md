@@ -333,8 +333,9 @@ This section answers: “Which fields are read/written, and are covariances prop
 
 #### `sensor_msgs/msg/PointCloud2` (internal `/lidar/points`)
 
-- Produced by `livox_converter`.
-- Frontend currently parses only `x/y/z` and filters invalid points; other fields are ignored by current inference.
+- Produced by `livox_converter` (M3DGR) or native from bag (Kimera/VLP-16).
+- **Field layouts:** Required vs optional fields differ by sensor. See [POINTCLOUD2_LAYOUTS.md](POINTCLOUD2_LAYOUTS.md) for Livox (current) vs VLP-16 (x, y, z, ring, optional t/time). Backend selects parser by `pointcloud_layout: livox | vlp16`; fail-fast if layout does not match.
+- Frontend/backend parse x/y/z and (when layout matches) ring, tag, timestamps; other fields are preserved for audit.
 
 ### FL-SLAM custom message schemas (authoritative)
 

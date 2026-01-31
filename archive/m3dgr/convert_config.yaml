@@ -1,0 +1,4 @@
+output_bags:
+  - uri: Dynamic01_ros2
+    storage_id: sqlite3
+    max_bagfile_size: 0

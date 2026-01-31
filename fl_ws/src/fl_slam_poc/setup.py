@@ -24,7 +24,7 @@ setup(
             ],
         ),
     ],
-    install_requires=["setuptools", "numpy", "scipy", "jax", "pyyaml"],
+    install_requires=["setuptools", "numpy", "scipy", "jax", "pyyaml", "rerun-sdk"],
     zip_safe=True,
     maintainer="Will Haber",
     maintainer_email="whab13@mit.edu",
@@ -38,7 +38,6 @@ setup(
             # Sensor Hub (single process with all frontend nodes)
             "gc_sensor_hub = fl_slam_poc.frontend.hub.gc_sensor_hub:main",
             # Individual sensor nodes (can also run standalone)
-            "livox_converter = fl_slam_poc.frontend.sensors.livox_converter:main",
             "odom_normalizer = fl_slam_poc.frontend.sensors.odom_normalizer:main",
             "imu_normalizer = fl_slam_poc.frontend.sensors.imu_normalizer:main",
             # Audit / accountability

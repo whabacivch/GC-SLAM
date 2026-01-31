@@ -11,7 +11,7 @@ Key code anchors (actual behavior):
 - Per-scan evidence assembly: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py` (time-resolved accel evidence at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:713`, planar translation at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:633`, planar priors at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`, odom twist evidence at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:884`).
 - Map update planar z fix: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py` (sets `t_hat[2]=0` at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`).
 
-**References (design context, may be stale vs code):** `docs/RAW_MEASUREMENTS_VS_PIPELINE.md`, `docs/PIPELINE_TRACE_SINGLE_DOC.md`, `docs/TRACE_Z_EVIDENCE_AND_TRAJECTORY.md`, `tools/inspect_odom_covariance.py`.
+**References (design context, may be stale vs code):** `docs/PIPELINE_TRACE_SINGLE_DOC.md`, `tools/inspect_odom_covariance.py`. M3DGR-era audits (raw measurements, z evidence, trajectory/GT frame) are in `archive/docs/`.
 
 ---
 
@@ -145,7 +145,7 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 
 - **No pure constant shift** — The evaluator uses evo’s SE(3) Umeyama alignment (`evaluate_slam.py`: `est_sync.align(gt_sync, correct_scale=False)`). A **constant** SE(3) error would be absorbed by that alignment; the reported ATE is the **residual** after best-fit SE(3). So the ~2 m translation and ~134° rotation ATE we see are **non-constant** residuals (drift, or initial-phase vs later-phase structure).
 
-- **What the 3D plot suggests** — After the chaotic start, the estimated trajectory (orange) follows the ground-truth (cyan) shape but with a **consistent offset**. That can be (a) residual after Umeyama (so the error is not exactly constant), (b) **initial anchor bias**: first poses in A0, then switch to A_smoothed, leaving an unresolved offset, or (c) **residual frame/calibration**: e.g. `body_T_wheel` inexact or GT in a slightly different frame (see `docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`).
+- **What the 3D plot suggests** — After the chaotic start, the estimated trajectory (orange) follows the ground-truth (cyan) shape but with a **consistent offset**. That can be (a) residual after Umeyama (so the error is not exactly constant), (b) **initial anchor bias**: first poses in A0, then switch to A_smoothed, leaving an unresolved offset, or (c) **residual frame/calibration**: e.g. `body_T_wheel` inexact or GT in a slightly different frame (see `archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`).
 
 - **Odom drift vs frame** — Dashboard “deg” panel shows Δyaw odom with a **sawtooth** (drift then sharp correction) and Δyaw MF tracking it. So odom yaw **drifts** and the SLAM system **corrects** it; that is not an uncorrected constant frame shift. A **constant** frame error would appear as a persistent bias in rotation/translation that Umeyama would largely remove; the fact that we still have large ATE after alignment means the error has time-varying or structurally varying components.
 
@@ -195,11 +195,11 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 - **FRAME_AND_QUATERNION_CONVENTIONS.md** (lines 72, 165–177): "`livox_frame` is **Z-up** for this dataset (ground normal points +Z)" and "`T_base_lidar` rotation is identity (rotvec=[0,0,0])."
 - **Code:** `backend_node.py:585` applies `pts_base = R_base_lidar @ pts_np.T + t_base_lidar`; `gc_rosbag.launch.py:149` and `gc_unified.yaml:78` set `T_base_lidar = [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]` (rotation identity). So the code assumes livox_frame is Z-up.
 
-**Observed (evaluation):** See TRACE_TRAJECTORY_AND_GROUND_TRUTH.md for frame correction (wheel vs body, anchor smoothing).
+**Observed (evaluation):** For M3DGR frame correction (wheel vs body, anchor smoothing) see `archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`.
 
 **Interpretation:** If livox_frame is actually Z-down and we use identity, all geometry (points, gravity alignment) is Z-flipped; the estimated pose would be in a frame that is 180° about X from base_footprint.
 
-**Recommendation:** Run `tools/diagnose_coordinate_frames.py` on the bag; align `FRAME_AND_QUATERNION_CONVENTIONS.md` and `T_base_lidar` with the result (see TRACE_TRAJECTORY_AND_GROUND_TRUTH.md for export/GT frame).
+**Recommendation:** Run `tools/diagnose_coordinate_frames.py` on the bag; align `FRAME_AND_QUATERNION_CONVENTIONS.md` and `T_base_lidar` with the result. For M3DGR export/GT frame see `archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`.
 
 ---
 

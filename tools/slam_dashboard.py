@@ -13,6 +13,8 @@ from the same dir and interpolates at scan timestamps so Panel C can still show 
 Usage:
   tools/slam_dashboard.py <diagnostics.npz> [--output dashboard.html] [--scan N] [--ground-truth path.tum]
   Ground truth is auto-detected from results/gc_*/ground_truth_aligned.tum when present.
+  Ground truth is cropped to the run's time window (first to last scan timestamp) so only
+  the segment corresponding to the actual run is shown (e.g. first minute of bag => first minute of GT).
 """
 
 import argparse
@@ -440,6 +442,16 @@ def create_full_dashboard(
                 gt_ts_arr,
                 scan_timestamps,
             )
+            # Crop GT to run time window so dashboard only shows ground truth for the actual run
+            # (e.g. first minute of bag => only first minute of GT)
+            if scan_timestamps.size > 0:
+                t_start = float(np.min(scan_timestamps))
+                t_end = float(np.max(scan_timestamps))
+                run_mask = (gt_ts_arr >= t_start) & (gt_ts_arr <= t_end)
+                gt_x_arr = gt_x_arr[run_mask]
+                gt_y_arr = gt_y_arr[run_mask]
+                gt_z_arr = gt_z_arr[run_mask]
+                gt_ts_arr = gt_ts_arr[run_mask]
     # For minimal tape, logdet_L_total is not saved; use logdet_L_pose6 for trajectory color
     logdet_for_trajectory = (
         timeline_data["logdet_L_pose6"]

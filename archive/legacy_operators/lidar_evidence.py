@@ -32,7 +32,7 @@ from fl_slam_poc.common.primitives import (
     spd_cholesky_solve_lifted,
     spd_cholesky_inverse_lifted,
 )
-from fl_slam_poc.backend.operators.binning import ScanBinStats
+from .binning import ScanBinStats
 from fl_slam_poc.common.geometry import se3_jax
 
 

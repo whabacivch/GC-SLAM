@@ -1,9 +1,8 @@
 """
 Splat preparation: orchestrate extractor + LiDAR depth fusion + backproject + 3DGS splat.
 
-Plan: lidar-camera_splat_fusion_and_bev_ot. Run extractor -> (u,v,z_c,sigma_c_sq);
-get (z_ell, sigma_ell_sq) from LiDAR; fuse -> (z_f, sigma_f_sq); backproject + cov;
-output Feature3D list (caller can call feature_to_splat_3dgs on each). No backend_node/pipeline edits.
+I0.2: One LiDAR depth evidence lidar_depth_evidence(u,v,...) -> (Λ_ell, θ_ell).
+PoE: Λf = Λc + Λ_ell, θf = θc + θ_ell; z_f = θf/Λf, σf² = 1/Λf. Camera-only when Λ_ell → 0.
 """
 
 from __future__ import annotations
@@ -16,10 +15,7 @@ from fl_slam_poc.frontend.sensors.lidar_camera_depth_fusion import (
     LidarCameraDepthFusionConfig,
     backproject_camera,
     backprojection_cov_camera,
-    depth_natural_params,
-    fuse_depth_natural_params,
-    lidar_ray_depth_route_a,
-    lidar_ray_depth_route_b,
+    lidar_depth_evidence,
 )
 from fl_slam_poc.frontend.sensors.visual_feature_extractor import (
     ExtractionResult,
@@ -34,7 +30,7 @@ def _precision_and_logdet(cov_xyz: np.ndarray, reg: float = 1e-9) -> tuple[np.nd
     """(3,3) cov -> info, logdet. Regularize for invertibility."""
     cov = np.asarray(cov_xyz, dtype=np.float64).reshape(3, 3) + reg * np.eye(3)
     info = np.linalg.inv(cov)
-    sign, logdet = np.linalg.slogdet(cov)
+    _, logdet = np.linalg.slogdet(cov)
     return info, float(logdet)
 
 
@@ -45,12 +41,11 @@ def splat_prep_fused(
     config: LidarCameraDepthFusionConfig,
     *,
     pixel_sigma: float = 1.0,
-    use_route_b: bool = False,
 ) -> List[Feature3D]:
     """
-    Fused depth splat path: for each feature get z_ell from LiDAR, fuse with z_c, backproject.
+    Fused depth splat path: one LiDAR depth evidence API; PoE Λf = Λc + Λ_ell, θf = θc + θ_ell.
 
-    If use_route_b=True, uses ray–plane intersection (Route B) and scales Λℓ by plane-fit weight.
+    Uses lidar_depth_evidence(u,v,...) -> (Λ_ell, θ_ell); fuse with camera (Λc, θc) from feature meta.
     Returns list of Feature3D with fused xyz/cov/info/canonical_theta; same descriptor/weight/mu_app
     as input. Caller can pass each to extractor.feature_to_splat_3dgs() for 3DGS export.
     """
@@ -59,59 +54,41 @@ def splat_prep_fused(
         return []
 
     uv = np.array([[f.u, f.v] for f in features_in], dtype=np.float64)
-    if use_route_b:
-        z_ell, sigma_ell_sq, weight_plane = lidar_ray_depth_route_b(
-            points_camera_frame,
-            uv,
-            intrinsics.fx,
-            intrinsics.fy,
-            intrinsics.cx,
-            intrinsics.cy,
-            config,
-        )
-    else:
-        z_ell, sigma_ell_sq = lidar_ray_depth_route_a(
-            points_camera_frame,
-            uv,
-            intrinsics.fx,
-            intrinsics.fy,
-            intrinsics.cx,
-            intrinsics.cy,
-            config,
-            use_median=True,
-        )
-        weight_plane = None
+    Lambda_ell, theta_ell = lidar_depth_evidence(
+        points_camera_frame,
+        uv,
+        intrinsics.fx,
+        intrinsics.fy,
+        intrinsics.cx,
+        intrinsics.cy,
+        config,
+    )
 
     fused: List[Feature3D] = []
     var_min = config.depth_var_min_m2
     fx, fy, cx, cy = intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy
+    w_c = config.depth_fusion_weight_camera
+    w_ell = config.depth_fusion_weight_lidar
 
     for i, feat in enumerate(features_in):
         Lambda_c = feat.meta.get("depth_Lambda_c", 0.0)
         theta_c = feat.meta.get("depth_theta_c", 0.0)
-        z_c = feat.meta.get("depth_m", np.nan)
-        if not np.isfinite(z_c):
-            z_c = 0.0
+        # Reliability-aware: Λ←wΛ, θ←wθ (I0.2, §2.3)
+        Lambda_c_scaled = w_c * Lambda_c
+        theta_c_scaled = w_c * theta_c
+        Lambda_ell_i = w_ell * Lambda_ell[i]
+        theta_ell_i = w_ell * theta_ell[i]
 
-        z_ell_i = z_ell[i]
-        sigma_ell_sq_i = sigma_ell_sq[i]
-        if np.isfinite(z_ell_i) and np.isfinite(sigma_ell_sq_i) and sigma_ell_sq_i > 0:
-            Lambda_ell, theta_ell = depth_natural_params(
-                z_ell_i, sigma_ell_sq_i, var_min=var_min
-            )
-            w_ell = config.depth_fusion_weight_lidar
-            if weight_plane is not None and np.isfinite(weight_plane[i]):
-                w_ell = w_ell * float(weight_plane[i])
-            z_f, sigma_f_sq = fuse_depth_natural_params(
-                Lambda_c, theta_c, Lambda_ell, theta_ell,
-                w_c=config.depth_fusion_weight_camera,
-                w_ell=w_ell,
-            )
-        else:
-            z_f = z_c if Lambda_c > 0 else 0.0
-            sigma_f_sq = 1.0 / Lambda_c if Lambda_c > 0 else float("inf")
+        Lambda_f = Lambda_c_scaled + Lambda_ell_i
+        theta_f = theta_c_scaled + theta_ell_i
 
-        if not np.isfinite(z_f) or z_f <= 0 or not np.isfinite(sigma_f_sq) or sigma_f_sq <= 0:
+        if Lambda_f <= 0.0 or not np.isfinite(Lambda_f) or not np.isfinite(theta_f):
+            fused.append(feat)
+            continue
+
+        z_f = theta_f / Lambda_f
+        sigma_f_sq = 1.0 / Lambda_f
+        if not np.isfinite(z_f) or z_f <= 0.0 or not np.isfinite(sigma_f_sq) or sigma_f_sq <= 0.0:
             fused.append(feat)
             continue
 
@@ -133,8 +110,8 @@ def splat_prep_fused(
         meta_fused = dict(feat.meta)
         meta_fused["depth_m"] = float(z_f)
         meta_fused["depth_sigma_c_sq"] = float(sigma_f_sq)
-        meta_fused["depth_Lambda_c"] = 1.0 / sigma_f_sq
-        meta_fused["depth_theta_c"] = (1.0 / sigma_f_sq) * z_f
+        meta_fused["depth_Lambda_c"] = Lambda_f
+        meta_fused["depth_theta_c"] = float(theta_f)
 
         fused.append(
             Feature3D(

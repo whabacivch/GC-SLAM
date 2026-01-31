@@ -73,8 +73,9 @@ GC_GRAVITY_W = (0.0, 0.0, -9.81)  # Z-UP convention: gravity points in -Z direct
 GC_IMU_ACCEL_SCALE = 9.81  # g to m/s² conversion
 
 # Trust/fusion constants
-GC_ALPHA_MIN = 0.1  # Minimum fusion scale alpha
-GC_ALPHA_MAX = 1.0  # Maximum fusion scale alpha
+# Full strength: do not scale evidence down; use alpha = 1.0 so L_post = L_pred + L_evidence.
+GC_ALPHA_MIN = 1.0  # Minimum fusion scale alpha (1.0 = full trust)
+GC_ALPHA_MAX = 1.0  # Maximum fusion scale alpha (1.0 = full trust)
 GC_KAPPA_SCALE = 1.0  # Scale for trust computation
 GC_C0_COND = 1e6  # Conditioning scale for trust
 
@@ -268,8 +269,9 @@ GC_IW_RHO_MEAS_LIDAR = 0.99
 
 # Reference z height in the GC "body/base" frame (meters).
 #
-# IMPORTANT (frame contract): in Dynamic01_ros2 our state/body frame is `base_footprint`
-# (wheel/base frame). Therefore, world Z of the base origin should be ~0 (ground contact).
+# IMPORTANT (frame contract): state/body frame is configurable (e.g. base_footprint for M3DGR,
+# acl_jackal2/base for Kimera). World Z of the base origin should be ~0 (ground contact).
+# See docs/FRAME_AND_QUATERNION_CONVENTIONS.md.
 #
 # NOTE: M3DGR ground truth is reported in a different body frame (`camera_imu`) with Z ≈ 0.85m.
 # Evaluation should compare in that frame by transforming the wheel-frame estimate via
@@ -307,3 +309,91 @@ GC_ODOM_TWIST_WZ_SIGMA = 0.01  # rad/s std dev
 # Test-only invariants still referenced by active test suite.
 N_MIN_SE3_DOF = 6  # SE(3) has 6 DOF, need at least 6 constraints
 K_SIGMOID = 0.5  # Chosen so w(n=6) ≈ 0.5, w(n=12) ≈ 0.95
+
+# =============================================================================
+# PRIMITIVE MAP + OT CONSTANTS (Visual-LiDAR Integration)
+# Reference: .cursor/plans/visual_lidar_rendering_integration_*.plan.md
+# =============================================================================
+#
+# These are REQUIRED config fields - no silent defaults. The pipeline will
+# fail-fast if they are not explicitly set in config when needed.
+#
+# Budget names (fixed-cost, branch-free per scan):
+#   N_FEAT      - Camera feature/splat budget per scan
+#   N_SURFEL    - LiDAR surfel budget per scan
+#   K_ASSOC     - Fixed candidate neighborhood size for OT association
+#   K_SINKHORN  - Fixed Sinkhorn iteration count (no convergence check)
+#   RINGBUF_LEN - Camera frame ring buffer length for soft time association
+
+# Feature extraction budget (camera splats)
+GC_N_FEAT = 512  # Fixed camera feature count per scan
+
+# Surfel extraction budget (LiDAR surfels)
+GC_N_SURFEL = 1024  # Fixed LiDAR surfel count per scan
+
+# OT association budgets
+GC_K_ASSOC = 8  # Fixed candidate neighborhood per measurement primitive
+GC_K_SINKHORN = 50  # Fixed Sinkhorn iterations (no convergence check)
+
+# Camera frame ring buffer for soft time association
+GC_RINGBUF_LEN = 5  # Number of camera frames to buffer
+
+# =============================================================================
+# POSE EVIDENCE BACKEND CONFIGURATION
+# =============================================================================
+# Single-path enforcement: exactly one pose evidence path active at runtime.
+# Selection is explicit via config (no fallback, no silent coexistence).
+#
+# Valid values:
+#   "bins"       - Legacy bin-based LiDAR evidence (Matrix Fisher + planar)
+#   "primitives" - Primitive alignment pose evidence (visual + LiDAR)
+GC_POSE_EVIDENCE_BACKEND_BINS = "bins"
+GC_POSE_EVIDENCE_BACKEND_PRIMITIVES = "primitives"
+
+# =============================================================================
+# MAP BACKEND CONFIGURATION
+# =============================================================================
+# Single-path enforcement: exactly one map representation at runtime.
+#
+# Valid values:
+#   "bins"           - Legacy MapBinStats (48 directional bins)
+#   "primitive_map"  - PrimitiveMap (Gaussian x vMF atlas with stable IDs)
+GC_MAP_BACKEND_BINS = "bins"
+GC_MAP_BACKEND_PRIMITIVE_MAP = "primitive_map"
+
+# =============================================================================
+# PRIMITIVE MAP PARAMETERS
+# =============================================================================
+# PrimitiveMap: persistent atlas of probabilistic primitives
+# Each primitive has:
+#   - Geometry: Gaussian in info form (Lambda, theta) in 3D
+#   - Orientation: vMF natural parameter eta (resultant or B=3)
+#   - Stable ID for temporal tracking
+#   - Optional: color/descriptor payload
+
+# Maximum primitives in the map (fixed budget for memory)
+GC_PRIMITIVE_MAP_MAX_SIZE = 50000
+
+# Forgetting factor for primitive weights (continuous, applied every scan)
+GC_PRIMITIVE_FORGETTING_FACTOR = 0.995
+
+# Merge threshold: primitives with Bhattacharyya distance below this are merged
+GC_PRIMITIVE_MERGE_THRESHOLD = 0.1
+
+# Cull threshold: primitives with weight below this are removed
+GC_PRIMITIVE_CULL_WEIGHT_THRESHOLD = 1e-4
+
+# vMF concentration clamp (prevents numerical issues)
+GC_PRIMITIVE_KAPPA_MIN = 1e-3
+GC_PRIMITIVE_KAPPA_MAX = 1e4
+
+# =============================================================================
+# CAMERA INTRINSICS/EXTRINSICS (required when pose_evidence_backend="primitives")
+# =============================================================================
+# These are loaded from config at runtime; fail-fast if missing when needed.
+# Format: T_base_camera = [x, y, z, rx, ry, rz] (rotvec, radians)
+# K = [fx, fy, cx, cy] (pinhole model, no distortion for now)
+
+# Placeholder values - must be overridden in config when camera is used
+GC_DEFAULT_CAMERA_K = [500.0, 500.0, 320.0, 240.0]  # fx, fy, cx, cy
+GC_DEFAULT_T_BASE_CAMERA = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # identity

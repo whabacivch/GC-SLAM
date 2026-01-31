@@ -3,34 +3,17 @@
 GC SENSOR HUB - Single-Process Frontend for Golden Child SLAM
 =============================================================================
 
-PLACEHOLDER / LANDING PAD FOR FUTURE DEVELOPMENT
-
-This module provides a unified sensor hub that runs all frontend
-preprocessing nodes in a single process using MultiThreadedExecutor.
+Runs all frontend preprocessing in one process (MultiThreadedExecutor).
+LiDAR path: pointcloud_passthrough only (PointCloud2 bags, e.g. Kimera/VLP-16).
 
 Architecture:
     Rosbag (raw topics)
         │
         ▼
-    ┌─────────────────────────────────────────────────────────┐
-    │  gc_sensor_hub (this module) - Process 1                │
-    │  ┌─────────────────┐  ┌─────────────────┐               │
-    │  │ livox_converter │  │ odom_normalizer │               │
-    │  └─────────────────┘  └─────────────────┘               │
-    │  ┌─────────────────┐  ┌─────────────────┐               │
-    │  │ imu_normalizer  │  │ dead_end_audit  │               │
-    │  └─────────────────┘  └─────────────────┘               │
-    └─────────────────────────────────────────────────────────┘
+    gc_sensor_hub: pointcloud_passthrough, odom_normalizer, imu_normalizer, dead_end_audit
         │
         ▼
     /gc/sensors/* (canonical topics for backend)
-
-Topic Naming Convention:
-    Raw (from bag)              Canonical (for backend)
-    ─────────────────────────   ────────────────────────────
-    /livox/mid360/lidar     →   /gc/sensors/lidar_points
-    /odom                   →   /gc/sensors/odom
-    /livox/mid360/imu       →   /gc/sensors/imu
 
 Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
 """
@@ -45,7 +28,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from fl_slam_poc.frontend.sensors.livox_converter import LivoxConverterNode
+from fl_slam_poc.frontend.sensors.pointcloud_passthrough import PointcloudPassthroughNode
 from fl_slam_poc.frontend.sensors.odom_normalizer import OdomNormalizerNode
 from fl_slam_poc.frontend.sensors.imu_normalizer import ImuNormalizerNode
 from fl_slam_poc.frontend.audit.dead_end_audit_node import DeadEndAuditNode
@@ -53,7 +36,7 @@ from fl_slam_poc.frontend.audit.dead_end_audit_node import DeadEndAuditNode
 
 @dataclass(frozen=True)
 class SensorHubConfig:
-    livox: Dict[str, Any]
+    pointcloud_passthrough: Dict[str, Any]
     odom: Dict[str, Any]
     imu: Dict[str, Any]
     dead_end: Dict[str, Any]
@@ -66,16 +49,15 @@ def _load_hub_config(path: str) -> SensorHubConfig:
         data = yaml.safe_load(f) or {}
 
     hub = (data.get("gc_sensor_hub") or {}).get("ros__parameters") or {}
-    livox = dict(hub.get("livox_converter") or {})
+    pointcloud_passthrough = dict(hub.get("pointcloud_passthrough") or {})
     odom = dict(hub.get("odom_normalizer") or {})
     imu = dict(hub.get("imu_normalizer") or {})
     dead_end = dict(hub.get("dead_end_audit") or {})
 
-    # Fail fast if any section is missing; no silent defaults here.
     missing = [
         name
         for name, cfg in [
-            ("livox_converter", livox),
+            ("pointcloud_passthrough", pointcloud_passthrough),
             ("odom_normalizer", odom),
             ("imu_normalizer", imu),
             ("dead_end_audit", dead_end),
@@ -84,8 +66,17 @@ def _load_hub_config(path: str) -> SensorHubConfig:
     ]
     if missing:
         raise ValueError(f"gc_sensor_hub config missing sections: {missing} (from {path})")
+    if not pointcloud_passthrough.get("input_topic"):
+        raise ValueError(
+            f"gc_sensor_hub config: pointcloud_passthrough.input_topic required (from {path})"
+        )
 
-    return SensorHubConfig(livox=livox, odom=odom, imu=imu, dead_end=dead_end)
+    return SensorHubConfig(
+        pointcloud_passthrough=pointcloud_passthrough,
+        odom=odom,
+        imu=imu,
+        dead_end=dead_end,
+    )
 
 
 def _resolve_default_config_path() -> str:
@@ -121,25 +112,20 @@ def main() -> None:
     hub_node = Node("gc_sensor_hub")
     hub_node.declare_parameter("config_path", "")
     hub_node.declare_parameter("executor_threads", 4)
-    hub_node.declare_parameter("livox_input_msg_type", "livox_ros_driver2/msg/CustomMsg")
 
     config_path = str(hub_node.get_parameter("config_path").value).strip()
     if not config_path:
         config_path = _resolve_default_config_path()
 
     hub_cfg = _load_hub_config(config_path)
-
-    # Apply explicit hub-level override (single-path): livox message type.
-    # This remains explicit and must succeed; the converter will fail-fast if unsupported.
-    livox_msg_type = str(hub_node.get_parameter("livox_input_msg_type").value)
-    hub_cfg.livox["input_msg_type"] = livox_msg_type
+    lidar_node = PointcloudPassthroughNode(parameter_overrides=hub_cfg.pointcloud_passthrough)
 
     # Create all frontend nodes with parameter overrides from config.
     # NOTE: DeadEndAuditNode handles list param type issues internally
     # (see ROS 2 Jazzy bug workaround in dead_end_audit_node.py).
     nodes = [
         hub_node,
-        LivoxConverterNode(parameter_overrides=hub_cfg.livox),
+        lidar_node,
         OdomNormalizerNode(parameter_overrides=hub_cfg.odom),
         ImuNormalizerNode(parameter_overrides=hub_cfg.imu),
         DeadEndAuditNode(parameter_overrides=hub_cfg.dead_end),

@@ -40,7 +40,7 @@ install(TARGETS image_decompress_cpp
 install(PROGRAMS
   scripts/gc_backend_node
   scripts/gc_sensor_hub
-  scripts/livox_converter
+  scripts/depth_passthrough
   scripts/odom_normalizer
   scripts/imu_normalizer
   scripts/gc_dead_end_audit_node

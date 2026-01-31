@@ -183,6 +183,7 @@ def sinkhorn_balanced_fixed_k(
     K: int,
 ) -> np.ndarray:
     """
+    Deprecated; use unbalanced only (sinkhorn_unbalanced_fixed_k).
     Balanced Sinkhorn: fixed K iterations. K is compile-time constant; no convergence check.
     min_π <π,C> + ε KL(π | a⊗b); row marginals a, column marginals b.
     Returns coupling π (N,M).

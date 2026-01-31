@@ -88,8 +88,8 @@ The root failure mode to prevent is: *multiple math paths silently coexist*, mak
 
 ## Implementation Conventions (Project-Specific)
 - `fl_slam_poc/common/`: pure Python utilities (no ROS imports).
-- `fl_slam_poc/frontend/`: sensor I/O + evidence extraction + utility nodes.
-- `fl_slam_poc/backend/`: inference + fusion + kernels.
+- `fl_slam_poc/frontend/`: sensor I/O + evidence extraction + utility nodes (no rendering; rendering is output from state).
+- `fl_slam_poc/backend/`: inference + fusion + kernels; outputs (trajectory, state, rendering) live in backend (e.g. `backend/rendering.py`).
 
 ## Operator Reporting (Required)
 - Every operator returns `(result, CertBundle, ExpectedEffect)` per `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`.

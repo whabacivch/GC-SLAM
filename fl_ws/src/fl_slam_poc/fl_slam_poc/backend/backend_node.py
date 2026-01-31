@@ -22,7 +22,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 import tf2_ros
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry, Path
-from sensor_msgs.msg import PointCloud2, Imu, PointField
+from sensor_msgs.msg import PointCloud2, Imu, PointField, Image
 from std_msgs.msg import String
 
 from fl_slam_poc.common.jax_init import jnp
@@ -35,6 +35,7 @@ from fl_slam_poc.common.belief import (
     se3_compose,
     se3_inverse,
 )
+from fl_slam_poc.common.geometry import se3_jax
 from fl_slam_poc.common.certificates import CertBundle
 from fl_slam_poc.common.certificates import InfluenceCert, aggregate_certificates
 from fl_slam_poc.backend.pipeline import (
@@ -60,20 +61,25 @@ from fl_slam_poc.backend.operators.measurement_noise_iw_jax import (
     measurement_noise_mean_jax,
     measurement_noise_apply_suffstats_jax,
 )
-from fl_slam_poc.backend.structures.lidar_bucket_noise_iw_jax import (
-    LidarBucketNoiseIWState,
-    create_datasheet_lidar_bucket_noise_state,
-)
-from fl_slam_poc.backend.operators.lidar_bucket_noise_iw_jax import (
-    lidar_bucket_iw_apply_suffstats_jax,
-)
-from fl_slam_poc.backend.structures.bin_atlas import (
-    create_fibonacci_atlas,
-    create_empty_map_stats,
-    apply_forgetting,
-    update_map_stats,
-)
 from fl_slam_poc.backend.diagnostics import DiagnosticsLog
+
+# Stage 1: PrimitiveMap imports
+from fl_slam_poc.backend.structures.primitive_map import (
+    PrimitiveMap,
+    create_empty_primitive_map,
+)
+from fl_slam_poc.backend.map_publisher import PrimitiveMapPublisher
+from fl_slam_poc.backend.rerun_visualizer import RerunVisualizer
+from fl_slam_poc.backend.camera_batch_utils import feature_list_to_camera_batch
+from fl_slam_poc.frontend.sensors.visual_feature_extractor import (
+    VisualFeatureExtractor,
+    VisualFeatureExtractorConfig,
+    PinholeIntrinsics,
+)
+from fl_slam_poc.frontend.sensors.splat_prep import splat_prep_fused
+from fl_slam_poc.frontend.sensors.lidar_camera_depth_fusion import (
+    LidarCameraDepthFusionConfig,
+)
 
 from scipy.spatial.transform import Rotation
 
@@ -90,6 +96,31 @@ def _parse_T_base_sensor_6d(xyz_rxyz) -> tuple[np.ndarray, np.ndarray]:
     rotvec = v[3:6]
     Rm = Rotation.from_rotvec(rotvec).as_matrix()
     return Rm, t
+
+
+def _load_extrinsics_6d_from_file(path: str, key: str) -> list:
+    """
+    Load 6D [x,y,z,rx,ry,rz] from a YAML file. Path must exist (fail-fast).
+    File may be: a list [x,y,z,rx,ry,rz], or a dict with the given key mapping to that list.
+    """
+    import os
+    import yaml
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Extrinsics file missing when extrinsics_source=file: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if data is None:
+        raise ValueError(f"Extrinsics file empty or invalid: {path}")
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict) and key in data:
+        raw = data[key]
+    else:
+        raise ValueError(f"Extrinsics file must be a 6D list or dict with key {key!r}: {path}")
+    v = list(raw)
+    if len(v) != 6:
+        raise ValueError(f"Expected 6D [x,y,z,rx,ry,rz], got length {len(v)} in {path}")
+    return v
 
 
 def _smooth_window_weight(dist: float, min_r: float, max_r: float, sigma: float) -> float:
@@ -141,6 +172,27 @@ def _imu_stability_weights(
     return weights
 
 
+def _yaw_deg_from_pose_6d(pose_6d) -> float:
+    """Extract yaw (degrees) from 6D pose [trans, rotvec]. Uses atan2(R[1,0], R[0,0])."""
+    pose_6d = np.asarray(pose_6d, dtype=np.float64).ravel()[:6]
+    R = np.array(se3_jax.so3_exp(pose_6d[3:6]), dtype=np.float64)
+    yaw_rad = np.arctan2(R[1, 0], R[0, 0])
+    return float(np.degrees(yaw_rad))
+
+
+def _belief_xyyaw_vel(belief: BeliefGaussianInfo, eps_lift: float = 1e-9) -> Tuple[float, float, float, float, float]:
+    """Extract (x, y, yaw_deg, vx_world, vy_world) from belief for diagnostic."""
+    pose_6d = np.array(belief.mean_world_pose(eps_lift=eps_lift), dtype=np.float64)
+    x, y = float(pose_6d[0]), float(pose_6d[1])
+    yaw_deg = _yaw_deg_from_pose_6d(pose_6d)
+    delta_z = np.array(belief.mean_increment(eps_lift=eps_lift), dtype=np.float64)
+    z_lin = np.array(belief.z_lin, dtype=np.float64)
+    vel = z_lin + delta_z
+    vx = float(vel[6])
+    vy = float(vel[7])
+    return (x, y, yaw_deg, vx, vy)
+
+
 def _pointfield_to_dtype(datatype: int) -> np.dtype:
     """Map sensor_msgs.msg.PointField datatype to numpy dtype."""
     if datatype == PointField.INT8:
@@ -162,18 +214,14 @@ def _pointfield_to_dtype(datatype: int) -> np.dtype:
     raise ValueError(f"Unsupported PointField datatype: {datatype}")
 
 
-def parse_pointcloud2_vectorized(
+def parse_pointcloud2_vlp16(
     msg: PointCloud2,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Parse PointCloud2 message to extract xyz points.
-    
-    Returns:
-        points: (N, 3) array of xyz coordinates
-        timestamps: (N,) array of per-point timestamps (or zeros if unavailable)
-        weights: (N,) array of continuous point weights
-        ring: (N,) uint8 ring/line id (0 if unavailable)
-        tag: (N,) uint8 tag class (0 if unavailable)
+    Parse VLP-16 (Velodyne Puck) PointCloud2: x, y, z, ring; optional t/time.
+    Outputs (points, timestamps, weights, ring, tag) for pipeline.
+    tag=0; timebase from header.stamp; time_offset from per-point t if present else 0.
+    See docs/POINTCLOUD2_LAYOUTS.md.
     """
     n_points = msg.width * msg.height
     if n_points <= 0:
@@ -186,60 +234,58 @@ def parse_pointcloud2_vectorized(
         )
 
     field_map = {f.name: (f.offset, f.datatype) for f in msg.fields}
-    # Fail-fast: no silent fallbacks for required fields (single math path).
-    required = ["x", "y", "z", "ring", "tag", "timebase_low", "timebase_high", "time_offset"]
-    missing = [k for k in required if k not in field_map]
+    required_vlp16 = ["x", "y", "z", "ring"]
+    missing = [k for k in required_vlp16 if k not in field_map]
     if missing:
         raise RuntimeError(
-            f"PointCloud2 missing required fields for GC v2 (no fallback): {missing}. "
+            f"PointCloud2 (VLP-16 layout) missing required fields: {missing}. "
             f"Present fields: {sorted(list(field_map.keys()))}"
         )
-    if "x" not in field_map or "y" not in field_map or "z" not in field_map:
-        return (
-            jnp.zeros((0, 3), dtype=jnp.float64),
-            jnp.zeros((0,), dtype=jnp.float64),
-            jnp.zeros((0,), dtype=jnp.float64),
-            jnp.zeros((0,), dtype=jnp.uint8),
-            jnp.zeros((0,), dtype=jnp.uint8),
-        )
 
-    needed = ["x", "y", "z", "intensity", "ring", "tag", "time_offset", "timebase_low", "timebase_high"]
+    needed = ["x", "y", "z", "ring"]
+    if "intensity" in field_map:
+        needed.append("intensity")
+    time_field = None
+    if "t" in field_map:
+        time_field = "t"
+    elif "time" in field_map:
+        time_field = "time"
+    if time_field and time_field not in needed:
+        needed.append(time_field)
+
     names = []
     formats = []
     offsets = []
     for name in needed:
-        if name in field_map:
-            off, dt = field_map[name]
-            names.append(name)
-            formats.append(_pointfield_to_dtype(dt))
-            offsets.append(off)
+        off, dt = field_map[name]
+        names.append(name)
+        formats.append(_pointfield_to_dtype(dt))
+        offsets.append(off)
 
     dtype = np.dtype({"names": names, "formats": formats, "offsets": offsets, "itemsize": msg.point_step})
     arr = np.frombuffer(msg.data, dtype=dtype, count=n_points)
 
-    # Domain projection (wrapper boundary): replace non-finite values with large finite sentinels.
-    # This avoids NaN propagation without discrete gating inside likelihood math.
     sentinel = float(constants.GC_NONFINITE_SENTINEL)
     x = np.nan_to_num(np.asarray(arr["x"], dtype=np.float64), nan=sentinel, posinf=sentinel, neginf=-sentinel)
     y = np.nan_to_num(np.asarray(arr["y"], dtype=np.float64), nan=sentinel, posinf=sentinel, neginf=-sentinel)
     z = np.nan_to_num(np.asarray(arr["z"], dtype=np.float64), nan=sentinel, posinf=sentinel, neginf=-sentinel)
+    ring = np.asarray(arr["ring"], dtype=np.uint8)
 
-    low = np.uint64(arr["timebase_low"][0])
-    high = np.uint64(arr["timebase_high"][0])
-    timebase = (high << np.uint64(32)) | low
-    timebase_sec = float(timebase) * 1e-9
-    offs = np.asarray(arr["time_offset"], dtype=np.uint64)
-    t = timebase_sec + offs.astype(np.float64) * 1e-9
+    # Per-point time: t/time in seconds or ns (driver-dependent). If present, use it; else header.stamp for whole scan.
+    header_stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    if time_field is not None:
+        t_raw = np.asarray(arr[time_field], dtype=np.float64)
+        # If values are large (e.g. ns), convert to seconds
+        if np.any(t_raw > 1e6):
+            t = t_raw * 1e-9
+        else:
+            t = t_raw
+    else:
+        t = np.full((n_points,), header_stamp_sec, dtype=np.float64)
 
-    # Metadata (optional)
-    ring = np.zeros((n_points,), dtype=np.uint8)
     tag = np.zeros((n_points,), dtype=np.uint8)
-    if "ring" in arr.dtype.names:
-        ring = np.asarray(arr["ring"], dtype=np.uint8)
-    if "tag" in arr.dtype.names:
-        tag = np.asarray(arr["tag"], dtype=np.uint8)
 
-    # Continuous range-based weighting (vectorized; strictly positive floor)
+    # Range-based weighting
     dist = np.sqrt(x * x + y * y + z * z)
     sigma = float(constants.GC_RANGE_WEIGHT_SIGMA)
     min_r = float(constants.GC_RANGE_WEIGHT_MIN_R)
@@ -292,20 +338,45 @@ class GoldenChildBackend(Node):
         self.declare_parameter("status_check_period_sec", 5.0)
         self.declare_parameter("forgetting_factor", 0.99)
         # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] rotvec (radians).
-        # These are applied numerically (not just frame_id relabeling).
+        # extrinsics_source: inline | file. When file: load from T_base_lidar_file, T_base_imu_file (fail if missing).
+        self.declare_parameter("extrinsics_source", "inline")
+        self.declare_parameter("T_base_lidar_file", "")
+        self.declare_parameter("T_base_imu_file", "")
         self.declare_parameter("T_base_lidar", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.declare_parameter("T_base_imu", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        # LiDAR measurement noise prior (m² isotropic). Kimera/VLP-16: 1e-3; M3DGR: 0.01.
+        self.declare_parameter("lidar_sigma_meas", 0.01)
+        # When true, derive Sigma_g/Sigma_a from first N IMU messages (units/fallback doc'd). When false, use priors only.
+        self.declare_parameter("use_imu_message_covariance", False)
         # Hard single-path enforcement: if enabled, missing topics are hard errors.
         self.declare_parameter("use_imu", True)
         self.declare_parameter("use_odom", True)
         # IMU gravity scaling (1.0 = nominal; 0.0 disables gravity contribution)
         self.declare_parameter("imu_gravity_scale", 1.0)
+        self.declare_parameter("imu_accel_scale", 1.0)  # 1.0 when bag publishes m/s² (Kimera/ROS)
         # Deskew rotation-only mode: removes hidden IMU translation leak through deskew
         self.declare_parameter("deskew_rotation_only", False)
         # Timing/profiling
         self.declare_parameter("enable_timing", False)
         # Smoothed initial reference: buffer first K odom, then set first_odom_pose = aggregate (PIPELINE_DESIGN_GAPS §5.4.1)
         self.declare_parameter("init_window_odom_count", 10)
+        # PointCloud2 layout: vlp16 (Kimera/VLP-16). See docs/POINTCLOUD2_LAYOUTS.md.
+        self.declare_parameter("pointcloud_layout", "vlp16")
+        # Odom vs belief diagnostic: when non-empty, write CSV (raw odom, belief start, belief end) per scan.
+        self.declare_parameter("odom_belief_diagnostic_file", "")
+        self.declare_parameter("odom_belief_diagnostic_max_scans", 0)  # 0 = all scans
+        # Map and pose evidence: always primitive_map / primitives (bins removed)
+        self.declare_parameter("map_backend", constants.GC_MAP_BACKEND_PRIMITIVE_MAP)
+        self.declare_parameter("pose_evidence_backend", constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES)
+        # Camera (required)
+        self.declare_parameter("camera_image_topic", "/gc/sensors/camera_image")
+        self.declare_parameter("camera_depth_topic", "/gc/sensors/camera_depth")
+        self.declare_parameter("camera_K", [500.0, 500.0, 320.0, 240.0])  # [fx, fy, cx, cy]
+        self.declare_parameter("T_base_camera", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # 6D rotvec
+        self.declare_parameter("ringbuf_len", constants.GC_RINGBUF_LEN)
+        self.declare_parameter("use_rerun", True)
+        self.declare_parameter("rerun_recording_path", "")
+        self.declare_parameter("rerun_spawn", False)
 
     def _init_state(self):
         """Initialize Golden Child state."""
@@ -317,26 +388,49 @@ class GoldenChildBackend(Node):
         self.Q = process_noise_state_to_Q_jax(self.process_noise_state)
         
         # Adaptive measurement noise IW state (per-sensor, phase 1) + derived Sigma_meas (LiDAR)
-        self.measurement_noise_state: MeasurementNoiseIWState = create_datasheet_measurement_noise_state()
+        lidar_sigma_meas = float(self.get_parameter("lidar_sigma_meas").value)
+        self.measurement_noise_state: MeasurementNoiseIWState = create_datasheet_measurement_noise_state(
+            lidar_sigma_meas=lidar_sigma_meas
+        )
         self.config.Sigma_meas = measurement_noise_mean_jax(self.measurement_noise_state, idx=2)
 
-        # LiDAR per-(line,tag) bucket noise IW state (Phase 3 part 2)
-        self.lidar_bucket_noise_state: LidarBucketNoiseIWState = create_datasheet_lidar_bucket_noise_state()
-
-        # Bin atlas for directional binning
-        self.bin_atlas = create_fibonacci_atlas(self.config.B_BINS)
-        
-        # Map statistics (accumulates over time with forgetting)
-        self.map_stats = create_empty_map_stats(self.config.B_BINS)
         self.forgetting_factor = float(self.get_parameter("forgetting_factor").value)
 
-        # Parse and cache no-TF extrinsics.
-        self.R_base_lidar, self.t_base_lidar = _parse_T_base_sensor_6d(
-            self.get_parameter("T_base_lidar").value
+        # PrimitiveMap is the canonical map (bins removed)
+        self.config.map_backend = str(self.get_parameter("map_backend").value).strip()
+        self.config.pose_evidence_backend = str(self.get_parameter("pose_evidence_backend").value).strip()
+        self.primitive_map = create_empty_primitive_map(
+            max_size=self.config.primitive_map_max_size,
         )
-        self.R_base_imu, self.t_base_imu = _parse_T_base_sensor_6d(
-            self.get_parameter("T_base_imu").value
+        self.get_logger().info(
+            f"PrimitiveMap initialized: max_size={self.config.primitive_map_max_size}, "
+            f"n_feat={self.config.n_feat}, n_surfel={self.config.n_surfel}"
         )
+
+        # Parse and cache no-TF extrinsics (inline or from file; fail-fast if file missing when source=file).
+        extrinsics_source = str(self.get_parameter("extrinsics_source").value).strip().lower()
+        if extrinsics_source == "file":
+            lidar_file = str(self.get_parameter("T_base_lidar_file").value).strip()
+            imu_file = str(self.get_parameter("T_base_imu_file").value).strip()
+            if not lidar_file or not imu_file:
+                raise ValueError(
+                    "extrinsics_source=file requires T_base_lidar_file and T_base_imu_file to be set"
+                )
+            T_base_lidar_list = _load_extrinsics_6d_from_file(lidar_file, "T_base_lidar")
+            T_base_imu_list = _load_extrinsics_6d_from_file(imu_file, "T_base_imu")
+            self.R_base_lidar, self.t_base_lidar = _parse_T_base_sensor_6d(T_base_lidar_list)
+            self.R_base_imu, self.t_base_imu = _parse_T_base_sensor_6d(T_base_imu_list)
+        else:
+            if extrinsics_source != "inline":
+                raise ValueError(
+                    f"extrinsics_source must be 'inline' or 'file'; got {extrinsics_source!r}"
+                )
+            self.R_base_lidar, self.t_base_lidar = _parse_T_base_sensor_6d(
+                self.get_parameter("T_base_lidar").value
+            )
+            self.R_base_imu, self.t_base_imu = _parse_T_base_sensor_6d(
+                self.get_parameter("T_base_imu").value
+            )
 
         # Log extrinsics for runtime audit (verifies config is applied correctly)
         from scipy.spatial.transform import Rotation as R_scipy
@@ -351,6 +445,32 @@ class GoldenChildBackend(Node):
         self.get_logger().info(f"IMU rotation angle: {imu_angle_deg:.3f}° (should be ~28° if gravity-aligned)")
         self.get_logger().info("=" * 60)
 
+        # Camera (required): intrinsics and T_base_camera; fail-fast if missing
+        camera_K = list(self.get_parameter("camera_K").value)
+        if len(camera_K) != 4:
+            raise ValueError("camera_K must be [fx, fy, cx, cy]; got length %d" % len(camera_K))
+        self.camera_K = camera_K  # [fx, fy, cx, cy]
+        self.R_base_camera, self.t_base_camera = _parse_T_base_sensor_6d(
+            list(self.get_parameter("T_base_camera").value)
+        )
+        ringbuf_len = int(self.get_parameter("ringbuf_len").value)
+        if ringbuf_len < 1:
+            raise ValueError("ringbuf_len must be >= 1; got %d" % ringbuf_len)
+        self.camera_ringbuf: List[Tuple[float, np.ndarray, np.ndarray]] = []  # (stamp_sec, rgb, depth)
+        self.camera_ringbuf_max = ringbuf_len
+        self.get_logger().info(
+            "Camera: K=[fx=%s fy=%s cx=%s cy=%s], T_base_camera cached, ringbuf_len=%d"
+            % (camera_K[0], camera_K[1], camera_K[2], camera_K[3], ringbuf_len)
+        )
+        # VisualFeatureExtractor and splat_prep config (camera -> MeasurementBatch)
+        fx, fy, cx, cy = float(camera_K[0]), float(camera_K[1]), float(camera_K[2]), float(camera_K[3])
+        self.camera_intrinsics = PinholeIntrinsics(fx=fx, fy=fy, cx=cx, cy=cy)
+        self.visual_extractor = VisualFeatureExtractor(
+            self.camera_intrinsics,
+            config=VisualFeatureExtractorConfig(max_features=self.config.n_feat),
+        )
+        self.depth_fusion_config = LidarCameraDepthFusionConfig()
+
         # Wire LiDAR origin (in base frame) into the pipeline so direction features are computed
         # from the sensor origin, not the base origin.
         self.config.lidar_origin_base = jnp.array(self.t_base_lidar, dtype=jnp.float64)
@@ -363,6 +483,25 @@ class GoldenChildBackend(Node):
         self.get_logger().info(f"Deskew rotation-only: {self.config.deskew_rotation_only}")
         self.init_window_odom_count = int(self.get_parameter("init_window_odom_count").value)
         self.get_logger().info(f"Init window: first_odom_pose = aggregate of first {self.init_window_odom_count} odom")
+        self.pointcloud_layout = str(self.get_parameter("pointcloud_layout").value).strip().lower()
+        if self.pointcloud_layout not in ("vlp16",):
+            raise ValueError(
+                f"pointcloud_layout must be 'vlp16'; got {self.pointcloud_layout!r}. "
+                "See docs/POINTCLOUD2_LAYOUTS.md."
+            )
+        self.get_logger().info(f"PointCloud2 layout: {self.pointcloud_layout}")
+
+        # Odom vs belief diagnostic (raw vs estimate)
+        self._odom_belief_diagnostic_file = str(self.get_parameter("odom_belief_diagnostic_file").value).strip()
+        self._odom_belief_diagnostic_max = int(self.get_parameter("odom_belief_diagnostic_max_scans").value)
+        if self._odom_belief_diagnostic_file:
+            self.get_logger().info(
+                f"Odom/belief diagnostic: writing to {self._odom_belief_diagnostic_file} "
+                f"(max_scans={self._odom_belief_diagnostic_max or 'all'})"
+            )
+            self._odom_belief_diagnostic_header_written = False
+        else:
+            self._odom_belief_diagnostic_header_written = True  # no-op
 
         # Initialize hypotheses with identity prior
         self.hypotheses: List[BeliefGaussianInfo] = []
@@ -469,6 +608,28 @@ class GoldenChildBackend(Node):
         self.get_logger().info(f"LiDAR: {lidar_topic} (PIPELINE ACTIVE)")
         self.get_logger().info(f"Odom: {odom_topic}")
         self.get_logger().info(f"IMU: {imu_topic}")
+
+        # Camera (required): subscribe to canonical topics; fail-fast if not set
+        camera_image_topic = str(self.get_parameter("camera_image_topic").value).strip()
+        camera_depth_topic = str(self.get_parameter("camera_depth_topic").value).strip()
+        if not camera_image_topic or not camera_depth_topic:
+            raise ValueError(
+                "camera_image_topic and camera_depth_topic are required; "
+                "got camera_image_topic=%r camera_depth_topic=%r"
+                % (camera_image_topic or "(empty)", camera_depth_topic or "(empty)")
+            )
+        self._latest_rgb: Optional[Tuple[float, np.ndarray]] = None  # (stamp_sec, HxWx3)
+        self._latest_depth: Optional[Tuple[float, np.ndarray]] = None  # (stamp_sec, HxW)
+        self.sub_camera_rgb = self.create_subscription(
+            Image, camera_image_topic, self._on_camera_rgb, qos_sensor,
+            callback_group=self.cb_group_sensors,
+        )
+        self.sub_camera_depth = self.create_subscription(
+            Image, camera_depth_topic, self._on_camera_depth, qos_sensor,
+            callback_group=self.cb_group_sensors,
+        )
+        self.get_logger().info(f"Camera RGB: {camera_image_topic}")
+        self.get_logger().info(f"Camera depth: {camera_depth_topic}")
         
         # Publishers
         self.pub_state = self.create_publisher(Odometry, "/gc/state", 10)
@@ -476,6 +637,39 @@ class GoldenChildBackend(Node):
         self.pub_manifest = self.create_publisher(String, "/gc/runtime_manifest", 10)
         self.pub_cert = self.create_publisher(String, "/gc/certificate", 10)
         self.pub_status = self.create_publisher(String, "/gc/status", 10)
+
+        # Rerun visualization (Wayland-friendly; replaces RViz)
+        self.rerun_visualizer: Optional[RerunVisualizer] = None
+        use_rerun = bool(self.get_parameter("use_rerun").value)
+        rerun_recording_path = str(self.get_parameter("rerun_recording_path").value).strip()
+        rerun_spawn = bool(self.get_parameter("rerun_spawn").value)
+        if use_rerun:
+            self.rerun_visualizer = RerunVisualizer(
+                application_id="fl_slam_poc",
+                spawn=rerun_spawn,
+                recording_path=rerun_recording_path or None,
+            )
+            if self.rerun_visualizer.init():
+                self.get_logger().info(
+                    "Rerun visualization: enabled (spawn=%s, recording=%s)"
+                    % (rerun_spawn, rerun_recording_path or "none")
+                )
+            else:
+                self.get_logger().warn("Rerun visualization: requested but rerun-sdk not available; install with: pip install rerun-sdk")
+                self.rerun_visualizer = None
+        else:
+            self.rerun_visualizer = None
+
+        # PrimitiveMap publisher: /gc/map/points (PointCloud2) when map_backend=primitive_map
+        self.map_publisher: Optional[PrimitiveMapPublisher] = None
+        if self.primitive_map is not None:
+            self.map_publisher = PrimitiveMapPublisher(
+                self,
+                frame_id=self.odom_frame,
+                publish_ellipsoids=False,
+                rerun_visualizer=self.rerun_visualizer,
+            )
+            self.get_logger().info("PrimitiveMap publisher: /gc/map/points (PointCloud2)")
         
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         
@@ -500,6 +694,8 @@ class GoldenChildBackend(Node):
         """Publish RuntimeManifest at startup."""
         manifest = RuntimeManifest(
             imu_gravity_scale=float(self.config.imu_gravity_scale),
+            pose_evidence_backend=self.config.pose_evidence_backend,
+            map_backend=self.config.map_backend,
         )
         manifest_dict = manifest.to_dict()
         
@@ -525,12 +721,13 @@ class GoldenChildBackend(Node):
             [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z],
             dtype=np.float64,
         )
-        # Apply acceleration scale: Livox Mid-360 IMU outputs in g's, convert to m/s²
+        # Apply acceleration scale: 1.0 when bag publishes m/s² (Kimera/ROS).
         accel_raw = np.array(
             [msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z],
             dtype=np.float64,
         )
-        accel = accel_raw * constants.GC_IMU_ACCEL_SCALE  # g → m/s²
+        accel_scale = float(self.get_parameter("imu_accel_scale").value)
+        accel = accel_raw * accel_scale
 
         # No-TF mode: rotate IMU measurements into the base/body frame.
         # This is a numeric transform (not just frame_id relabeling).
@@ -598,6 +795,9 @@ class GoldenChildBackend(Node):
                     constants.GC_INIT_ANCHOR_ACCEL_SCALE,
                     constants.GRAVITY_MAG,
                 )
+                w_sum = sum(weights)
+                if w_sum <= 0.0:
+                    weights = None  # uniform weighting when IMU weights sum to zero (e.g. wrong accel units)
                 trans_mean = np.average(
                     [np.array(p[:3], dtype=np.float64) for p in poses],
                     axis=0, weights=weights,
@@ -641,6 +841,26 @@ class GoldenChildBackend(Node):
         twist_cov = np.array(msg.twist.covariance, dtype=np.float64).reshape(6, 6)
         self.last_odom_twist_cov = jnp.array(twist_cov, dtype=jnp.float64)
 
+    def _on_camera_rgb(self, msg: Image):
+        """Store latest RGB from C++ image_decompress output (rgb8 H×W×3); view only, no OpenCV."""
+        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        try:
+            # Contract: C++ node publishes rgb8; step = width*3
+            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3).copy()
+            self._latest_rgb = (stamp_sec, rgb)
+        except Exception as e:
+            self.get_logger().warn("Camera RGB buffer view failed: %s" % e)
+
+    def _on_camera_depth(self, msg: Image):
+        """Store latest depth from C++/depth_passthrough (32FC1 m); view only, no OpenCV."""
+        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        try:
+            # Contract: canonical depth is always 32FC1 in meters (C++ or depth_passthrough)
+            depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width).astype(np.float64)
+            self._latest_depth = (stamp_sec, depth)
+        except Exception as e:
+            self.get_logger().warn("Camera depth buffer view failed: %s" % e)
+
     def on_lidar(self, msg: PointCloud2):
         """
         Process LiDAR scan through the full GC pipeline.
@@ -661,8 +881,8 @@ class GoldenChildBackend(Node):
         header_stamp_nsec = msg.header.stamp.nanosec
         stamp_sec = header_stamp_sec + header_stamp_nsec * 1e-9
         
-        # Parse point cloud (vectorized; preserves Livox metadata)
-        points, timestamps, weights, ring, tag = parse_pointcloud2_vectorized(msg)
+        # Parse point cloud (vlp16 layout; Kimera/VLP-16 PointCloud2).
+        points, timestamps, weights, ring, tag = parse_pointcloud2_vlp16(msg)
 
         # No-TF mode: transform LiDAR points into the base/body frame before any inference.
         # p_base = R_base_lidar @ p_lidar + t_base_lidar
@@ -714,7 +934,7 @@ class GoldenChildBackend(Node):
         t_prev_scan = float(self.last_scan_stamp) if self.last_scan_stamp > 0.0 else 0.0
         
         # Derive scan bounds for deskew (within-scan only).
-        # CRITICAL: For Livox MID-360 rosette pattern (non-repetitive, densifies over time):
+        # Scan time bounds (PointCloud2 vlp16: header.stamp or per-point t):
         # - timebase_sec = start of accumulation window
         # - header.stamp = end of accumulation window (when message published)
         # - All time_offset = 0 (no per-point timestamps available)
@@ -767,8 +987,41 @@ class GoldenChildBackend(Node):
             self._publish_state_from_pose(pose_6d, stamp)
             self._pending_publish = None
 
-        # Apply forgetting to map stats
-        self.map_stats = apply_forgetting(self.map_stats, self.forgetting_factor)
+        # Camera required: fail fast if RGB or depth not yet received (no optional path).
+        if self._latest_rgb is None or self._latest_depth is None:
+            raise RuntimeError(
+                "Camera RGB and depth required; not yet received. "
+                "Ensure camera_image and camera_depth topics are published and received before LiDAR."
+            )
+        stamp_rgb, rgb = self._latest_rgb
+        _stamp_depth, depth = self._latest_depth
+        if rgb.shape[:2] != depth.shape[:2]:
+            raise RuntimeError(
+                "Camera RGB and depth shape mismatch: rgb %s depth %s"
+                % (rgb.shape, depth.shape)
+            )
+        extraction_result = self.visual_extractor.extract(
+            rgb, depth, color_order="BGR", timestamp_ns=int(stamp_rgb * 1e9)
+        )
+        # LiDAR points in base frame -> camera frame for lidar_depth_evidence
+        points_base = np.array(points, dtype=np.float64)
+        if points_base.shape[0] > 0:
+            points_cam = (self.R_base_camera.T @ (points_base.T - self.t_base_camera[:, None])).T
+        else:
+            points_cam = np.zeros((0, 3), dtype=np.float64)
+        fused = splat_prep_fused(
+            extraction_result,
+            points_cam,
+            self.camera_intrinsics,
+            self.depth_fusion_config,
+        )
+        camera_batch = feature_list_to_camera_batch(
+            fused,
+            stamp_rgb,
+            n_feat=self.config.n_feat,
+            n_surfel=self.config.n_surfel,
+            eps_lift=self.config.eps_lift,
+        )
 
         # Slice IMU to integration window only (PIPELINE_DESIGN_GAPS §5.6): avoids 4000-step scan.
         # Window = [min(t_last_scan, scan_start), max(t_scan, scan_end)]; pad to GC_MAX_IMU_PREINT_LEN.
@@ -832,9 +1085,20 @@ class GoldenChildBackend(Node):
         accum_dnu = jnp.zeros((7,), dtype=jnp.float64)
         accum_meas_dPsi = jnp.zeros((3, 3, 3), dtype=jnp.float64)
         accum_meas_dnu = jnp.zeros((3,), dtype=jnp.float64)
-        accum_lidar_bucket_dPsi = jnp.zeros((constants.GC_LIDAR_N_BUCKETS, 3, 3), dtype=jnp.float64)
-        accum_lidar_bucket_dnu = jnp.zeros((constants.GC_LIDAR_N_BUCKETS,), dtype=jnp.float64)
-        
+
+        # Odom vs belief diagnostic: snapshot raw odom and belief before this scan
+        _diag_odom_x = _diag_odom_y = _diag_odom_yaw = _diag_odom_vx = _diag_odom_vy = _diag_odom_wz = 0.0
+        _diag_bel_x = _diag_bel_y = _diag_bel_yaw = _diag_bel_vx = _diag_bel_vy = 0.0
+        if self._odom_belief_diagnostic_file and (self._odom_belief_diagnostic_max <= 0 or self.scan_count <= self._odom_belief_diagnostic_max):
+            if self.current_belief is not None:
+                _diag_bel_x, _diag_bel_y, _diag_bel_yaw, _diag_bel_vx, _diag_bel_vy = _belief_xyyaw_vel(self.current_belief)
+            if self.last_odom_pose is not None:
+                op = np.array(self.last_odom_pose, dtype=np.float64).ravel()[:6]
+                _diag_odom_x, _diag_odom_y = float(op[0]), float(op[1])
+                _diag_odom_yaw = _yaw_deg_from_pose_6d(op)
+            ot = np.array(self.last_odom_twist, dtype=np.float64).ravel()[:6]
+            _diag_odom_vx, _diag_odom_vy, _diag_odom_wz = float(ot[0]), float(ot[1]), float(ot[5])
+
         try:
             # Update per-scan measurement covariance from IW state (shared across hypotheses)
             self.config.Sigma_meas = measurement_noise_mean_jax(self.measurement_noise_state, idx=2)
@@ -855,7 +1119,6 @@ class GoldenChildBackend(Node):
                     raw_weights=weights,
                     raw_ring=ring,
                     raw_tag=tag,
-                    lidar_bucket_state=self.lidar_bucket_noise_state,
                     imu_stamps=imu_stamps_j,
                     imu_gyro=imu_gyro_j,
                     imu_accel=imu_accel_j,
@@ -871,14 +1134,19 @@ class GoldenChildBackend(Node):
                     t_last_scan=t_last_scan,  # IMU integration interval start
                     t_scan=t_scan,            # IMU integration interval end
                     Q=Q_scan,
-                    bin_atlas=self.bin_atlas,
-                    map_stats=self.map_stats,
                     config=self.config,
                     odom_twist=self.last_odom_twist,  # Phase 2: odom twist for velocity factors
                     odom_twist_cov=self.last_odom_twist_cov,
+                    primitive_map=self.primitive_map,
+                    camera_batch=camera_batch,
                 )
                 results.append(result)
                 self.hypotheses[i] = result.belief_updated
+
+                # Stage 1: Update PrimitiveMap from first hypothesis
+                # (For multi-hypothesis, we use hypothesis 0's map update; proper multi-hyp requires merging)
+                if i == 0 and result.primitive_map_updated is not None:
+                    self.primitive_map = result.primitive_map_updated
 
                 # Accumulate commutative IW sufficient statistics
                 w_h = float(self.hyp_weights[i])
@@ -886,9 +1154,7 @@ class GoldenChildBackend(Node):
                 accum_dnu = accum_dnu + w_h * result.iw_process_dnu
                 accum_meas_dPsi = accum_meas_dPsi + w_h * result.iw_meas_dPsi
                 accum_meas_dnu = accum_meas_dnu + w_h * result.iw_meas_dnu
-                accum_lidar_bucket_dPsi = accum_lidar_bucket_dPsi + w_h * result.iw_lidar_bucket_dPsi
-                accum_lidar_bucket_dnu = accum_lidar_bucket_dnu + w_h * result.iw_lidar_bucket_dnu
-            
+
             # Combine hypotheses
             combined_belief, combo_cert, combo_effect = process_hypotheses(
                 hypotheses=self.hypotheses,
@@ -903,7 +1169,6 @@ class GoldenChildBackend(Node):
             # readiness is a weight on sufficient stats (process has no prediction at scan 0 -> weight 0).
             w_process = min(1, self.scan_count)  # 0 at scan 0, 1 from scan 1 (prior/budget)
             w_meas = 1.0
-            w_lidar = 1.0
             self.process_noise_state, proc_iw_cert_vec = process_noise_iw_apply_suffstats_jax(
                 pn_state=self.process_noise_state,
                 dPsi=w_process * accum_dPsi,
@@ -917,44 +1182,6 @@ class GoldenChildBackend(Node):
                 dPsi_blocks=w_meas * accum_meas_dPsi,
                 dnu=w_meas * accum_meas_dnu,
                 eps_psd=self.config.eps_psd,
-            )
-            self.lidar_bucket_noise_state = lidar_bucket_iw_apply_suffstats_jax(
-                state=self.lidar_bucket_noise_state,
-                dPsi=w_lidar * accum_lidar_bucket_dPsi,
-                dnu=w_lidar * accum_lidar_bucket_dnu,
-                eps_psd=self.config.eps_psd,
-            )
-            
-            # Update map statistics with batched weighted sum (no Python loop, no host pull)
-            delta_S_dir = jnp.zeros_like(self.map_stats.S_dir)
-            delta_S_dir_scatter = jnp.zeros_like(self.map_stats.S_dir_scatter)
-            delta_N_dir = jnp.zeros_like(self.map_stats.N_dir)
-            delta_N_pos = jnp.zeros_like(self.map_stats.N_pos)
-            delta_sum_p = jnp.zeros_like(self.map_stats.sum_p)
-            delta_sum_ppT = jnp.zeros_like(self.map_stats.sum_ppT)
-            if results:
-                n_hyp = len(results)
-                weights = self.hyp_weights[:n_hyp]
-                stack_delta_S_dir = jnp.stack([r.map_increments.delta_S_dir for r in results], axis=0)
-                stack_delta_S_dir_scatter = jnp.stack([r.map_increments.delta_S_dir_scatter for r in results], axis=0)
-                stack_delta_N_dir = jnp.stack([r.map_increments.delta_N_dir for r in results], axis=0)
-                stack_delta_N_pos = jnp.stack([r.map_increments.delta_N_pos for r in results], axis=0)
-                stack_delta_sum_p = jnp.stack([r.map_increments.delta_sum_p for r in results], axis=0)
-                stack_delta_sum_ppT = jnp.stack([r.map_increments.delta_sum_ppT for r in results], axis=0)
-                delta_S_dir = jnp.einsum("i,ijk->jk", weights, stack_delta_S_dir)
-                delta_S_dir_scatter = jnp.einsum("i,ijkl->jkl", weights, stack_delta_S_dir_scatter)
-                delta_N_dir = jnp.einsum("i,ij->j", weights, stack_delta_N_dir)
-                delta_N_pos = jnp.einsum("i,ij->j", weights, stack_delta_N_pos)
-                delta_sum_p = jnp.einsum("i,ijk->jk", weights, stack_delta_sum_p)
-                delta_sum_ppT = jnp.einsum("i,ijkl->jkl", weights, stack_delta_sum_ppT)
-            self.map_stats = update_map_stats(
-                self.map_stats,
-                delta_S_dir,
-                delta_S_dir_scatter,
-                delta_N_dir,
-                delta_N_pos,
-                delta_sum_p,
-                delta_sum_ppT,
             )
 
             # Store certificate
@@ -1010,7 +1237,30 @@ class GoldenChildBackend(Node):
             # Defer publish to next callback (state/TF/path published when next scan starts)
             pose_6d = combined_belief.mean_world_pose()
             self._pending_publish = (jnp.array(pose_6d), stamp_sec)
-            
+
+            # Odom vs belief diagnostic: append one row (raw odom, belief start, belief end)
+            if self._odom_belief_diagnostic_file and (self._odom_belief_diagnostic_max <= 0 or self.scan_count <= self._odom_belief_diagnostic_max):
+                bel_end_x, bel_end_y, bel_end_yaw, bel_end_vx, bel_end_vy = _belief_xyyaw_vel(combined_belief)
+                header = (
+                    "scan,t_sec,odom_x,odom_y,odom_yaw_deg,odom_vx,odom_vy,odom_wz,"
+                    "bel_start_x,bel_start_y,bel_start_yaw_deg,bel_start_vx,bel_start_vy,"
+                    "bel_end_x,bel_end_y,bel_end_yaw_deg,bel_end_vx,bel_end_vy\n"
+                )
+                row = (
+                    f"{self.scan_count},{stamp_sec:.6f},"
+                    f"{_diag_odom_x:.6f},{_diag_odom_y:.6f},{_diag_odom_yaw:.6f},{_diag_odom_vx:.6f},{_diag_odom_vy:.6f},{_diag_odom_wz:.6f},"
+                    f"{_diag_bel_x:.6f},{_diag_bel_y:.6f},{_diag_bel_yaw:.6f},{_diag_bel_vx:.6f},{_diag_bel_vy:.6f},"
+                    f"{bel_end_x:.6f},{bel_end_y:.6f},{bel_end_yaw:.6f},{bel_end_vx:.6f},{bel_end_vy:.6f}\n"
+                )
+                try:
+                    with open(self._odom_belief_diagnostic_file, "a", encoding="utf-8") as f:
+                        if not self._odom_belief_diagnostic_header_written:
+                            f.write(header)
+                            self._odom_belief_diagnostic_header_written = True
+                        f.write(row)
+                except OSError as e:
+                    self.get_logger().warn(f"Odom/belief diagnostic write failed: {e}")
+
             if self.scan_count <= 10 or self.scan_count % 50 == 0:
                 self.get_logger().info(
                     f"Scan {self.scan_count}: {n_points} pts, pipeline #{self.pipeline_runs}, "
@@ -1070,6 +1320,20 @@ class GoldenChildBackend(Node):
         path_msg.header = odom_msg.header
         path_msg.poses = self.trajectory_poses
         self.pub_path.publish(path_msg)
+
+        if self.rerun_visualizer is not None:
+            path_xyz = np.array(
+                [
+                    [p.pose.position.x, p.pose.position.y, p.pose.position.z]
+                    for p in self.trajectory_poses
+                ],
+                dtype=np.float64,
+            )
+            self.rerun_visualizer.log_trajectory(path_xyz, stamp_sec)
+
+        # PrimitiveMap as PointCloud2 (/gc/map/points) when map_backend=primitive_map
+        if self.map_publisher is not None and self.primitive_map is not None:
+            self.map_publisher.publish(self.primitive_map, stamp_sec)
         
         # TUM export
         if self.trajectory_file:
@@ -1083,6 +1347,7 @@ class GoldenChildBackend(Node):
         """Publish periodic status."""
         elapsed = time.time() - self.node_start_time
         
+        prim_count = int(self.primitive_map.count) if self.primitive_map is not None else 0
         status = {
             "elapsed_sec": elapsed,
             "odom_count": self.odom_count,
@@ -1090,7 +1355,7 @@ class GoldenChildBackend(Node):
             "imu_count": self.imu_count,
             "pipeline_runs": self.pipeline_runs,
             "hypotheses": self.config.K_HYP,
-            "map_bins_active": int(jnp.sum(self.map_stats.N_dir > 0)),
+            "primitive_map_count": prim_count,
         }
         
         msg = String()
@@ -1100,11 +1365,13 @@ class GoldenChildBackend(Node):
         self.get_logger().info(
             f"GC Status: odom={self.odom_count}, scans={self.scan_count}, "
             f"imu={self.imu_count}, pipeline={self.pipeline_runs}, "
-            f"map_bins={status['map_bins_active']}/{self.config.B_BINS}"
+            f"primitive_map={prim_count}"
         )
 
     def destroy_node(self):
         """Clean up."""
+        if self.rerun_visualizer is not None:
+            self.rerun_visualizer.flush()
         # Drain deferred publish so last scan state is written
         if self._pending_publish is not None:
             pose_6d, stamp = self._pending_publish

@@ -13,17 +13,49 @@ cd "$PROJECT_ROOT"
 # CONFIGURATION (single IMU gravity scale for evidence + preintegration)
 IMU_GRAVITY_SCALE="${IMU_GRAVITY_SCALE:-1.0}"
 DESKEW_ROTATION_ONLY="${DESKEW_ROTATION_ONLY:-false}"
-# Rosbag playback: 1/4 speed gives 4x wall-clock time per scan; first 60s of bag only
+# Rosbag playback: 1/4 speed gives 4x wall-clock time per scan.
+# Playback duration: only first N seconds of bag (for testing; set BAG_DURATION to play more).
 BAG_PLAY_RATE="${BAG_PLAY_RATE:-0.25}"
 BAG_DURATION="${BAG_DURATION:-60}"
 
 # ============================================================================
-BAG_PATH="$PROJECT_ROOT/rosbags/m3dgr/Dynamic01_ros2"
-GT_FILE="$PROJECT_ROOT/rosbags/m3dgr/Dynamic01.txt"
+# Profile: kimera (default) | m3dgr. Default is Kimera; M3DGR Dynamic01 is archived
+# (see archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md). Use PROFILE=m3dgr if you have the bag.
+PROFILE="${PROFILE:-kimera}"
+if [ "$PROFILE" = "m3dgr" ]; then
+  # Archived: M3DGR Dynamic01 — use only if bag is present; see archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md
+  BAG_PATH="${BAG_PATH:-$PROJECT_ROOT/rosbags/m3dgr/Dynamic01_ros2}"
+  GT_FILE="${GT_FILE:-$PROJECT_ROOT/rosbags/m3dgr/Dynamic01.txt}"
+  CONFIG_PATH="${CONFIG_PATH:-}"
+  BODY_CALIB="${BODY_CALIB:-$PROJECT_ROOT/config/m3dgr_body_T_wheel.yaml}"
+  ODOM_FRAME="${ODOM_FRAME:-odom}"
+  BASE_FRAME="${BASE_FRAME:-base_footprint}"
+  POINTCLOUD_LAYOUT="${POINTCLOUD_LAYOUT:-vlp16}"
+  LIDAR_SIGMA_MEAS="${LIDAR_SIGMA_MEAS:-0.01}"
+  T_BASE_LIDAR="${T_BASE_LIDAR:-}"
+  T_BASE_IMU="${T_BASE_IMU:-}"
+  IMU_ACCEL_SCALE="${IMU_ACCEL_SCALE:-9.81}"
+else
+  # Default: Kimera; see docs/KIMERA_FRAME_MAPPING.md
+  BAG_PATH="${BAG_PATH:-$PROJECT_ROOT/rosbags/Kimera_Data/ros2/10_14_acl_jackal-005}"
+  GT_FILE="${GT_FILE:-$PROJECT_ROOT/rosbags/Kimera_Data/ground_truth/1014/acl_jackal_gt.tum}"
+  CONFIG_PATH="$PROJECT_ROOT/fl_ws/src/fl_slam_poc/config/gc_kimera.yaml"
+  BODY_CALIB="${BODY_CALIB:-}"  # Optional for Kimera; empty = no body transform
+  ODOM_FRAME="${ODOM_FRAME:-acl_jackal2/odom}"
+  BASE_FRAME="${BASE_FRAME:-acl_jackal2/base}"
+  POINTCLOUD_LAYOUT="${POINTCLOUD_LAYOUT:-vlp16}"
+  LIDAR_SIGMA_MEAS="${LIDAR_SIGMA_MEAS:-0.001}"
+  BAG_DURATION="${BAG_DURATION:-60}"
+  T_BASE_LIDAR="${T_BASE_LIDAR:-[-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]}"
+  T_BASE_IMU="${T_BASE_IMU:-[-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.000000]}"
+  IMU_ACCEL_SCALE="${IMU_ACCEL_SCALE:-1.0}"
+fi
+# When CONFIG_PATH is empty (M3DGR), launch uses its default (gc_unified.yaml)
+[ -n "$CONFIG_PATH" ] && CONFIG_ARG="config_path:=$CONFIG_PATH" || CONFIG_ARG=""
+
 EST_FILE="/tmp/gc_slam_trajectory.tum"
 EST_BODY="/tmp/gc_slam_trajectory_body.tum"
 GT_ALIGNED="/tmp/m3dgr_ground_truth_aligned.tum"
-BODY_CALIB="${BODY_CALIB:-$PROJECT_ROOT/config/m3dgr_body_T_wheel.yaml}"
 WIRING_SUMMARY="/tmp/gc_wiring_summary.json"
 DIAGNOSTICS_FILE="$PROJECT_ROOT/results/gc_slam_diagnostics.npz"
 RESULTS_DIR="$PROJECT_ROOT/results/gc_$(date +%Y%m%d_%H%M%S)"
@@ -211,25 +243,50 @@ export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 mkdir -p "$ROS_HOME" "$ROS_LOG_DIR"
 
-# Get bag duration
-# First-scan JIT compilation may take ~30s, add extra buffer
-BAG_DURATION=$(ros2 bag info "$BAG_PATH" 2>/dev/null | grep "Duration" | awk '{print $2}' | cut -d'.' -f1 || echo "180")
-TIMEOUT_SEC=$((BAG_DURATION + 45))
+# Playback: only first BAG_DURATION seconds (e.g. 60 for quick Kimera testing).
+# Timeout = playback duration + buffer for JIT and processing (do not use full bag length).
+PLAYBACK_DURATION="$BAG_DURATION"
+TIMEOUT_SEC=$((PLAYBACK_DURATION + 90))
 
-echo -e "  Duration: ${CYAN}~${BAG_DURATION}s${NC} (timeout: ${TIMEOUT_SEC}s)"
+echo -e "  Playback: ${CYAN}first ${PLAYBACK_DURATION}s${NC} of bag (timeout: ${TIMEOUT_SEC}s)"
 echo -e "  Log: ${CYAN}$LOG_FILE${NC}"
 echo ""
 
-# Launch
-ros2 launch fl_slam_poc gc_rosbag.launch.py \
-  bag:="$BAG_PATH" \
-  trajectory_export_path:="$EST_FILE" \
-  wiring_summary_path:="$WIRING_SUMMARY" \
-  diagnostics_export_path:="$DIAGNOSTICS_FILE" \
-  imu_gravity_scale:="$IMU_GRAVITY_SCALE" \
-  deskew_rotation_only:="$DESKEW_ROTATION_ONLY" \
-  bag_play_rate:="$BAG_PLAY_RATE" \
-  bag_duration:="$BAG_DURATION" \
+# Fail clearly if Kimera profile but bag or GT missing
+if [ "$PROFILE" = "kimera" ]; then
+  if [ ! -d "$BAG_PATH" ] && [ ! -f "$BAG_PATH" ]; then
+    echo "ERROR: PROFILE=kimera but BAG_PATH missing: $BAG_PATH"
+    exit 1
+  fi
+  if [ ! -f "$GT_FILE" ]; then
+    echo "ERROR: PROFILE=kimera but GT_FILE missing: $GT_FILE"
+    exit 1
+  fi
+fi
+
+# Launch (pass config_path and frame params when set)
+LAUNCH_OPTS=(
+  bag:="$BAG_PATH"
+  trajectory_export_path:="$EST_FILE"
+  wiring_summary_path:="$WIRING_SUMMARY"
+  diagnostics_export_path:="$DIAGNOSTICS_FILE"
+  imu_gravity_scale:="$IMU_GRAVITY_SCALE"
+  deskew_rotation_only:="$DESKEW_ROTATION_ONLY"
+  bag_play_rate:="$BAG_PLAY_RATE"
+  bag_duration:="$PLAYBACK_DURATION"
+  odom_frame:="$ODOM_FRAME"
+  base_frame:="$BASE_FRAME"
+  pointcloud_layout:="$POINTCLOUD_LAYOUT"
+  lidar_sigma_meas:="$LIDAR_SIGMA_MEAS"
+  odom_belief_diagnostic_file:="$RESULTS_DIR/odom_belief_diagnostic.csv"
+  odom_belief_diagnostic_max_scans:="200"
+)
+[ -n "$CONFIG_ARG" ] && LAUNCH_OPTS+=( "$CONFIG_ARG" )
+[ -n "$T_BASE_LIDAR" ] && LAUNCH_OPTS+=( "T_base_lidar:=$T_BASE_LIDAR" )
+[ -n "$T_BASE_IMU" ] && LAUNCH_OPTS+=( "T_base_imu:=$T_BASE_IMU" )
+[ -n "$IMU_ACCEL_SCALE" ] && LAUNCH_OPTS+=( "imu_accel_scale:=$IMU_ACCEL_SCALE" )
+
+ros2 launch fl_slam_poc gc_rosbag.launch.py "${LAUNCH_OPTS[@]}" \
   > "$LOG_FILE" 2>&1 &
 LAUNCH_PID=$!
 

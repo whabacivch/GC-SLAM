@@ -26,6 +26,38 @@ if _PROJECT_ROOT not in sys.path:
 from rosbag_sqlite_utils import resolve_db3_path, topic_id, topic_type
 
 
+def pointcloud2_to_xyz(msg) -> np.ndarray:
+    """
+    Extract x, y, z from sensor_msgs/PointCloud2 (VLP-16 or any layout with x,y,z).
+    Returns (N, 3) float64 array. Used for frame diagnostic only.
+    """
+    n_points = msg.width * msg.height
+    if n_points == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    field_map = {f.name: (f.offset, f.datatype) for f in msg.fields}
+    for name in ("x", "y", "z"):
+        if name not in field_map:
+            raise RuntimeError(f"PointCloud2 missing field '{name}'; present: {sorted(field_map.keys())}")
+    # ROS2 sensor_msgs/PointField: FLOAT32=7 (4 bytes), FLOAT64=8 (8 bytes)
+    def _size(ft):
+        return 8 if ft == 8 else 4  # FLOAT64=8 else FLOAT32/INT
+    x_off, x_dt = field_map["x"]
+    y_off, y_dt = field_map["y"]
+    z_off, z_dt = field_map["z"]
+    step = msg.point_step
+    data = np.frombuffer(msg.data, dtype=np.uint8)
+    x = np.zeros(n_points, dtype=np.float64)
+    y = np.zeros(n_points, dtype=np.float64)
+    z = np.zeros(n_points, dtype=np.float64)
+    for i in range(n_points):
+        base = i * step
+        sz_x, sz_y, sz_z = _size(x_dt), _size(y_dt), _size(z_dt)
+        x[i] = np.frombuffer(data[base + x_off : base + x_off + sz_x].tobytes(), dtype=np.float64 if sz_x == 8 else np.float32)[0]
+        y[i] = np.frombuffer(data[base + y_off : base + y_off + sz_y].tobytes(), dtype=np.float64 if sz_y == 8 else np.float32)[0]
+        z[i] = np.frombuffer(data[base + z_off : base + z_off + sz_z].tobytes(), dtype=np.float64 if sz_z == 8 else np.float32)[0]
+    return np.column_stack([x, y, z])
+
+
 def analyze_lidar_z_convention(points: np.ndarray) -> dict:
     """
     Determine if LiDAR is Z-up or Z-down by analyzing point distribution.
@@ -214,49 +246,52 @@ def main() -> int:
         print("-" * 80)
         
         lidar_tid = topic_id(cur, args.lidar_topic)
+        lidar_type = topic_type(cur, args.lidar_topic) if lidar_tid is not None else None
         if lidar_tid is None:
             print(f"  ERROR: Topic not found: {args.lidar_topic}")
         else:
+            use_pointcloud2 = lidar_type and "PointCloud2" in lidar_type
             try:
-                from livox_ros_driver2.msg import CustomMsg
-                
+                if use_pointcloud2:
+                    from sensor_msgs.msg import PointCloud2 as PointCloud2Msg
+                else:
+                    from livox_ros_driver2.msg import CustomMsg
+
                 lidar_stats = []
                 scan_count = 0
-                
+
                 for row in cur.execute(
                     "SELECT timestamp, data FROM messages WHERE topic_id = ? ORDER BY timestamp LIMIT ?",
                     (lidar_tid, args.n_scans * 10),  # Get more to filter valid ones
                 ):
                     ts, data = row
                     try:
-                        msg = deserialize_message(data, CustomMsg)
-                        
-                        # Extract raw points (in livox_frame, NO transforms applied)
-                        points_list = []
-                        for point in msg.points:
-                            if point.line < 6:
-                                # Dynamic01_ros2 livox_ros_driver2/CustomMsg points are already in meters.
-                                # Do NOT apply a mm→m conversion here (it collapses the cloud to ~cm scale).
-                                x = float(point.x)
-                                y = float(point.y)
-                                z = float(point.z)
-                                points_list.append([x, y, z])
-                        
-                        if len(points_list) < 100:
+                        if use_pointcloud2:
+                            msg = deserialize_message(data, PointCloud2Msg)
+                            points = pointcloud2_to_xyz(msg)
+                        else:
+                            msg = deserialize_message(data, CustomMsg)
+                            points_list = []
+                            for point in msg.points:
+                                if point.line < 6:
+                                    x = float(point.x)
+                                    y = float(point.y)
+                                    z = float(point.z)
+                                    points_list.append([x, y, z])
+                            points = np.array(points_list, dtype=np.float64) if points_list else np.zeros((0, 3))
+
+                        if points.shape[0] < 100:
                             continue
-                        
-                        points = np.array(points_list, dtype=np.float64)
+
                         stats = analyze_lidar_z_convention(points)
-                        
                         if stats:
                             lidar_stats.append(stats)
                             scan_count += 1
                             if scan_count >= args.n_scans:
                                 break
-                                
-                    except Exception as e:
+                    except Exception:
                         continue
-                
+
                 if lidar_stats:
                     # Aggregate
                     avg_normal = np.mean([s['ground_normal'] for s in lidar_stats], axis=0)
@@ -289,14 +324,17 @@ def main() -> int:
                     print("  ERROR: No valid point clouds found")
                     
             except ImportError:
-                print(f"  ERROR: Cannot import livox_ros_driver2.msg.CustomMsg")
+                if use_pointcloud2:
+                    print(f"  ERROR: Cannot import sensor_msgs.msg.PointCloud2")
+                else:
+                    print(f"  ERROR: Cannot import livox_ros_driver2.msg.CustomMsg")
             except Exception as e:
                 print(f"  ERROR: {e}")
                 import traceback
                 traceback.print_exc()
-        
+
         print()
-        
+
         # =====================================================================
         # 2. IMU Gravity Direction
         # =====================================================================

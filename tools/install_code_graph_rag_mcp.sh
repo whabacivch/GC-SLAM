@@ -34,4 +34,4 @@ if ! code-graph-rag-mcp --version 2>/dev/null; then
   npm install -g onnxruntime-node
   code-graph-rag-mcp --version
 fi
-echo "Done. Use 'code-graph-rag-mcp' in Cursor MCP config (see docs/MCP_CODE_GRAPH_SETUP.md)."
+echo "Done. Use 'code-graph-rag-mcp' in Cursor MCP config (see tools/README_MCP.md)."

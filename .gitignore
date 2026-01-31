@@ -41,6 +41,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+/os
 
 # Runtime logs / artifacts
 .ros/
@@ -65,3 +66,14 @@ config/*.rviz
 # Temporary files
 *.tmp
 *.bak
+
+# MCP / LLM runtime logs (Cursor, etc.)
+logs_llm/
+
+# Accidental duplicates / venvs (not source code)
+MIT/
+Fellowship/
+
+# Raw sensor dumps (regenerable via tools/dump_raw_imu_odom.py, tools/dead_reckon_odom_dump.py)
+docs/raw_sensor_dump/*.csv
+docs/raw_sensor_dump/*.png

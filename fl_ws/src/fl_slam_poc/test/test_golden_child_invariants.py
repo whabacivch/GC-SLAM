@@ -216,30 +216,6 @@ class TestCertificateStructure:
         assert magnitude >= 0.3  # At least lift + psd delta
 
 
-class TestLivoxConverterStrictness:
-    """Verify Livox conversion wiring is explicit (no 'auto' multipath)."""
-
-    def test_gc_backend_yaml_has_no_auto_input_msg_type(self):
-        pkg_root = os.path.dirname(os.path.dirname(__file__))
-        path = os.path.join(pkg_root, "config", "gc_backend.yaml")
-        if not os.path.exists(path):
-            pytest.skip("gc_backend.yaml not found")
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-        assert 'input_msg_type: "auto"' not in text
-
-    def test_gc_rosbag_launch_passes_explicit_input_msg_type(self):
-        pkg_root = os.path.dirname(os.path.dirname(__file__))
-        path = os.path.join(pkg_root, "launch", "gc_rosbag.launch.py")
-        if not os.path.exists(path):
-            pytest.skip("gc_rosbag.launch.py not found")
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-        assert "livox_input_msg_type" in text
-        # gc_sensor_hub applies this explicitly to livox_converter (single-path).
-        assert '"livox_input_msg_type": LaunchConfiguration("livox_input_msg_type")' in text
-
-
 class TestSensorHubWiring:
     """Verify GC launch uses the sensor hub layer for accountability."""
 

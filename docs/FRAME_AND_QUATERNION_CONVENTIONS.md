@@ -73,6 +73,8 @@ Body axes convention (GC assumes a standard mobile base convention):
 - **camera_imu_optical_frame**: RealSense D435i IMU frame
 - **odom_combined**: Odometry frame (parent of base_footprint)
 
+**Dataset-specific frame mapping:** For Kimera bags, frame names and axis verification are documented in [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md).
+
 ### Odometry Message Semantics (nav_msgs/Odometry) - MUST MATCH SE(3) MATH
 
 This project does not rely on `/tf` at runtime, so we must be explicit about

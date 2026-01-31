@@ -20,7 +20,7 @@ We **align GT to the estimate frame** (initial-pose alignment): at the first ass
 Any **pre-alignment** initial offset (how far apart the two trajectories were before we aligned them) is **not** reported as part of ATE/RPE — we align it away. Conceptually:
 
 - **Large pre-alignment offset** could indicate **extrinsics or calibration** issues (e.g. wrong body_T_wheel, wrong LiDAR/IMU frame). If you ever want to investigate that, you could log or report the alignment transform (translation/rotation applied to GT) before computing metrics.
-- For now we **document** the approach: we align GT to the estimate frame so both start at 0,0,0; we do not treat initial offset as a “metric” because half of it is often **frame convention** (e.g. world vs body, axis flip, different origin) and not necessarily sensor failure. See `docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md` for wheel vs body frame and M3DGR GT semantics.
+- For now we **document** the approach: we align GT to the estimate frame so both start at 0,0,0; we do not treat initial offset as a “metric” because half of it is often **frame convention** (e.g. world vs body, axis flip, different origin) and not necessarily sensor failure. For M3DGR wheel vs body frame and GT semantics see `archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`. Kimera bags use different topics/frames (see `rosbags/Kimera_Data/`).
 
 ## Running Evaluation
 
@@ -129,7 +129,7 @@ If the **trajectory comparison plot** shows that the **estimated XZ view** (our 
 - **Diagnostic:** Re-run evaluation with **`--gt-swap-yz`** so GT’s Y and Z axes are swapped before alignment and metrics. If the trajectories then overlay much better, the GT (or its frame definition) likely uses a different Y/Z convention.
 - **Example:**  
   `tools/evaluate_slam.py .../ground_truth_aligned.tum .../estimated_trajectory.tum results/out op_report.jsonl --gt-swap-yz`
-- **Root cause:** M3DGR GT is in body (camera_imu) frame; we compare after transforming our estimate to body via `body_T_wheel`. Residual axis difference (e.g. body vs wheel Y/Z) or GT file column/axis semantics can produce this. See `docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`.
+- **Root cause:** M3DGR GT is in body (camera_imu) frame; we compare after transforming our estimate to body via `body_T_wheel`. Residual axis difference (e.g. body vs wheel Y/Z) or GT file column/axis semantics can produce this. See `archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md` (M3DGR). For Kimera see `rosbags/Kimera_Data/` and tools (e.g. `run_gc_kimera.sh`, `kimera_gt_to_tum.py`).
 
 **Sanity check and convention fix (Umeyama-derived):** The evaluator prints **ptp(x,y,z)** for GT and EST before plotting. For a planar robot, **GT ptp(z) should be ~0.04 m**; if the plot shows GT "Z" swinging by meters, axes are swapped. Use **`--verbose`** to print the first 5 rows of positions (TUM: t, x, y, z, qx, qy, qz, qw). Umeyama (EST → GT) yields a signed permutation: GT x ≈ −EST z, GT y ≈ EST x, GT z ≈ −EST y. Use **`--apply-est-to-gt-convention`** to transform EST by `R_EST_TO_GT` so both trajectories are in GT axis convention and 2D projections are same-plane.
 

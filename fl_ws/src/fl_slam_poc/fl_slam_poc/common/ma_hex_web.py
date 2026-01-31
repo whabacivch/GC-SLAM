@@ -1,9 +1,9 @@
 """
-MA hex web: hex cell keys, fixed bucket, stencil K=64, PoE denoise.
+MA hex web: hex cell keys, fixed bucket, stencil K=64, PoE denoise, candidate generation.
 
-Plan: lidar-camera_splat_fusion_and_bev_ot. MA hex: a1=(1,0), a2=(1/2,√3/2), a3=a2−a1;
-s_k = a_k·y, cell = floor(s/h), h ~ 2–3×median(√λ_max(Σ)); fixed [num_cells, max_occupants];
-stencil K=64; PoE denoise; convexity weight. No edits to existing binning/pipeline.
+Hex: a1=(1,0), a2=(1/2,√3/2); s_k = a_k·y, cell = floor(s/h), h = hex_scale_factor × median(√λ_max(Σ_bev)).
+Fixed [num_cells, max_occupants]; stencil K=64. generate_candidates_ma_hex_web replaces kNN for OT association.
+PoE denoise and convexity_weight available for optional per-cell denoise.
 """
 
 from __future__ import annotations
@@ -256,3 +256,87 @@ class MAHexBucket:
         """Return array of splat indices in cell (length count[cell_linear]); no -1 padding."""
         c = int(self.count[cell_linear])
         return self.bucket[cell_linear, :c].copy()
+
+
+# -----------------------------------------------------------------------------
+# Candidate generation: fixed K_ASSOC per measurement from hex stencil (replaces kNN)
+# -----------------------------------------------------------------------------
+
+
+def generate_candidates_ma_hex_web(
+    meas_positions: np.ndarray,
+    map_positions: np.ndarray,
+    map_covariances: np.ndarray,
+    k_assoc: int,
+    config: MAHexWebConfig,
+) -> np.ndarray:
+    """
+    Generate K_ASSOC candidates per measurement via MA hex web (fixed topology).
+
+    BEV (x, y) for hex cells; h = hex_scale_factor * median(sqrt(λ_max(Σ_bev))).
+    Map primitives are binned by hex cell; per measurement we take the stencil of
+    neighbor cells, collect all map indices in those cells, then take nearest
+    k_assoc by squared distance (fixed-cost: sort capped at stencil_cells * max_occupants).
+
+    Args:
+        meas_positions: (N_meas, 3) measurement positions
+        map_positions: (M_map, 3) map primitive positions
+        map_covariances: (M_map, 3, 3) map covariances (BEV = top-left 2x2)
+        k_assoc: number of candidates per measurement
+        config: MAHexWebConfig (num_cells, max_occupants, stencil, scale)
+
+    Returns:
+        candidate_indices: (N_meas, k_assoc) indices into map
+    """
+    N_meas = meas_positions.shape[0]
+    M_map = map_positions.shape[0]
+    meas_positions = np.asarray(meas_positions, dtype=np.float64).reshape(-1, 3)
+    map_positions = np.asarray(map_positions, dtype=np.float64).reshape(-1, 3)
+    map_covariances = np.asarray(map_covariances, dtype=np.float64).reshape(-1, 3, 3)
+
+    if M_map == 0 or N_meas == 0:
+        return np.zeros((N_meas, k_assoc), dtype=np.int64)
+
+    meas_bev = meas_positions[:, :2]
+    map_bev = map_positions[:, :2]
+    Sigma_bev = map_covariances[:, :2, :2]
+    h = compute_hex_scale_h(Sigma_bev, config.hex_scale_factor)
+    h = max(float(h), 1e-12)
+
+    n1, n2 = config.num_cells_1, config.num_cells_2
+    bucket = MAHexBucket(n1, n2, config.max_occupants)
+
+    map_cells = hex_cell_key_batch(map_bev, h)
+    for j in range(M_map):
+        c1, c2 = int(map_cells[j, 0]), int(map_cells[j, 1])
+        bucket.add(c1, c2, j)
+
+    max_candidates = config.K_STENCIL * config.max_occupants
+    candidate_indices = np.zeros((N_meas, k_assoc), dtype=np.int64)
+
+    for i in range(N_meas):
+        cell_i = hex_cell_key_batch(meas_bev[i : i + 1], h)[0]
+        cell_linear = cell_key_to_linear(int(cell_i[0]), int(cell_i[1]), n1, n2)
+        stencil = stencil_linear_indices(
+            cell_linear, n1, n2, config.stencil_radius, max_size=config.K_STENCIL
+        )
+        collected: List[int] = []
+        for idx in stencil:
+            occ = bucket.get_occupants(int(idx))
+            collected.extend(occ.tolist())
+        arr = np.array(collected, dtype=np.int64)
+        if arr.size == 0:
+            candidate_indices[i, :] = 0
+            continue
+        if arr.size > k_assoc:
+            diff = map_positions[arr] - meas_positions[i]
+            dists_sq = np.sum(diff * diff, axis=1)
+            order = np.argsort(dists_sq)[:k_assoc]
+            candidate_indices[i, :] = arr[order]
+        else:
+            k_fill = min(k_assoc, arr.size)
+            candidate_indices[i, :k_fill] = arr[:k_fill]
+            if k_fill < k_assoc:
+                candidate_indices[i, k_fill:] = arr[0] if arr.size > 0 else 0
+
+    return candidate_indices

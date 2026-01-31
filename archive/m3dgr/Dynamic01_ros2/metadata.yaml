@@ -1,0 +1,94 @@
+rosbag2_bagfile_information:
+  compression_format: ''
+  compression_mode: ''
+  custom_data: null
+  duration:
+    nanoseconds: 175162753995
+  files:
+  - duration:
+      nanoseconds: 175162753995
+    message_count: 175337
+    path: Dynamic01_ros2.db3
+    starting_time:
+      nanoseconds_since_epoch: 1732437229399620071
+  message_count: 175337
+  relative_file_paths:
+  - Dynamic01_ros2.db3
+  ros_distro: rosbags
+  starting_time:
+    nanoseconds_since_epoch: 1732437229399620071
+  storage_identifier: sqlite3
+  topics_with_message_count:
+  - message_count: 35032
+    topic_metadata:
+      name: /livox/mid360/imu
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/Imu
+      type_description_hash: 
+        RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b
+  - message_count: 35024
+    topic_metadata:
+      name: /camera/imu
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/Imu
+      type_description_hash: 
+        RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b
+  - message_count: 52134
+    topic_metadata:
+      name: /vrpn_client_node/UGV/pose
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: geometry_msgs/msg/PoseStamped
+      type_description_hash: 
+        RIHS01_10f3786d7d40fd2b54367835614bff85d4ad3b5dab62bf8bca0cc232d73b4cd8
+  - message_count: 3504
+    topic_metadata:
+      name: /odom
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: nav_msgs/msg/Odometry
+      type_description_hash: 
+        RIHS01_3cc97dc7fb7502f8714462c526d369e35b603cfc34d946e3f2eda2766dfec6e0
+  - message_count: 5251
+    topic_metadata:
+      name: /camera/aligned_depth_to_color/image_raw/compressedDepth
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/CompressedImage
+      type_description_hash: 
+        RIHS01_15640771531571185e2efc8a100baf923961a4d15d5569652e6cb6691e8e371a
+  - message_count: 5251
+    topic_metadata:
+      name: /camera/color/image_raw/compressed
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/CompressedImage
+      type_description_hash: 
+        RIHS01_15640771531571185e2efc8a100baf923961a4d15d5569652e6cb6691e8e371a
+  - message_count: 1752
+    topic_metadata:
+      name: /livox/mid360/lidar
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: livox_ros_driver2/msg/CustomMsg
+      type_description_hash: 
+        RIHS01_2eb17e5e35bf5a2d6cd079f3c57f33abf95e5bf7d71b42cddc05daace73d815a
+  - message_count: 35638
+    topic_metadata:
+      name: /livox/avia/imu
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/Imu
+      type_description_hash: 
+        RIHS01_7d9a00ff131080897a5ec7e26e315954b8eae3353c3f995c55faf71574000b5b
+  - message_count: 1751
+    topic_metadata:
+      name: /livox/avia/lidar
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: livox_ros_driver/msg/CustomMsg
+      type_description_hash: 
+        RIHS01_94041b4794f52c1d81def2989107fc898a62dacb7a39d5dbe80d4b55e538bf6d
+  version: 9

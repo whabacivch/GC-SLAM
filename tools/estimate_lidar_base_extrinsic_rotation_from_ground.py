@@ -121,6 +121,52 @@ def _ransac_ground_plane(
     return best
 
 
+def _pointcloud2_to_xyz(msg) -> np.ndarray:
+    """Extract x,y,z from sensor_msgs/PointCloud2 (VLP-16 or any layout with x,y,z). Returns (N,3) float64."""
+    n_points = msg.width * msg.height
+    if n_points == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    field_map = {f.name: (f.offset, f.datatype) for f in msg.fields}
+    for name in ("x", "y", "z"):
+        if name not in field_map:
+            raise RuntimeError(f"PointCloud2 missing field '{name}'")
+    def _size(ft):
+        return 8 if ft == 8 else 4
+    x_off, x_dt = field_map["x"]
+    y_off, y_dt = field_map["y"]
+    z_off, z_dt = field_map["z"]
+    step = msg.point_step
+    data = np.frombuffer(msg.data, dtype=np.uint8)
+    x = np.zeros(n_points, dtype=np.float64)
+    y = np.zeros(n_points, dtype=np.float64)
+    z = np.zeros(n_points, dtype=np.float64)
+    for i in range(n_points):
+        base = i * step
+        sz_x, sz_y, sz_z = _size(x_dt), _size(y_dt), _size(z_dt)
+        x[i] = np.frombuffer(data[base + x_off : base + x_off + sz_x].tobytes(), dtype=np.float64 if sz_x == 8 else np.float32)[0]
+        y[i] = np.frombuffer(data[base + y_off : base + y_off + sz_y].tobytes(), dtype=np.float64 if sz_y == 8 else np.float32)[0]
+        z[i] = np.frombuffer(data[base + z_off : base + z_off + sz_z].tobytes(), dtype=np.float64 if sz_z == 8 else np.float32)[0]
+    out = np.column_stack([x, y, z])
+    return out[np.isfinite(out).all(axis=1)]
+
+
+def _extract_pointcloud2_scans(cur: sqlite3.Cursor, tid: int, *, skip_scans: int, max_scans: int):
+    from rclpy.serialization import deserialize_message
+    from sensor_msgs.msg import PointCloud2
+
+    n_used = 0
+    for i, (_ts, data) in enumerate(_iter_msgs(cur, tid)):
+        if i < skip_scans:
+            continue
+        msg = deserialize_message(data, PointCloud2)
+        pts = _pointcloud2_to_xyz(msg)
+        if pts.shape[0] >= 100:
+            yield pts
+            n_used += 1
+            if max_scans > 0 and n_used >= max_scans:
+                break
+
+
 def _extract_livox_custom_points_m(cur: sqlite3.Cursor, tid: int, *, skip_scans: int, max_scans: int):
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
@@ -201,13 +247,17 @@ def main() -> int:
         if tid is None:
             raise RuntimeError(f"Topic not found: {args.lidar_topic}")
 
+        use_pointcloud2 = t and "PointCloud2" in t
         rng = np.random.default_rng(int(args.seed))
 
         normals = []
         fracs = []
         ds = []
         n_scans = 0
-        for pts in _extract_livox_custom_points_m(
+        extractor = (
+            _extract_pointcloud2_scans if use_pointcloud2 else _extract_livox_custom_points_m
+        )
+        for pts in extractor(
             cur, tid, skip_scans=int(args.skip_scans), max_scans=int(args.max_scans)
         ):
             fit = _ransac_ground_plane(

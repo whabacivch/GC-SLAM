@@ -1,97 +1,82 @@
 # =============================================================================
-# GC UNIFIED CONFIG - Golden Child SLAM v2 Configuration
+# GC UNIFIED CONFIG - Golden Child SLAM v2 (Kimera / PointCloud2 default)
 # =============================================================================
 #
-# This file consolidates all configuration for the GC SLAM system.
-# Both gc_sensor_hub and gc_backend_node load parameters from this file.
+# Default profile: Kimera bags (PointCloud2 LiDAR, standard IMU). Use gc_kimera.yaml
+# for Kimera-Multi-Data; this file provides a generic fallback.
 #
-# Topic Naming Convention:
-#   Raw (from bag)              Canonical (for backend)
-#   ─────────────────────────   ────────────────────────────
-#   /livox/mid360/lidar     →   /gc/sensors/lidar_points
-#   /odom                   →   /gc/sensors/odom
-#   /livox/mid360/imu       →   /gc/sensors/imu
+# Topic flow: raw bag → pointcloud_passthrough / odom_normalizer / imu_normalizer
+#             → /gc/sensors/* → gc_backend_node
 #
 # Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Sensor Hub Configuration (Process 1)
+# Sensor Hub Configuration
 # -----------------------------------------------------------------------------
 gc_sensor_hub:
   ros__parameters:
-    # Livox Converter: CustomMsg -> PointCloud2
-    livox_converter:
-      input_topic: /livox/mid360/lidar
+    pointcloud_passthrough:
+      input_topic: /acl_jackal/lidar_points
       output_topic: /gc/sensors/lidar_points
-      input_msg_type: livox_ros_driver2/msg/CustomMsg
-      frame_id: ""  # Empty preserves bag frame
+      qos_depth: 10
 
-    # Odom Normalizer: raw odom -> canonical odom
     odom_normalizer:
-      input_topic: /odom
+      input_topic: /acl_jackal/jackal_velocity_controller/odom
       output_topic: /gc/sensors/odom
-      output_frame: ""  # Preserve bag frame_id (no-TF mode).
-      child_frame: ""   # Preserve bag child_frame_id (no-TF mode).
+      output_frame: ""
+      child_frame: ""
 
-    # IMU Normalizer: raw IMU -> canonical IMU
     imu_normalizer:
-      input_topic: /livox/mid360/imu
+      input_topic: /acl_jackal/forward/imu
       output_topic: /gc/sensors/imu
-      output_frame: ""  # Preserve bag frame_id (no-TF mode).
+      output_frame: ""
 
-    # Dead End Audit: subscribes to unused topics for accountability
     dead_end_audit:
-      topic_specs:
-        - "/camera/imu|sensor_msgs/msg/Imu"
-        - "/camera/color/image_raw/compressed|sensor_msgs/msg/CompressedImage"
-        - "/camera/aligned_depth_to_color/image_raw/compressedDepth|sensor_msgs/msg/CompressedImage"
-        - "/vrpn_client_node/UGV/pose|geometry_msgs/msg/PoseStamped"
-        - "/livox/avia/imu|sensor_msgs/msg/Imu"
-        - "/livox/avia/lidar|livox_ros_driver/msg/CustomMsg"
-      required_topics: []  # None required by default
+      topic_specs: []
+      required_topics: []
       required_timeout_sec: 10.0
       status_publish_period_sec: 5.0
       qos_reliability: best_effort
       qos_depth: 10
 
 # -----------------------------------------------------------------------------
-# Backend Configuration (Process 2)
+# Backend Configuration
 # -----------------------------------------------------------------------------
 gc_backend:
   ros__parameters:
-    # Sensor subscriptions - ONLY /gc/sensors/* (canonical topics)
     lidar_topic: /gc/sensors/lidar_points
     odom_topic: /gc/sensors/odom
     imu_topic: /gc/sensors/imu
 
-    # Frame IDs
-    odom_frame: odom
-    # For M3DGR Dynamic01, bag truth uses base_footprint. Keep this consistent with odom child_frame_id.
-    base_frame: base_footprint
+    odom_frame: "acl_jackal2/odom"
+    base_frame: "acl_jackal2/base"
 
-    # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] (rotvec, radians).
-    # LiDAR: Z-up confirmed (diagnose_coordinate_frames.py) - rotation [0,0,0] is correct.
-    # IMU: 154.5° rotation from gravity alignment tool. UNDER INVESTIGATION - there may be
-    #      sign convention issues elsewhere in the pipeline that need to be resolved first.
-    # See: tools/estimate_imu_base_extrinsic_rotation.py
-    T_base_lidar: [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]
-    # IMU extrinsic: 28° rotation to align IMU gravity with base +Z
-    # (Previous 154.5° rotation was inverting both gravity and yaw axis)
-    # Restored to match good run (2026-01-26 22:06:57) values
-    T_base_imu:   [0.0,   0.0, 0.0,   -0.015586, 0.489293, 0.0]
+    pointcloud_layout: vlp16
+    lidar_sigma_meas: 1e-3
 
-    # Profiling / timing
+    extrinsics_source: inline
+    T_base_lidar: [-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]
+    T_base_imu:   [-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.0]
+
+    trajectory_export_path: /tmp/gc_slam_trajectory.tum
+    status_check_period_sec: 5.0
+    forgetting_factor: 0.99
+    init_window_odom_count: 10
     enable_timing: false
 
-    # Trajectory export
-    trajectory_export_path: /tmp/gc_slam_trajectory.tum
+    map_backend: primitive_map
+    pose_evidence_backend: primitives
 
-    # Status publishing
-    status_check_period_sec: 5.0
+    n_feat: 512
+    n_surfel: 1024
+    k_assoc: 8
+    k_sinkhorn: 50
+    primitive_map_max_size: 50000
+    primitive_forgetting_factor: 0.999
 
-    # Map forgetting
-    forgetting_factor: 0.99
-
-    # Smoothed initial anchor (PIPELINE_DESIGN_GAPS §5.4.1): buffer first K odom, then A_smoothed = weighted t̄ + polar(R); export = anchor_correction ∘ pose_belief
-    init_window_odom_count: 10
+    camera_image_topic: /gc/sensors/camera_image
+    camera_depth_topic: /gc/sensors/camera_depth
+    camera_K: [500.0, 500.0, 320.0, 240.0]
+    T_base_camera: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    ringbuf_len: 5

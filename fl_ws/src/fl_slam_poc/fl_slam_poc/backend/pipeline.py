@@ -24,11 +24,7 @@ from fl_slam_poc.common.certificates import (
     aggregate_certificates,
     InfluenceCert,
 )
-from fl_slam_poc.backend.structures.bin_atlas import (
-    BinAtlas,
-    MapBinStats,
-    compute_map_derived_stats,
-)
+# Bins removed; map_update result shape kept for compatibility (zeros)
 
 # Import all operators
 from fl_slam_poc.backend.operators.point_budget import point_budget_resample
@@ -40,18 +36,8 @@ from fl_slam_poc.backend.operators.imu_preintegration import (
     preintegrate_imu_relative_pose_jax,
 )
 from fl_slam_poc.backend.operators.deskew_constant_twist import deskew_constant_twist
-from fl_slam_poc.backend.operators.binning import (
-    bin_soft_assign,
-    scan_bin_moment_match,
-)
-from fl_slam_poc.backend.operators.matrix_fisher_evidence import (
-    matrix_fisher_rotation_evidence,
-    planar_translation_evidence,
-    build_combined_lidar_evidence_22d,
-)
-# Legacy imports kept for IW residual computation (will be removed later)
+# IMU measurement IW stats (kept for gyro/accel - LiDAR portion now from primitives)
 from fl_slam_poc.backend.operators.measurement_noise_iw_jax import (
-    lidar_meas_iw_suffstats_from_translation_residuals_jax,
     imu_gyro_meas_iw_suffstats_from_avg_rate_jax,
     imu_accel_meas_iw_suffstats_from_gravity_dir_jax,
 )
@@ -68,10 +54,6 @@ from fl_slam_poc.backend.operators.planar_prior import (
 )
 from fl_slam_poc.backend.operators.imu_gyro_evidence import imu_gyro_rotation_evidence
 from fl_slam_poc.backend.operators.imu_preintegration_factor import imu_preintegration_factor
-from fl_slam_poc.backend.operators.lidar_bucket_noise_iw_jax import (
-    lidar_point_reliability_from_buckets_jax,
-    lidar_bucket_iw_suffstats_from_bin_residuals_jax,
-)
 from fl_slam_poc.backend.operators.fusion import (
     fusion_scale_from_certificates,
     info_fusion_additive,
@@ -82,13 +64,44 @@ from fl_slam_poc.backend.operators.excitation import (
 )
 from fl_slam_poc.backend.operators.recompose import pose_update_frobenius_recompose
 from fl_slam_poc.backend.operators.inverse_wishart_jax import process_noise_iw_suffstats_from_info_jax
-from fl_slam_poc.backend.operators.map_update import (
-    pos_cov_inflation_pushforward,
-    MapUpdateResult,
-)
+from fl_slam_poc.backend.operators.map_update import MapUpdateResult
 from fl_slam_poc.backend.operators.anchor_drift import anchor_drift_update
 from fl_slam_poc.backend.operators.hypothesis import hypothesis_barycenter_projection
 from fl_slam_poc.backend.diagnostics import ScanDiagnostics, MinimalScanTape
+
+# Stage 1: PrimitiveMap + OT imports
+from fl_slam_poc.backend.structures.primitive_map import (
+    PrimitiveMap,
+    PrimitiveMapView,
+    create_empty_primitive_map,
+    extract_primitive_map_view,
+    primitive_map_fuse,
+    primitive_map_insert,
+    primitive_map_cull,
+    primitive_map_forget,
+    primitive_map_merge_reduce,
+)
+from fl_slam_poc.backend.structures.measurement_batch import (
+    MeasurementBatch,
+    create_empty_measurement_batch,
+)
+from fl_slam_poc.backend.operators.lidar_surfel_extraction import (
+    extract_lidar_surfels,
+    SurfelExtractionConfig,
+)
+from fl_slam_poc.backend.operators.primitive_association import (
+    associate_primitives_ot,
+    AssociationConfig,
+    flatten_associations_for_fuse,
+)
+from fl_slam_poc.backend.operators.visual_pose_evidence import (
+    visual_pose_evidence,
+    build_visual_pose_evidence_22d,
+)
+from fl_slam_poc.common.primitives import (
+    domain_projection_psd,
+    spd_cholesky_solve_lifted,
+)
 
 
 # =============================================================================
@@ -164,6 +177,33 @@ class PipelineConfig:
     # Diagnostics: minimal tape (default) vs full ScanDiagnostics per scan
     save_full_diagnostics: bool = False  # If True, build full ScanDiagnostics; else minimal tape only
 
+    # =========================================================================
+    # STAGE 1: Map Backend Configuration
+    # =========================================================================
+    # Map backend: "bins" (legacy MapBinStats) or "primitive_map" (PrimitiveMap)
+    # Stage 1: runs BOTH for comparison/transition (bins for pose evidence, primitive_map for map)
+    # Stage 2+: primitive_map only
+    map_backend: str = constants.GC_MAP_BACKEND_BINS
+
+    # Pose evidence backend: "bins" (legacy) or "primitives" (visual+LiDAR alignment)
+    # Stage 1: bins only
+    # Stage 2+: primitives only
+    pose_evidence_backend: str = constants.GC_POSE_EVIDENCE_BACKEND_BINS
+
+    # PrimitiveMap budgets
+    n_feat: int = constants.GC_N_FEAT
+    n_surfel: int = constants.GC_N_SURFEL
+    k_assoc: int = constants.GC_K_ASSOC
+    k_sinkhorn: int = constants.GC_K_SINKHORN
+    primitive_map_max_size: int = constants.GC_PRIMITIVE_MAP_MAX_SIZE
+    primitive_forgetting_factor: float = constants.GC_PRIMITIVE_FORGETTING_FACTOR
+    primitive_merge_threshold: float = constants.GC_PRIMITIVE_MERGE_THRESHOLD
+    primitive_cull_weight_threshold: float = constants.GC_PRIMITIVE_CULL_WEIGHT_THRESHOLD
+
+    # Surfel extraction config
+    surfel_voxel_size_m: float = 0.1
+    surfel_min_points_per_voxel: int = 3
+
     def __post_init__(self):
         if self.Sigma_meas is None:
             # Default measurement noise (3x3 isotropic)
@@ -185,7 +225,7 @@ class PipelineConfig:
 class ScanPipelineResult:
     """Result of processing a single scan for one hypothesis."""
     belief_updated: BeliefGaussianInfo
-    map_increments: MapUpdateResult  # Increments to map statistics
+    map_increments: MapUpdateResult  # Increments to map statistics (bins)
     # Process-noise IW sufficient statistics proposal (commutative; aggregated once per scan).
     iw_process_dPsi: jnp.ndarray  # (7, 6, 6) padded
     iw_process_dnu: jnp.ndarray   # (7,)
@@ -200,6 +240,12 @@ class ScanPipelineResult:
     # Per-scan diagnostics for dashboard (Stage-0 schema)
     diagnostics: Optional[ScanDiagnostics] = None
     diagnostics_tape: Optional[MinimalScanTape] = None  # When save_full_diagnostics is False
+    # Stage 1: PrimitiveMap update results (optional; None if map_backend="bins")
+    primitive_map_updated: Optional[PrimitiveMap] = None
+    measurement_batch: Optional[MeasurementBatch] = None
+    n_primitives_inserted: int = 0
+    n_primitives_fused: int = 0
+    n_primitives_culled: int = 0
 
 
 # =============================================================================
@@ -268,7 +314,6 @@ def process_scan_single_hypothesis(
     raw_weights: jnp.ndarray,
     raw_ring: jnp.ndarray,
     raw_tag: jnp.ndarray,
-    lidar_bucket_state,
     imu_stamps: jnp.ndarray,
     imu_gyro: jnp.ndarray,
     imu_accel: jnp.ndarray,
@@ -280,11 +325,11 @@ def process_scan_single_hypothesis(
     t_last_scan: float,  # NEW: Previous scan time for IMU interval
     t_scan: float,        # NEW: Current scan time for IMU interval
     Q: jnp.ndarray,
-    bin_atlas: BinAtlas,
-    map_stats: MapBinStats,
     config: PipelineConfig,
     odom_twist: jnp.ndarray,  # (6,) [vx,vy,vz,wx,wy,wz] in body frame (never None)
     odom_twist_cov: jnp.ndarray,  # (6,6) twist covariance (never None)
+    camera_batch: MeasurementBatch,  # Camera splats from VisualFeatureExtractor + splat_prep (required)
+    primitive_map: Optional[PrimitiveMap] = None,  # PrimitiveMap is the canonical map
 ) -> ScanPipelineResult:
     """
     Process a single scan for one hypothesis.
@@ -315,9 +360,9 @@ def process_scan_single_hypothesis(
         scan_end_time: Scan end timestamp
         dt_sec: Time delta since last update
         Q: Process noise matrix (D_Z, D_Z)
-        bin_atlas: Bin atlas for binning
-        map_stats: Current map statistics
         config: Pipeline configuration
+        primitive_map: PrimitiveMap (canonical map; always used)
+        camera_batch: Camera MeasurementBatch to merge with LiDAR surfels (required)
         
     Returns:
         ScanPipelineResult with updated belief and certificates
@@ -566,147 +611,22 @@ def process_scan_single_hypothesis(
     deskewed_weights = deskew_twist_result.weights
     # Point covariances are not used by the new deskew. Keep zeros (deterministic).
     deskewed_covs = jnp.zeros((deskewed_points.shape[0], 3, 3), dtype=jnp.float64)
-    
+
     # Compute point directions for binning from the LiDAR origin (not base origin).
     # points are in base frame; subtract sensor origin to recover true ray directions.
     rays = deskewed_points - config.lidar_origin_base[None, :]
     norms = jnp.linalg.norm(rays, axis=1, keepdims=True)
     point_directions = rays / (norms + config.eps_mass)
-    
-    # =========================================================================
-    # Step 4: BinSoftAssign
-    # =========================================================================
-    t0 = time.perf_counter() if config.enable_timing else None
-    assign_result, assign_cert, assign_effect = bin_soft_assign(
-        point_directions=point_directions,
-        bin_directions=bin_atlas.dirs,
-        tau=config.tau_soft_assign,
-        chart_id=belief_pred.chart_id,
-        anchor_id=belief_pred.anchor_id,
-    )
-    if config.enable_timing:
-        _record_timing("bin_assign_ms", t0, assign_result.responsibilities)
-    all_certs.append(assign_cert)
-    responsibilities = assign_result.responsibilities
-    
-    # =========================================================================
-    # Step 5: ScanBinMomentMatch
-    # =========================================================================
-    point_lambda = lidar_point_reliability_from_buckets_jax(lidar_bucket_state, ring=ring, tag=tag)
-    t0 = time.perf_counter() if config.enable_timing else None
-    scan_bins, scan_cert, scan_effect = scan_bin_moment_match(
-        points=deskewed_points,
-        point_covariances=deskewed_covs,
-        weights=deskewed_weights,
-        responsibilities=responsibilities,
-        point_lambda=point_lambda,
-        direction_origin=config.lidar_origin_base,
-        eps_psd=config.eps_psd,
-        eps_mass=config.eps_mass,
-        chart_id=belief_pred.chart_id,
-        anchor_id=belief_pred.anchor_id,
-    )
-    if config.enable_timing:
-        _record_timing("bin_moment_ms", t0, scan_bins.N)
-    all_certs.append(scan_cert)
-    
-    # =========================================================================
-    # Step 6: KappaFromResultant (map and scan) - already done in scan_bin_moment_match
-    # =========================================================================
-    # Compute map derived stats including kappa
-    mu_map, kappa_map, c_map, Sigma_c_map = compute_map_derived_stats(
-        map_stats=map_stats,
-        eps_mass=config.eps_mass,
-        eps_psd=config.eps_psd,
-    )
 
     # =========================================================================
-    # Step 7: Matrix Fisher Rotation Evidence (replaces WahbaSVD)
+    # Build IMU+odom evidence and z_lin (linearization point for visual evidence)
     # =========================================================================
-    # Uses full scatter tensors for principled rotation estimation with
-    # Fisher-derived information matrix. No heuristic kappa weighting.
-    t0 = time.perf_counter() if config.enable_timing else None
-    mf_result, mf_cert, mf_effect = matrix_fisher_rotation_evidence(
-        belief_pred=belief_pred,
-        scan_s_dir=scan_bins.s_dir,
-        scan_S_dir_scatter=scan_bins.S_dir_scatter,
-        scan_N=scan_bins.N,
-        map_S_dir=map_stats.S_dir,
-        map_S_dir_scatter=map_stats.S_dir_scatter,
-        map_N_dir=map_stats.N_dir,
-        eps_psd=config.eps_psd,
-        eps_lift=config.eps_lift,
-        eps_mass=config.eps_mass,
-    )
-    if config.enable_timing:
-        _record_timing("matrix_fisher_ms", t0, mf_result.R_mf)
-    all_certs.append(mf_cert)
-    R_hat = mf_result.R_mf  # ML rotation from Matrix Fisher
-
-    # =========================================================================
-    # Step 8: Planar Translation Evidence (replaces TranslationWLS)
-    # =========================================================================
-    # Uses WLS translation but scales down z information for planar robots.
-    # The planar prior handles z estimation, not scan matching.
-    t0 = time.perf_counter() if config.enable_timing else None
-    planar_trans_result, planar_trans_cert, planar_trans_effect = planar_translation_evidence(
-        belief_pred=belief_pred,
-        scan_p_bar=scan_bins.p_bar,
-        scan_Sigma_p=scan_bins.Sigma_p,
-        scan_N=scan_bins.N,
-        map_centroid=c_map,
-        map_Sigma_c=Sigma_c_map,
-        map_N_pos=map_stats.N_pos,
-        map_S_dir_scatter=map_stats.S_dir_scatter,  # For self-adaptive z precision
-        map_N_dir=map_stats.N_dir,  # For normalizing scatter
-        R_hat=R_hat,
-        # z_precision_scale is now SELF-ADAPTIVE from map scatter eigenvalues
-        eps_psd=config.eps_psd,
-        eps_lift=config.eps_lift,
-        eps_mass=config.eps_mass,
-    )
-    if config.enable_timing:
-        _record_timing("planar_translation_ms", t0, planar_trans_result.t_wls)
-    all_certs.append(planar_trans_cert)
-    t_hat = planar_trans_result.t_wls
-
-    # Compute weights for IW stats (legacy - uses geometric mean of masses)
-    mf_weights = jnp.sqrt(scan_bins.N * map_stats.N_dir + config.eps_mass)
-
-    # Measurement-noise IW sufficient stats from translation residuals (LiDAR meas block)
-    # residual_b = c_map[b] - R_hat @ p_bar_scan[b] - t_hat
-    p_rot = (R_hat @ scan_bins.p_bar.T).T  # (B,3)
-    residuals_t = c_map - p_rot - t_hat[None, :]
-    iw_meas_dPsi, iw_meas_dnu = lidar_meas_iw_suffstats_from_translation_residuals_jax(
-        residuals=residuals_t,
-        weights=mf_weights,
-        eps_mass=config.eps_mass,
-    )
-    iw_meas_dPsi = iw_meas_dPsi + iw_meas_gyro_dPsi + iw_meas_accel_dPsi
-    iw_meas_dnu = iw_meas_dnu + iw_meas_gyro_dnu + iw_meas_accel_dnu
-
-    # LiDAR bucket IW sufficient stats from translation residuals apportioned by responsibilities.
-    t0 = time.perf_counter() if config.enable_timing else None
-    iw_lidar_bucket_dPsi, iw_lidar_bucket_dnu = lidar_bucket_iw_suffstats_from_bin_residuals_jax(
-        residuals_bin=residuals_t,
-        responsibilities=responsibilities,
-        weights=deskewed_weights,
-        ring=ring,
-        tag=tag,
-        eps_mass=config.eps_mass,
-    )
-    if config.enable_timing:
-        _record_timing("lidar_bucket_iw_ms", t0, iw_lidar_bucket_dPsi)
-    
-    # =========================================================================
-    # Step 9: Odom + IMU + LiDAR evidence (no moment matching)
-    # =========================================================================
-    
-    # Odom evidence (Gaussian)
+    # Evidence uses pre-update map; z_lin is IMU+odom-informed (not raw prediction).
+    pose_pred = belief_pred.mean_world_pose(eps_lift=config.eps_lift)
     odom_pose = jnp.asarray(odom_pose, dtype=jnp.float64).reshape(-1)
     odom_cov_se3 = jnp.asarray(odom_cov_se3, dtype=jnp.float64)
     odom_result, odom_cert, odom_effect = odom_quadratic_evidence(
-        belief_pred_pose=belief_pred.mean_world_pose(eps_lift=config.eps_lift),
+        belief_pred_pose=pose_pred,
         odom_pose=odom_pose,
         odom_cov_se3=odom_cov_se3,
         eps_psd=config.eps_psd,
@@ -715,32 +635,21 @@ def process_scan_single_hypothesis(
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(odom_cert)
-
-    # IMU accel direction evidence (time-resolved vMF with transport consistency weighting)
-    # Per-sample reliability is computed from gyro-accel transport: e_k = df/dt + ω × f
-    # Samples with small e_k (gravity-dominant) get high weight, linear acceleration downweighted.
-    # sigma is self-adaptive from data (MAD-based), no manual knobs.
-    pose_pred = belief_pred.mean_world_pose(eps_lift=config.eps_lift)
     imu_result, imu_cert, imu_effect = imu_vmf_gravity_evidence_time_resolved(
         rotvec_world_body=pose_pred[3:6],
         imu_accel=imu_accel,
-        imu_gyro=imu_gyro,  # For transport consistency computation
+        imu_gyro=imu_gyro,
         weights=w_imu_int,
         accel_bias=accel_bias,
         gravity_W=gravity_W,
-        dt_imu=dt_imu,  # Time step between IMU samples
+        dt_imu=dt_imu,
         eps_psd=config.eps_psd,
         eps_mass=config.eps_mass,
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(imu_cert)
-
-    # IMU gyro rotation evidence (Gaussian on SO(3) using preintegrated delta rotation)
-    # CRITICAL: Pass dt_int (IMU integration time), not dt_scan (LiDAR scan duration)
     Sigma_g = jnp.asarray(config.Sigma_g, dtype=jnp.float64)
-    
-    # Diagnostic: check inputs for NaN before gyro evidence
     _rotvec0_np = np.array(rotvec0)
     _pose_pred_np = np.array(pose_pred)
     _delta_pose_int_np = np.array(delta_pose_int)
@@ -750,86 +659,22 @@ def process_scan_single_hypothesis(
         raise ValueError(f"pose_pred contains NaN: {_pose_pred_np}")
     if not np.all(np.isfinite(_delta_pose_int_np)):
         raise ValueError(f"delta_pose_int contains NaN: {_delta_pose_int_np}")
-    
     gyro_result, gyro_cert, gyro_effect = imu_gyro_rotation_evidence(
         rotvec_start_WB=rotvec0,
         rotvec_end_pred_WB=pose_pred[3:6],
         delta_rotvec_meas=delta_pose_int[3:6],
         Sigma_g=Sigma_g,
-        dt_int=dt_int,  # CORRECT: IMU integration time, not scan duration
+        dt_int=dt_int,
         eps_psd=config.eps_psd,
         eps_lift=config.eps_lift,
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(gyro_cert)
-
-    # =====================================================================
-    # INVARIANT TEST: Compare yaw increments from three sources
-    # =====================================================================
-    # This diagnostic compares the yaw direction from three sources:
-    # 1. Gyro-integrated: R_start @ Exp(delta_rotvec_meas)
-    # 2. Odom: odom_pose rotation
-    # 3. Matrix Fisher (LiDAR): R_hat
-    # If they have opposite signs, we have a sign convention mismatch.
-    R_start_mat = se3_jax.so3_exp(rotvec0)
-    R_delta_gyro = se3_jax.so3_exp(delta_pose_int[3:6])
-    R_gyro_end = R_start_mat @ R_delta_gyro  # Gyro-predicted end orientation
-
-    # Extract yaw (rotation about Z) using atan2
-    def _yaw_from_R(R):
-        return float(jnp.arctan2(R[1, 0], R[0, 0]))
-
-    yaw_start = np.degrees(_yaw_from_R(R_start_mat))
-    yaw_gyro = np.degrees(_yaw_from_R(R_gyro_end))
-    yaw_mf = np.degrees(_yaw_from_R(R_hat))  # Matrix Fisher rotation
-
-    # Compute odom yaw (need to convert odom_pose rotation to matrix)
-    R_odom_mat = se3_jax.so3_exp(odom_pose[3:6])
-    yaw_odom = np.degrees(_yaw_from_R(R_odom_mat))
-
-    # Compute yaw increments (handle wraparound)
-    dyaw_gyro = yaw_gyro - yaw_start
-    dyaw_odom = yaw_odom - yaw_start
-    dyaw_mf = yaw_mf - yaw_start
-
-    # Normalize to [-180, 180]
-    def normalize_angle(angle):
-        while angle > 180:
-            angle -= 360
-        while angle < -180:
-            angle += 360
-        return angle
-
-    dyaw_gyro = normalize_angle(dyaw_gyro)
-    dyaw_odom = normalize_angle(dyaw_odom)
-    dyaw_mf = normalize_angle(dyaw_mf)
-
-    # Log only first 10 scans for brevity
-    if hasattr(config, '_scan_count'):
-        config._scan_count += 1
-    else:
-        config._scan_count = 1
-    if config._scan_count <= 10:
-        sign_match_gyro_mf = 'YES' if dyaw_gyro * dyaw_mf > 0 else 'NO'
-        sign_match_gyro_odom = 'YES' if dyaw_gyro * dyaw_odom > 0 else 'NO'
-        sign_match_odom_mf = 'YES' if dyaw_odom * dyaw_mf > 0 else 'NO'
-        print(f"[INVARIANT] Scan {config._scan_count}: "
-              f"yaw_start={yaw_start:+7.2f}°, "
-              f"Δyaw_gyro={dyaw_gyro:+7.2f}°, "
-              f"Δyaw_odom={dyaw_odom:+7.2f}°, "
-              f"Δyaw_mf={dyaw_mf:+7.2f}°, "
-              f"gyro↔mf={sign_match_gyro_mf}, "
-              f"gyro↔odom={sign_match_gyro_odom}, "
-              f"odom↔mf={sign_match_odom_mf}")
-
-    # IMU preintegration factor for velocity and position evidence
-    # Get velocities from state (indices 6:9)
     mu_prev = belief_prev.mean_increment(eps_lift=config.eps_lift)
-    v_start_world = mu_prev[6:9]  # Previous velocity in world frame
-    v_pred_world = mu_inc[6:9]    # Predicted velocity in world frame (mu_inc already computed above)
+    v_start_world = mu_prev[6:9]
+    v_pred_world = mu_inc[6:9]
     Sigma_a = jnp.asarray(config.Sigma_a, dtype=jnp.float64)
-
     preint_result, preint_cert, preint_effect = imu_preintegration_factor(
         p_start_world=pose0[0:3],
         rotvec_start_WB=rotvec0,
@@ -846,27 +691,6 @@ def process_scan_single_hypothesis(
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(preint_cert)
-
-    # Build combined LiDAR evidence from Matrix Fisher rotation + Planar Translation
-    # This replaces the old lidar_quadratic_evidence which used Wahba + TranslationWLS
-    L_lidar, h_lidar = build_combined_lidar_evidence_22d(
-        mf_result=mf_result,
-        trans_result=planar_trans_result,
-    )
-
-    # Combine evidence terms additively before fusion scaling
-    L_evidence = (L_lidar + odom_result.L_odom + imu_result.L_imu +
-                  gyro_result.L_gyro + preint_result.L_imu_preint)
-    h_evidence = (h_lidar + odom_result.h_odom + imu_result.h_imu +
-                  gyro_result.h_gyro + preint_result.h_imu_preint)
-
-    # =========================================================================
-    # Phase 1: Planar Z Prior (soft z = z_ref constraint)
-    # =========================================================================
-    # This prevents z runaway by adding soft constraints:
-    # 1. z ≈ z_ref (robot height)
-    # 2. vel_z ≈ 0 (robot doesn't fly)
-    # NO GATE: Always runs. Influence controlled by sigma parameters.
     planar_result, planar_cert, _ = planar_z_prior(
         belief_pred_pose=pose_pred,
         z_ref=config.planar_z_ref,
@@ -876,9 +700,7 @@ def process_scan_single_hypothesis(
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(planar_cert)
-
-    # vel_z prior: v_z should be ~0 for ground robot
-    vz_pred = float(mu_inc[8])  # z velocity from state (index 8)
+    vz_pred = float(mu_inc[8])
     vz_result, vz_cert, _ = velocity_z_prior(
         v_z_pred=vz_pred,
         sigma_vz=config.planar_vz_sigma,
@@ -886,93 +708,162 @@ def process_scan_single_hypothesis(
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(vz_cert)
-
-    # Add planar priors to evidence
-    L_evidence = L_evidence + planar_result.L_planar + vz_result.L_vz
-    h_evidence = h_evidence + planar_result.h_planar + vz_result.h_vz
-
-    # =========================================================================
-    # Phase 2: Odom Twist Evidence (velocity factors from wheel odometry)
-    # =========================================================================
-    # This adds kinematic coupling from wheel odometry twist that was previously unused.
-    # NO GATE: Always runs. Covariance controls influence (huge cov = negligible precision).
-
-    # Get predicted velocity in world frame
-    v_pred_world = mu_inc[6:9]  # velocity block from state
-
-    # Get rotation matrix from predicted pose
-    R_world_body = se3_jax.so3_exp(pose_pred[3:6])
-
-    # odom_twist is always initialized (never None). Covariance controls influence.
-    # When no odom has been received, cov is huge (1e12) -> precision is negligible.
-    v_odom_body = odom_twist[0:3]
-    omega_z_odom = float(odom_twist[5])
-    Sigma_v = odom_twist_cov[0:3, 0:3]  # Linear velocity covariance
-
+    v_pred_world_early = mu_inc[6:9]
+    R_world_body_early = se3_jax.so3_exp(pose_pred[3:6])
     odom_vel_result, odom_vel_cert, _ = odom_velocity_evidence(
-        v_pred_world=v_pred_world,
-        R_world_body=R_world_body,
-        v_odom_body=v_odom_body,
-        Sigma_v=Sigma_v,
+        v_pred_world=v_pred_world_early,
+        R_world_body=R_world_body_early,
+        v_odom_body=odom_twist[0:3],
+        Sigma_v=odom_twist_cov[0:3, 0:3],
         eps_psd=config.eps_psd,
         eps_lift=config.eps_lift,
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(odom_vel_cert)
-
-    # Add odom twist evidence
-    L_evidence = L_evidence + odom_vel_result.L_vel
-    h_evidence = h_evidence + odom_vel_result.h_vel
-
-    # Yaw rate evidence: compare odom yaw rate to gyro-derived yaw rate
-    # Predicted yaw rate from gyro (z component of omega_avg, already computed above)
-    omega_z_pred = float(omega_avg[2])
-
-    # Use yaw rate covariance from odom_twist_cov[5,5] to derive sigma
-    # sqrt(cov) = sigma. When cov is huge (1e12), sigma is huge (1e6) -> negligible precision.
     sigma_wz_from_cov = jnp.sqrt(jnp.maximum(odom_twist_cov[5, 5], 1e-12))
     sigma_wz_effective = float(sigma_wz_from_cov)
-
     odom_wz_result, odom_wz_cert, _ = odom_yawrate_evidence(
-        omega_z_pred=omega_z_pred,
-        omega_z_odom=omega_z_odom,
+        omega_z_pred=float(omega_avg[2]),
+        omega_z_odom=float(odom_twist[5]),
         sigma_wz=sigma_wz_effective,
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(odom_wz_cert)
-
-    L_evidence = L_evidence + odom_wz_result.L_wz
-    h_evidence = h_evidence + odom_wz_result.h_wz
-
-    # =========================================================================
-    # Phase 2b: Pose-Twist Kinematic Consistency Factor (6.1.2 #3)
-    # =========================================================================
-    # Enforces: Log(X_prev^{-1} @ X_curr) ≈ [R_prev @ v_body * dt; omega_body * dt]
-    # This directly couples pose change to twist, fixing "no dynamic linkage" issue
-    # Extract velocity covariance from twist covariance (upper-left 3x3 block)
-    Sigma_v_odom = odom_twist_cov[0:3, 0:3]
-    # Extract angular velocity covariance (lower-right 3x3 block)
-    Sigma_omega_odom = odom_twist_cov[3:6, 3:6]
-
     kinematic_result, kinematic_cert, _ = pose_twist_kinematic_consistency(
-        pose_prev=pose0,  # Previous pose from belief_prev
-        pose_curr=pose_pred,  # Current (predicted) pose
-        v_body=odom_twist[0:3],  # Body linear velocity
-        omega_body=odom_twist[3:6],  # Body angular velocity
-        dt=dt_sec,  # Time between scans
-        Sigma_v=Sigma_v_odom,
-        Sigma_omega=Sigma_omega_odom,
+        pose_prev=pose0,
+        pose_curr=pose_pred,
+        v_body=odom_twist[0:3],
+        omega_body=odom_twist[3:6],
+        dt=dt_sec,
+        Sigma_v=odom_twist_cov[0:3, 0:3],
+        Sigma_omega=odom_twist_cov[3:6, 3:6],
         eps_psd=config.eps_psd,
         eps_lift=config.eps_lift,
         chart_id=belief_pred.chart_id,
         anchor_id=belief_pred.anchor_id,
     )
     all_certs.append(kinematic_cert)
+    L_imu_odom = (odom_result.L_odom + imu_result.L_imu + gyro_result.L_gyro + preint_result.L_imu_preint
+                  + planar_result.L_planar + vz_result.L_vz + odom_vel_result.L_vel + odom_wz_result.L_wz
+                  + kinematic_result.L_consistency)
+    h_imu_odom = (odom_result.h_odom + imu_result.h_imu + gyro_result.h_gyro + preint_result.h_imu_preint
+                  + planar_result.h_planar + vz_result.h_vz + odom_vel_result.h_vel + odom_wz_result.h_wz
+                  + kinematic_result.h_consistency)
+    L_fused = belief_pred.L + L_imu_odom
+    h_fused = belief_pred.h + h_imu_odom
+    L_fused_psd = domain_projection_psd(L_fused, config.eps_psd).M_psd
+    z_lin_22d = spd_cholesky_solve_lifted(L_fused_psd, h_fused, config.eps_lift).x
+    z_lin_pose = z_lin_22d[0:6]
 
-    L_evidence = L_evidence + kinematic_result.L_consistency
-    h_evidence = h_evidence + kinematic_result.h_consistency
+    # =========================================================================
+    # Step 4: Surfel Extraction + OT Association (no map update yet)
+    # =========================================================================
+    # Always use PrimitiveMap path. No bins. No branching.
+    primitive_map_updated = None
+    measurement_batch = None
+    n_primitives_inserted = 0
+    n_primitives_fused = 0
+    n_primitives_culled = 0
+    assoc_result = None
+    map_view = None
+
+    # Optional certificates - defined when primitive path runs
+    surfel_cert = None
+    assoc_cert = None
+    visual_cert = None
+
+    if primitive_map is not None:
+        t0_prim = time.perf_counter() if config.enable_timing else None
+
+        # Step 3.5a: Extract surfels from deskewed points
+        surfel_config = SurfelExtractionConfig(
+            n_surfel=config.n_surfel,
+            n_feat=config.n_feat,
+            voxel_size_m=config.surfel_voxel_size_m,
+            min_points_per_voxel=config.surfel_min_points_per_voxel,
+            eps_lift=config.eps_lift,
+        )
+        measurement_batch, surfel_cert, surfel_effect = extract_lidar_surfels(
+            points=deskewed_points,
+            timestamps=timestamps,
+            weights=deskewed_weights,
+            config=surfel_config,
+            base_batch=camera_batch,
+            chart_id=belief_pred.chart_id,
+            anchor_id="surfel_extraction",
+        )
+        all_certs.append(surfel_cert)
+
+        # Step 3.5b: Get pose from predicted belief for world-frame transform
+        pose_pred_for_map = belief_pred.mean_world_pose(eps_lift=config.eps_lift)
+        R_pred_for_map = se3_jax.so3_exp(pose_pred_for_map[3:6])
+        t_pred_for_map = pose_pred_for_map[:3]
+
+        # Step 3.5c: Extract map view for association (M_{t-1}; do not mutate map yet)
+        map_view = extract_primitive_map_view(
+            pmap=primitive_map,
+            eps_lift=config.eps_lift,
+            eps_mass=config.eps_mass,
+        )
+
+        # Step 3.5d: Run OT association
+        assoc_config = AssociationConfig(
+            k_assoc=config.k_assoc,
+            k_sinkhorn=config.k_sinkhorn,
+        )
+        assoc_result, assoc_cert, assoc_effect = associate_primitives_ot(
+            measurement_batch=measurement_batch,
+            map_view=map_view,
+            config=assoc_config,
+            chart_id=belief_pred.chart_id,
+            anchor_id="primitive_ot",
+        )
+        all_certs.append(assoc_cert)
+
+        # Step 3.5e: Visual pose evidence at z_lin (IMU+odom-informed), before any map update
+        visual_result, visual_cert, visual_effect = visual_pose_evidence(
+            association_result=assoc_result,
+            measurement_batch=measurement_batch,
+            map_view=map_view,
+            belief_pred=belief_pred,
+            eps_lift=config.eps_lift,
+            eps_mass=config.eps_mass,
+            chart_id=belief_pred.chart_id,
+            anchor_id="visual_pose_evidence",
+            z_lin_pose=z_lin_pose,
+        )
+        all_certs.append(visual_cert)
+        L_lidar, h_lidar = build_visual_pose_evidence_22d(visual_result)
+        if config.enable_timing:
+            _record_timing("visual_pose_evidence_ms", t0_prim, L_lidar)
+        # Map update (fuse/insert/cull/forget) deferred until after recompose; uses z_t below
+    else:
+        L_lidar = config.eps_lift * jnp.eye(22, dtype=jnp.float64)
+        h_lidar = jnp.zeros((22,), dtype=jnp.float64)
+
+    # =========================================================================
+    # Step 5: Fuse evidence (IMU+odom+L_pose) and recompose -> z_t
+    # =========================================================================
+    # Evidence uses pre-update map; z_lin was IMU+odom-informed. No second odom/IMU block.
+
+    # Measurement-noise IW sufficient stats: only IMU (gyro + accel)
+    # LiDAR IW stats are now implicit in the primitive precisions
+    iw_meas_dPsi = iw_meas_gyro_dPsi + iw_meas_accel_dPsi
+    iw_meas_dnu = iw_meas_gyro_dnu + iw_meas_accel_dnu
+
+    # LiDAR bucket IW stats are removed (no bins)
+    # Fixed-cost: primitive precisions handle measurement noise
+    iw_lidar_bucket_dPsi = jnp.zeros((64, 3, 3), dtype=jnp.float64)  # Placeholder shape
+    iw_lidar_bucket_dnu = jnp.zeros((64,), dtype=jnp.float64)
+    
+    # =========================================================================
+    # Step 9: Evidence = IMU+odom (z_lin block) + visual pose (L_lidar, h_lidar)
+    # =========================================================================
+    # No duplicate odom/IMU block; L_imu_odom, h_imu_odom already built for z_lin.
+    L_evidence = L_imu_odom + L_lidar
+    h_evidence = h_imu_odom + h_lidar
 
     # Diagnostic: check which evidence component has NaN
     for name, L in [("L_lidar", L_lidar), ("L_odom", odom_result.L_odom),
@@ -1023,7 +914,15 @@ def process_scan_single_hypothesis(
     # Step 10: FusionScaleFromCertificates
     # =========================================================================
     # Use a combined certificate for fusion scale (single-path, includes IMU+odom+lidar).
-    evidence_cert = aggregate_certificates([deskew_cert, assign_cert, scan_cert, mf_cert, planar_trans_cert])
+    # Build evidence cert from available LiDAR-related certificates (deskew always; surfel/assoc/visual when primitive path ran)
+    lidar_certs = [deskew_cert]
+    if surfel_cert is not None:
+        lidar_certs.append(surfel_cert)
+    if assoc_cert is not None:
+        lidar_certs.append(assoc_cert)
+    if visual_cert is not None:
+        lidar_certs.append(visual_cert)
+    evidence_cert = aggregate_certificates(lidar_certs)
     combined_evidence_cert = aggregate_certificates([evidence_cert, odom_cert, imu_cert, gyro_cert])
 
     # Effective conditioning for trust alpha: evaluated on pose block (6x6) in JAX; no host round-trip.
@@ -1097,65 +996,127 @@ def process_scan_single_hypothesis(
         h_post=belief_recomposed.h,
         eps_lift=config.eps_lift,
     )
+
+    # =========================================================================
+    # Step 12b: Primitive map update with z_t (post-recompose pose)
+    # =========================================================================
+    # Evidence used pre-update map; now update map using z_t (belief_recomposed).
+    if primitive_map is not None and assoc_result is not None and map_view is not None and measurement_batch is not None:
+        z_t = belief_recomposed.mean_world_pose(eps_lift=config.eps_lift)
+        R_t = se3_jax.so3_exp(z_t[3:6])
+        t_t = z_t[:3]
+
+        def transform_gaussian_to_world(Lambda_b, theta_b, eta_b):
+            Lambda_w = R_t @ Lambda_b @ R_t.T
+            Lambda_reg = Lambda_b + config.eps_lift * jnp.eye(3)
+            mu_b = jnp.linalg.solve(Lambda_reg, theta_b)
+            mu_w = R_t @ mu_b + t_t
+            theta_w = Lambda_w @ mu_w
+            eta_w = R_t @ eta_b
+            return Lambda_w, theta_w, eta_w
+
+        if map_view.count > 0 and measurement_batch.n_valid > 0:
+            (
+                target_indices,
+                Lambdas_meas,
+                thetas_meas,
+                etas_meas,
+                weights_meas,
+                responsibilities_fuse,
+                valid_flat,
+            ) = flatten_associations_for_fuse(
+                result=assoc_result,
+                measurement_batch=measurement_batch,
+                n_valid=measurement_batch.n_valid,
+                responsibility_threshold=0.0,
+            )
+            n_flat = target_indices.shape[0]
+            if n_flat > 0:
+                Lambdas_world, thetas_world, etas_world = jax.vmap(transform_gaussian_to_world)(
+                    Lambdas_meas, thetas_meas, etas_meas
+                )
+                fuse_result, fuse_cert, fuse_effect = primitive_map_fuse(
+                    prim_map=primitive_map,
+                    target_indices=target_indices,
+                    Lambdas_meas=Lambdas_world,
+                    thetas_meas=thetas_world,
+                    etas_meas=etas_world,
+                    weights_meas=weights_meas,
+                    responsibilities=responsibilities_fuse,
+                    timestamp=scan_end_time,
+                    valid_mask=valid_flat,
+                )
+                primitive_map = fuse_result.prim_map
+                all_certs.append(fuse_cert)
+                n_primitives_fused = fuse_result.n_fused
+
+        if map_view.count == 0 and measurement_batch.n_valid > 0:
+            valid_mask = measurement_batch.valid_mask
+            valid_indices = jnp.where(valid_mask)[0]
+            n_valid = measurement_batch.n_valid
+            if n_valid > 0:
+                Lambdas_valid = measurement_batch.Lambdas[valid_indices]
+                thetas_valid = measurement_batch.thetas[valid_indices]
+                etas_valid = measurement_batch.etas[valid_indices]
+                weights_valid = measurement_batch.weights[valid_indices]
+                mean_timestamp = float(jnp.mean(measurement_batch.timestamps[valid_indices]))
+                Lambdas_world, thetas_world, etas_world = jax.vmap(transform_gaussian_to_world)(
+                    Lambdas_valid, thetas_valid, etas_valid
+                )
+                result_insert, insert_cert, insert_effect = primitive_map_insert(
+                    prim_map=primitive_map,
+                    Lambdas_new=Lambdas_world,
+                    thetas_new=thetas_world,
+                    etas_new=etas_world,
+                    weights_new=weights_valid,
+                    timestamp=mean_timestamp,
+                )
+                primitive_map = result_insert.prim_map
+                all_certs.append(insert_cert)
+                n_primitives_inserted = result_insert.n_inserted
+
+        cull_result, cull_cert, cull_effect = primitive_map_cull(
+            prim_map=primitive_map,
+            weight_threshold=config.primitive_cull_weight_threshold,
+        )
+        primitive_map = cull_result.prim_map
+        all_certs.append(cull_cert)
+        n_primitives_culled = cull_result.n_culled
+
+        forget_result, forget_cert, forget_effect = primitive_map_forget(
+            prim_map=primitive_map,
+            forgetting_factor=config.primitive_forgetting_factor,
+        )
+        primitive_map = forget_result.prim_map
+        all_certs.append(forget_cert)
+
+        primitive_map_updated = primitive_map
     
     # =========================================================================
-    # Step 13: PoseCovInflationPushforward
+    # Step 13: Map Update (Primitive-based)
     # =========================================================================
-    # CRITICAL FIX: When the map is empty (first scan), R_hat and t_hat from
-    # Wahba/WLS are meaningless (identity/zero). Instead, use the POSTERIOR
-    # BELIEF's pose to place the scan in the map. This ensures the first scan
-    # is conditioned on IMU/odom data, not just placed at identity.
-    #
-    # The posterior belief already incorporates:
-    # - Odom evidence (L_odom, h_odom)
-    # - IMU gravity evidence (L_imu, h_imu)
-    # - IMU gyro evidence (L_gyro, h_gyro)
-    #
-    # When map has data, R_hat/t_hat from scan-to-map alignment are valid.
-    map_total_mass = float(jnp.sum(map_stats.N_dir))
-    map_is_empty = map_total_mass < config.eps_mass
-
-    if map_is_empty:
-        # First scan: use POSTERIOR belief pose for map placement.
-        #
-        # SIGN FIX: Previously used belief_pred (START-of-scan) which caused a
-        # rotation mismatch. The posterior (belief_recomposed) incorporates the
-        # gyro evidence which pulls toward END-of-scan rotation. Since the next
-        # scan's prior IS the previous posterior (at END), we must place the
-        # map at END rotation for consistency. Otherwise:
-        #   - Scan 1 map at R_start_scan1
-        #   - Scan 2 prior at R_end_scan1 = R_start_scan1 @ R_delta
-        #   - Matrix Fisher estimates R_start_scan1 (from map), prior says R_end_scan1
-        #   - dyaw_mf = -dyaw_gyro (SIGN MISMATCH!)
-        #
-        # With this fix: map at R_end_scan1, prior at R_end_scan1, no mismatch.
-        #
-        # Note: scan_bins.s_dir is in START-of-scan body frame (from deskew).
-        # We transform these to world frame using the POSTERIOR rotation. This
-        # means the map directions correspond to "where the robot was at END
-        # of scan 1, looking at directions that were measured at START".
-        # This is geometrically consistent because Matrix Fisher alignment will
-        # also use posterior-like rotations on subsequent scans.
-        pose_for_map = belief_recomposed.mean_world_pose(eps_lift=config.eps_lift)
-        R_for_map = se3_jax.so3_exp(pose_for_map[3:6])  # Rotation from posterior
-        t_for_map = pose_for_map[:3]  # Translation from posterior
-    else:
-        # Subsequent scans: use Matrix Fisher/planar translation alignment (scan-to-map matching)
-        R_for_map = R_hat
-        t_for_map = t_hat
-
+    # PrimitiveMap was updated in Step 12b with z_t (fuse/insert/cull/forget).
+    # Bins (MapBinStats, B_BINS) are DERIVED / LEGACY only:
+    # - Not used for pose evidence (pose evidence is primitive alignment only).
+    # - MapUpdateResult with B_BINS shape is kept for backward compatibility with
+    #   backend_node map_stats aggregation and diagnostics; all deltas are zero.
+    # - Canonical map is PrimitiveMap. See .cursor/plans/visual_lidar_*.plan.md Stage 3.
     t0 = time.perf_counter() if config.enable_timing else None
-    map_update_result, map_update_cert, map_update_effect = pos_cov_inflation_pushforward(
-        belief_post=belief_recomposed,
-        scan_N=scan_bins.N,
-        scan_s_dir=scan_bins.s_dir,
-        scan_S_dir_scatter=scan_bins.S_dir_scatter,
-        scan_p_bar=scan_bins.p_bar,
-        scan_Sigma_p=scan_bins.Sigma_p,
-        R_hat=R_for_map,
-        t_hat=t_for_map,
-        eps_psd=config.eps_psd,
-        eps_lift=config.eps_lift,
+
+    # Dummy map update result (bin-shaped for backend_node aggregation; deltas zero)
+    B_BINS = config.B_BINS
+    map_update_result = MapUpdateResult(
+        delta_S_dir=jnp.zeros((B_BINS, 3), dtype=jnp.float64),
+        delta_S_dir_scatter=jnp.zeros((B_BINS, 3, 3), dtype=jnp.float64),
+        delta_N_dir=jnp.zeros((B_BINS,), dtype=jnp.float64),
+        delta_N_pos=jnp.zeros((B_BINS,), dtype=jnp.float64),
+        delta_sum_p=jnp.zeros((B_BINS, 3), dtype=jnp.float64),
+        delta_sum_ppT=jnp.zeros((B_BINS, 3, 3), dtype=jnp.float64),
+        inflation_magnitude=0.0,
+    )
+    map_update_cert = CertBundle.create_exact(
+        chart_id=belief_pred.chart_id,
+        anchor_id="primitive_map_update",
     )
     if config.enable_timing:
         _record_timing("map_update_ms", t0, map_update_result.delta_S_dir)
@@ -1206,7 +1167,9 @@ def process_scan_single_hypothesis(
         odom_pose_np = np.array(odom_pose)
         R_odom = R_scipy.from_rotvec(odom_pose_np[3:6]).as_matrix()
 
-        R_lidar = np.array(R_hat)
+        # With primitives, we don't have a separate R_hat from Matrix Fisher.
+        # Use the posterior belief rotation as the "LiDAR" rotation estimate.
+        R_lidar = R_final  # Best estimate from visual_pose_evidence + fusion
 
         # Compute rotation errors robustly (handle non-orthogonal matrices from numerical issues)
         def _safe_rotation_error_deg(R1: np.ndarray, R2: np.ndarray) -> float:
@@ -1281,10 +1244,12 @@ def process_scan_single_hypothesis(
         if aggregated_cert.conditioning is not None:
             psd_min_eig_before = aggregated_cert.conditioning.eig_min
 
-        # Matrix Fisher and scatter sentinels for the dashboard
-        mf_svd_np = np.array(mf_result.svd_singular_values, dtype=np.float64).reshape(3,)
-        scan_scatter_eigs = np.linalg.eigvalsh(np.array(scan_bins.S_dir_scatter, dtype=np.float64))  # (B, 3)
-        map_scatter_eigs = np.linalg.eigvalsh(np.array(map_stats.S_dir_scatter, dtype=np.float64))  # (B, 3)
+        # Primitive-based diagnostics (Matrix Fisher and bins no longer used)
+        # Use placeholder values for backward compatibility with ScanDiagnostics schema
+        B_BINS = config.B_BINS
+        mf_svd_np = np.zeros(3, dtype=np.float64)  # No Matrix Fisher SVD with primitives
+        scan_scatter_eigs = np.zeros((B_BINS, 3), dtype=np.float64)  # No bin scatter with primitives
+        map_scatter_eigs = np.zeros((B_BINS, 3), dtype=np.float64)  # No bin scatter with primitives
 
         if config.enable_timing:
             timing_ms["total_ms"] = (time.perf_counter() - t_total_start) * 1000.0
@@ -1306,10 +1271,11 @@ def process_scan_single_hypothesis(
             n_points_budget=int(points.shape[0]),
             p_W=trans_final,
             R_WL=R_final,
-            N_bins=np.array(scan_bins.N),
-            S_bins=np.array(scan_bins.s_dir),
-            kappa_bins=np.array(scan_bins.kappa_scan),
-            kappa_map_bins=np.array(kappa_map),
+            # Bin-based diagnostics replaced with placeholders (primitives don't use bins)
+            N_bins=np.zeros(B_BINS, dtype=np.float64),
+            S_bins=np.zeros((B_BINS, 3), dtype=np.float64),
+            kappa_bins=np.zeros(B_BINS, dtype=np.float64),
+            kappa_map_bins=np.zeros(B_BINS, dtype=np.float64),
             L_total=L_total_np,
             h_total=h_total_np,
             L_lidar=np.array(L_lidar),
@@ -1326,11 +1292,13 @@ def process_scan_single_hypothesis(
             psd_delta_fro=psd_delta,
             psd_min_eig_before=psd_min_eig_before,
             psd_min_eig_after=psd_min_eig_after,
-            wahba_cost=float(jnp.sum(mf_result.svd_singular_values)),  # MF cost proxy (SVD sum)
+            # Visual pose evidence replaces Matrix Fisher (no SVD cost available)
+            wahba_cost=0.0,  # No Matrix Fisher with primitives
             mf_svd=mf_svd_np,
             scan_scatter_eigs=scan_scatter_eigs,
             map_scatter_eigs=map_scatter_eigs,
-            translation_residual_norm=float(jnp.linalg.norm(planar_trans_result.delta_trans)),
+            # Visual pose evidence doesn't have separate translation residual
+            translation_residual_norm=0.0,  # No planar translation with primitives
             rot_err_lidar_deg_pred=rot_err_lidar_deg_pred,
             rot_err_lidar_deg_post=rot_err_lidar_deg_post,
             rot_err_odom_deg_pred=rot_err_odom_deg_pred,
@@ -1358,7 +1326,7 @@ def process_scan_single_hypothesis(
             preint_r_pos=np.array(preint_result.r_pos),
             dyaw_gyro=float(dyaw_gyro),
             dyaw_odom=float(dyaw_odom),
-            dyaw_wahba=float(dyaw_mf),  # Now Matrix Fisher, kept field name for compatibility
+            dyaw_wahba=0.0,  # No Matrix Fisher with primitives (visual_pose_evidence used instead)
             t_total_ms=timing_ms.get("total_ms", 0.0) if timing_ms is not None else 0.0,
             t_point_budget_ms=timing_ms.get("point_budget_ms", 0.0) if timing_ms is not None else 0.0,
             t_imu_preint_scan_ms=timing_ms.get("imu_preint_scan_ms", 0.0) if timing_ms is not None else 0.0,
@@ -1406,6 +1374,12 @@ def process_scan_single_hypothesis(
         aggregated_cert=aggregated_cert,
         diagnostics=diagnostics,
         diagnostics_tape=diagnostics_tape,
+        # Stage 1: PrimitiveMap results
+        primitive_map_updated=primitive_map_updated,
+        measurement_batch=measurement_batch,
+        n_primitives_inserted=n_primitives_inserted,
+        n_primitives_fused=n_primitives_fused,
+        n_primitives_culled=n_primitives_culled,
     )
 
 
@@ -1479,7 +1453,10 @@ class RuntimeManifest:
     imu_gravity_scale: float = 1.0
 
     # Explicit backend/operator selections (single-path; no fallback).
-    # This is required for auditability of the "no multipaths" invariant.
+    # Required for auditability of the "no multipaths" invariant.
+    # pose_evidence_backend and map_backend are the single source of truth for pose/map path.
+    pose_evidence_backend: str = constants.GC_POSE_EVIDENCE_BACKEND_BINS
+    map_backend: str = constants.GC_MAP_BACKEND_BINS
     backends: Dict[str, str] = None
 
     def __post_init__(self):
@@ -1502,14 +1479,23 @@ class RuntimeManifest:
                 "lidar_evidence": "fl_slam_poc.backend.operators.matrix_fisher_evidence (Matrix Fisher + planar translation)",
                 "hypothesis_barycenter": "fl_slam_poc.backend.operators.hypothesis (vectorized over hypotheses)",
                 "map_update": "fl_slam_poc.backend.operators.map_update (vectorized over bins)",
-                "lidar_converter": "fl_slam_poc.frontend.sensors.livox_converter",
+                "lidar_converter": "fl_slam_poc.frontend.sensors.pointcloud_passthrough",
                 "pointcloud_parser": "fl_slam_poc.backend.backend_node.parse_pointcloud2",
             }
+        # Override lidar_evidence and map_update to match pose_evidence_backend / map_backend (single path).
+        if self.pose_evidence_backend == constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES:
+            self.backends["lidar_evidence"] = "fl_slam_poc.backend.operators.visual_pose_evidence (primitive alignment; Laplace at z_lin)"
+        if self.map_backend == constants.GC_MAP_BACKEND_PRIMITIVE_MAP:
+            self.backends["map_update"] = "fl_slam_poc.backend.structures.primitive_map (Fuse/Insert/Cull/Forget; bins derived only)"
+        # Single OT path: unbalanced Sinkhorn only (no balanced path).
+        self.backends["sinkhorn_backend"] = "unbalanced_fixed_k"
     
     def to_dict(self) -> dict:
         """Convert to dictionary for logging/publishing."""
         return {
             "chart_id": self.chart_id,
+            "pose_evidence_backend": self.pose_evidence_backend,
+            "map_backend": self.map_backend,
             "D_Z": self.D_Z,
             "D_DESKEW": self.D_DESKEW,
             "K_HYP": self.K_HYP,

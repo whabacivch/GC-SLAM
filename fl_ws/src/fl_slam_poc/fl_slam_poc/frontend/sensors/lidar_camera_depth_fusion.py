@@ -1,21 +1,24 @@
 """
 LiDAR–camera depth fusion via natural-parameter addition on depth along camera rays.
 
-Plan: lidar-camera_splat_fusion_and_bev_ot. Part A: depth latent z along ray;
-Λ = 1/σ², θ = Λ·ẑ; fuse Λf = Λc + Λℓ, θf = θc + θℓ; ẑf = θf/Λf, σf² = 1/Λf.
+I0.2: One LiDAR depth evidence function lidar_depth_evidence(u,v,...) -> (Λ_ell, θ_ell).
+Internally computes Route A (project + robust sample) and Route B (ray–plane);
+outputs always defined, continuous; Λℓ, θℓ → 0 when not applicable. PoE: Λf = Λc + Λℓ, θf = θc + θℓ.
 
-All parameters from config; no magic numbers. Optional Student-t weight scaling
-is documented as a robustness option (continuous weight w ∈ (0,1], scale Λ by w
-before adding); not a gate.
+§1: Return natural params; Route A/B as mixture-of-experts (Λℓ = ΛA + ΛB, θℓ = θA + θB).
+Reliability: wA = w_cnt * w_mad * w_repr; wB = w_angle * w_planar * w_res * w_z. Λ = w σ^{-2}, θ = Λ ẑ.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+
+# MAD scale for Gaussian: 1.4826 * median(|x - med|) estimates sigma
+MAD_NORMAL_SCALE = 1.4826
 
 
 # -----------------------------------------------------------------------------
@@ -25,101 +28,52 @@ import numpy as np
 
 @dataclass(frozen=True)
 class LidarCameraDepthFusionConfig:
-    """Configuration for LiDAR–camera depth fusion and LiDAR ray depth (Route A)."""
+    """Configuration for LiDAR–camera depth fusion and unified lidar_depth_evidence (Route A + B)."""
 
-    # Depth fusion: optional Student-t–style weight scaling (continuous w ∈ (0,1])
-    # Scale Λc, Λℓ by w before adding; document as robustness option. Default 1.0 = no scaling.
+    # Depth fusion: reliability scaling (continuous w ∈ (0,1]); apply as Λ←wΛ, θ←wθ.
     depth_fusion_weight_camera: float = 1.0
     depth_fusion_weight_lidar: float = 1.0
+    # Global modality dial for LiDAR evidence (optional): Λ_ell *= gamma_lidar
+    gamma_lidar: float = 1.0
 
-    # LiDAR ray depth (Route A): per-pixel aggregation
-    lidar_projection_radius_pix: float = 3.0  # radius in pixel space for nearest/median
-    lidar_plane_fit_min_points: int = 3  # min points for local stats (fixed; not RANSAC)
-    lidar_depth_base_sigma_m: float = 0.02  # base depth std (m) from range noise model
-    lidar_incidence_sigma_scale: float = 1.0  # scale σ by 1/cos(incidence) if desired (1 = off)
-    # Minimum depth variance (m²) for numerical stability
+    # Route A: project LiDAR to image, robust sample
+    lidar_projection_radius_pix: float = 3.0
+    lidar_plane_fit_min_points: int = 3
+    lidar_depth_base_sigma_m: float = 0.02
+    lidar_incidence_sigma_scale: float = 1.0
     depth_var_min_m2: float = 1e-8
+    # Route A reliability (continuous): w_cnt = σ(α(n−n0)), w_mad = exp(−β σ²_A), w_repr = exp(−γ r²)
+    point_support_n0: float = 3.0
+    point_support_alpha: float = 1.0
+    spread_mad_beta: float = 10.0  # w_mad = exp(−β σ²_A)
+    repr_gamma: float = 10.0  # w_repr = exp(−γ r²), r² = depth variance in neighborhood
 
-    # Route B: ray–plane intersection (fixed-cost; continuous; no reject)
-    lidar_ray_plane_fit_max_points: int = 64  # fixed K: max points per ray for plane fit (no RANSAC)
-    plane_intersection_delta: float = 1e-6  # δ in z* = n'(x̄−C)/(n'r̂+δ); continuous, no division-by-zero
-    # Continuous reliability (no gating): w_angle, w_planar, w_res; Λℓ ← w_angle * w_planar * w_res * Λℓ
-    plane_angle_sigmoid_alpha: float = 10.0  # w_angle = sigmoid(α(|n'r̂| − t))
-    plane_angle_sigmoid_t: float = 0.1  # threshold for angle sigmoid
-    plane_planarity_sigmoid_beta: float = 5.0  # w_planar = sigmoid(β(ρ − ρ0)), ρ = λ2/(λ3+ε)
-    plane_planarity_rho0: float = 0.3  # planarity threshold
-    plane_residual_exp_gamma: float = 100.0  # w_res = exp(−γ σ⊥²)
-    plane_fit_eps: float = 1e-12  # ε for ρ denominator and numerics
-    # Continuous depth handling (no reject): behind-camera / negative z
-    depth_min_m: float = 0.05  # z_min for softplus clamp: z ← softplus(z_raw − z_min) + z_min
-    # Cap σz² for float safety: when |n'r̂| is very small, σz² = σ⊥²/((n'r̂)²+δ) becomes huge
-    # (precision → 0); correct behavior—depth_sigma_max_sq prevents float blow-up.
-    depth_sigma_max_sq: float = 1e4  # cap σz,ℓ² so precision doesn't underflow (m²)
-
-
-# -----------------------------------------------------------------------------
-# Depth natural params (1D Gaussian along ray)
-# -----------------------------------------------------------------------------
+    # Route B: ray–plane intersection
+    lidar_ray_plane_fit_max_points: int = 64
+    plane_intersection_delta: float = 1e-6
+    plane_angle_sigmoid_alpha: float = 10.0
+    plane_angle_sigmoid_t: float = 0.1
+    plane_planarity_sigmoid_beta: float = 5.0
+    plane_planarity_rho0: float = 0.3
+    plane_residual_exp_gamma: float = 100.0
+    plane_fit_eps: float = 1e-12
+    depth_min_m: float = 0.05
+    depth_sigma_max_sq: float = 1e4
+    # w_z = σ(α_z(z* − z_min)) for behind/min-depth (continuous)
+    depth_min_sigmoid_alpha_z: float = 20.0
 
 
-def depth_natural_params(
-    z_hat: float,
-    sigma_sq: float,
-    var_min: float = 1e-8,
-) -> Tuple[float, float]:
-    """
-    Scalar natural parameters for 1D depth Gaussian: Λ = 1/σ², θ = Λ·ẑ.
-
-    Args:
-        z_hat: depth estimate along ray (m).
-        sigma_sq: depth variance (m²). Must be positive.
-        var_min: minimum variance for stability (default 1e-8).
-
-    Returns:
-        (Lambda, theta) with Lambda = 1 / max(sigma_sq, var_min), theta = Lambda * z_hat.
-    """
-    sigma_sq = max(float(sigma_sq), var_min)
-    Lambda = 1.0 / sigma_sq
-    theta = Lambda * float(z_hat)
-    return (Lambda, theta)
-
-
-def fuse_depth_natural_params(
-    Lambda_c: float,
-    theta_c: float,
-    Lambda_ell: float,
-    theta_ell: float,
-    w_c: float = 1.0,
-    w_ell: float = 1.0,
-) -> Tuple[float, float]:
-    """
-    Fuse camera and LiDAR depth by natural-parameter addition (same ray).
-
-    Λf = w_c·Λc + w_ell·Λℓ, θf = w_c·θc + w_ell·θℓ; ẑf = θf/Λf, σf² = 1/Λf.
-
-    Optional weights w_c, w_ell ∈ (0, 1] scale the information (e.g. Student-t
-    robustness); no gate. If both Λ are 0, returns (0.0, float('inf')) and
-    caller should treat as no observation.
-
-    Args:
-        Lambda_c, theta_c: camera depth natural params.
-        Lambda_ell, theta_ell: LiDAR depth natural params.
-        w_c, w_ell: optional continuous weights (default 1.0).
-
-    Returns:
-        (z_f, sigma_f_sq) in m and m². sigma_f_sq = inf if Lambda_f <= 0.
-    """
-    Lambda_f = w_c * Lambda_c + w_ell * Lambda_ell
-    theta_f = w_c * theta_c + w_ell * theta_ell
-    if Lambda_f <= 0.0:
-        return (0.0, float("inf"))
-    z_f = theta_f / Lambda_f
-    sigma_f_sq = 1.0 / Lambda_f
-    return (z_f, sigma_f_sq)
+def _sigmoid(x: float) -> float:
+    """Continuous sigmoid 1/(1+exp(-x)); no gate."""
+    x = float(x)
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    t = math.exp(x)
+    return t / (1.0 + t)
 
 
 # -----------------------------------------------------------------------------
-# LiDAR ray depth (Route A): project points to camera, per-(u,v) z_ell, σ_ℓ²
+# Route A: project LiDAR to image, per-(u,v) → (ΛA, θA)
 # -----------------------------------------------------------------------------
 
 
@@ -142,7 +96,7 @@ def _project_camera(
     return uv, z
 
 
-def lidar_ray_depth_route_a(
+def _route_a_natural_params(
     points_camera_frame: np.ndarray,
     uv_query: np.ndarray,
     fx: float,
@@ -150,47 +104,35 @@ def lidar_ray_depth_route_a(
     cx: float,
     cy: float,
     config: LidarCameraDepthFusionConfig,
-    *,
-    use_median: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Per-query (u,v) get LiDAR depth z_ell and variance sigma_ell_sq (Route A).
-
-    Points are in camera frame (N,3). Project to pixels; for each query (u,v)
-    find points within lidar_projection_radius_pix, take median (or nearest)
-    depth. sigma_ell_sq from config (base + optional incidence); no hidden iteration.
-
-    Args:
-        points_camera_frame: (N, 3) in camera frame.
-        uv_query: (M, 2) query pixel coordinates (u, v).
-        fx, fy, cx, cy: pinhole intrinsics.
-        config: fusion/config (radius, base sigma, var_min).
-        use_median: if True use median depth in radius, else nearest by reprojection.
-
-    Returns:
-        z_ell: (M,) depth in m; NaN where no points in radius.
-        sigma_ell_sq: (M,) variance in m²; same shape.
+    Route A: per-query (u,v) → (ΛA, θA). Robust sample + reliability wA = w_cnt * w_mad * w_repr.
+    ΛA = wA/σ²_A, θA = ΛA*z^A. Invalid/weak → (0, 0). Always defined, continuous.
     """
     uv_query = np.asarray(uv_query, dtype=np.float64)
     if uv_query.ndim == 1:
         uv_query = uv_query.reshape(1, 2)
     M = uv_query.shape[0]
+    Lambda_A = np.zeros(M, dtype=np.float64)
+    theta_A = np.zeros(M, dtype=np.float64)
+
     if points_camera_frame.size == 0:
-        return np.full(M, np.nan, dtype=np.float64), np.full(M, np.nan, dtype=np.float64)
+        return Lambda_A, theta_A
 
     uv, z = _project_camera(points_camera_frame, fx, fy, cx, cy)
-    # Filter to valid depth
     valid = z > 0.0
     uv = uv[valid]
     z = z[valid]
     if uv.size == 0:
-        return np.full(M, np.nan, dtype=np.float64), np.full(M, np.nan, dtype=np.float64)
+        return Lambda_A, theta_A
 
     r = config.lidar_projection_radius_pix
-    z_out = np.full(M, np.nan, dtype=np.float64)
-    sigma_sq_out = np.full(M, np.nan, dtype=np.float64)
     base_sigma = config.lidar_depth_base_sigma_m
     var_min = config.depth_var_min_m2
+    n0 = config.point_support_n0
+    alpha_cnt = config.point_support_alpha
+    beta_mad = config.spread_mad_beta
+    gamma_repr = config.repr_gamma
 
     for i in range(M):
         uq, vq = uv_query[i, 0], uv_query[i, 1]
@@ -199,28 +141,31 @@ def lidar_ray_depth_route_a(
         if not np.any(in_radius):
             continue
         z_near = z[in_radius]
-        if use_median:
-            z_ell_i = float(np.median(z_near))
-            # Variance: spread of depths in neighborhood + base sensor variance
-            n_pt = z_near.size
-            if n_pt >= config.lidar_plane_fit_min_points:
-                var_spread = float(np.var(z_near))
-            else:
-                var_spread = 0.0
-            sigma_ell_sq_i = base_sigma * base_sigma + var_spread
-        else:
-            idx = np.argmin(np.sqrt(dist_sq[in_radius]))
-            z_ell_i = float(z_near.flat[idx])
-            sigma_ell_sq_i = base_sigma * base_sigma
-        sigma_ell_sq_i = max(sigma_ell_sq_i, var_min)
-        z_out[i] = z_ell_i
-        sigma_sq_out[i] = sigma_ell_sq_i
+        n_pt = z_near.size
+        if n_pt < config.lidar_plane_fit_min_points:
+            continue
+        z_med = float(np.median(z_near))
+        mad = float(np.median(np.abs(z_near - z_med)))
+        sigma_A = MAD_NORMAL_SCALE * mad
+        sigma_A_sq = sigma_A * sigma_A
+        var_spread = float(np.var(z_near)) if n_pt >= 2 else 0.0
+        sigma_ell_sq = base_sigma * base_sigma + max(sigma_A_sq, var_spread)
+        sigma_ell_sq = max(sigma_ell_sq, var_min)
 
-    return z_out, sigma_sq_out
+        w_cnt = _sigmoid(alpha_cnt * (float(n_pt) - n0))
+        w_mad = math.exp(-beta_mad * sigma_A_sq)
+        w_repr = math.exp(-gamma_repr * var_spread)
+        wA = w_cnt * w_mad * w_repr
+        if wA <= 0.0 or not np.isfinite(z_med) or z_med <= 0.0:
+            continue
+        Lambda_A[i] = wA / sigma_ell_sq
+        theta_A[i] = Lambda_A[i] * z_med
+
+    return Lambda_A, theta_A
 
 
 # -----------------------------------------------------------------------------
-# LiDAR ray depth (Route B): ray–plane intersection (fixed-cost; continuous weight)
+# Route B: ray–plane intersection → (z*, σ², w); _route_b_natural_params → (ΛB, θB)
 # -----------------------------------------------------------------------------
 
 
@@ -247,15 +192,6 @@ def _distance_point_to_ray(points: np.ndarray, ray_dir: np.ndarray) -> np.ndarra
     proj = proj_len[:, np.newaxis] * ray_dir
     diff = points - proj
     return np.sum(diff * diff, axis=1)
-
-
-def _sigmoid(x: float) -> float:
-    """Continuous sigmoid 1/(1+exp(-x)); no gate."""
-    x = float(x)
-    if x >= 0:
-        return 1.0 / (1.0 + math.exp(-x))
-    t = math.exp(x)
-    return t / (1.0 + t)
 
 
 def _softplus(x: float) -> float:
@@ -303,7 +239,7 @@ def _fit_plane_weighted(
     return centroid, normal, eigvals, max(sigma_perp_sq, 0.0)
 
 
-def lidar_ray_depth_route_b(
+def _route_b_ray_plane(
     points_camera_frame: np.ndarray,
     uv_query: np.ndarray,
     fx: float,
@@ -315,24 +251,8 @@ def lidar_ray_depth_route_b(
     point_weights: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Per-query (u,v) get LiDAR depth z_ell and sigma_ell_sq via ray–plane intersection (Route B).
-
-    Weighted PCA plane: min sum w_k (n'x_k+d)^2; n = eigenvector of smallest eigenvalue.
-    Intersection (continuous): z* = n'(x̄−C)/(n'r̂+δ), C=0. σz,ℓ² = σ⊥²/((n'r̂)²+δ).
-    Continuous reliability: w_angle = sigmoid(α(|n'r̂|−t)), w_planar = sigmoid(β(ρ−ρ0)),
-    w_res = exp(−γ σ⊥²); weight_plane = w_angle * w_planar * w_res. No gate.
-
-    Args:
-        points_camera_frame: (N, 3) in camera frame.
-        uv_query: (M, 2) query pixel coordinates (u, v).
-        fx, fy, cx, cy: pinhole intrinsics.
-        config: fusion config (Route B: plane_intersection_delta, angle/planarity/residual params).
-        point_weights: optional (N,) weights for plane fit; None → uniform.
-
-    Returns:
-        z_ell: (M,) depth in m; NaN where no points in radius.
-        sigma_ell_sq: (M,) variance in m².
-        weight_plane: (M,) continuous weight for scaling Λℓ (w_angle * w_planar * w_res).
+    Route B internal: per-query (u,v) → (z*, σ², w). Ray–plane intersection + w = w_angle * w_planar * w_res * w_z.
+    _route_b_natural_params converts to (ΛB, θB).
     """
     uv_query = np.asarray(uv_query, dtype=np.float64)
     if uv_query.ndim == 1:
@@ -417,11 +337,109 @@ def lidar_ray_depth_route_b(
         w_planar = _sigmoid(beta * (rho - rho0))
         w_res = math.exp(-gamma * sigma_perp_sq)
         w_plane = w_angle * w_planar * w_res * w_behind
+        # w_z = σ(α_z(z* − z_min)) for behind/min-depth (continuous)
+        alpha_z = config.depth_min_sigmoid_alpha_z
+        w_z = _sigmoid(alpha_z * (z_ell_i - z_min))
+        w_plane = w_plane * w_z
 
         z_out[i] = z_ell_i
         sigma_sq_out[i] = sigma_ell_sq_i
         weight_out[i] = max(w_plane, 0.0)
     return z_out, sigma_sq_out, weight_out
+
+
+def _route_b_natural_params(
+    points_camera_frame: np.ndarray,
+    uv_query: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    config: LidarCameraDepthFusionConfig,
+    *,
+    point_weights: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Route B: per-query (u,v) → (ΛB, θB). Ray–plane intersection + wB = w_angle * w_planar * w_res * w_z.
+    ΛB = wB/σ²_B, θB = ΛB*z*. Invalid/weak → (0, 0). Always defined, continuous.
+    """
+    z_out, sigma_sq_out, weight_out = _route_b_ray_plane(
+        points_camera_frame,
+        uv_query,
+        fx, fy, cx, cy,
+        config,
+        point_weights=point_weights,
+    )
+    M = z_out.shape[0]
+    Lambda_B = np.zeros(M, dtype=np.float64)
+    theta_B = np.zeros(M, dtype=np.float64)
+    var_min = config.depth_var_min_m2
+    for i in range(M):
+        z_i = z_out[i]
+        sigma_sq_i = sigma_sq_out[i]
+        w_i = weight_out[i]
+        if not np.isfinite(z_i) or z_i <= 0.0 or not np.isfinite(sigma_sq_i) or sigma_sq_i <= 0.0 or w_i <= 0.0:
+            continue
+        sigma_sq_i = max(sigma_sq_i, var_min)
+        Lambda_B[i] = w_i / sigma_sq_i
+        theta_B[i] = Lambda_B[i] * z_i
+    return Lambda_B, theta_B
+
+
+def lidar_depth_evidence(
+    points_camera_frame: np.ndarray,
+    uv_query: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    config: LidarCameraDepthFusionConfig,
+    *,
+    point_weights: Optional[np.ndarray] = None,
+    return_diag: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, ...]:
+    """
+    One LiDAR depth evidence function (I0.2). Returns (Λ_ell, θ_ell) per query.
+
+    Internally computes Route A (project + robust sample) and Route B (ray–plane);
+    combines as mixture-of-experts: Λ_ell = ΛA + ΛB, θ_ell = θA + θB.
+    Always defined, continuous; Λ_ell → 0, θ_ell → 0 when not applicable (camera-only behavior).
+
+    Args:
+        points_camera_frame: (N, 3) in camera frame.
+        uv_query: (M, 2) query pixel coordinates (u, v).
+        fx, fy, cx, cy: pinhole intrinsics.
+        config: fusion config (gamma_lidar optional modality dial).
+        point_weights: optional (N,) weights for Route B plane fit; None → uniform.
+        return_diag: if True, return (Lambda_ell, theta_ell, diag) with diag dict.
+
+    Returns:
+        Lambda_ell: (M,) precision (1/σ²) along ray; 0 when no LiDAR support.
+        theta_ell: (M,) natural param θ = Λ*ẑ; 0 when no LiDAR support.
+        If return_diag: diag with keys Lambda_A, theta_A, Lambda_B, theta_B (optional).
+    """
+    Lambda_A, theta_A = _route_a_natural_params(
+        points_camera_frame, uv_query, fx, fy, cx, cy, config
+    )
+    Lambda_B, theta_B = _route_b_natural_params(
+        points_camera_frame, uv_query, fx, fy, cx, cy, config,
+        point_weights=point_weights,
+    )
+    Lambda_ell = Lambda_A + Lambda_B
+    theta_ell = theta_A + theta_B
+    gamma = config.gamma_lidar
+    if gamma != 1.0:
+        Lambda_ell = Lambda_ell * gamma
+        theta_ell = theta_ell * gamma
+    if return_diag:
+        diag: Dict[str, Any] = {
+            "Lambda_A": Lambda_A.copy(),
+            "theta_A": theta_A.copy(),
+            "Lambda_B": Lambda_B.copy(),
+            "theta_B": theta_B.copy(),
+        }
+        return Lambda_ell, theta_ell, diag
+    return Lambda_ell, theta_ell
 
 
 # -----------------------------------------------------------------------------

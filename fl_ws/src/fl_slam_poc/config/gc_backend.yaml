@@ -1,41 +1,13 @@
-# Golden Child SLAM v2 Backend Configuration
-# Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
-#
-# NOTE: This file is kept for backward compatibility.
-# Prefer using config/gc_unified.yaml for new deployments.
-#
-# Topic naming convention:
-#   Raw (from bag)              Canonical (for backend)
-#   /livox/mid360/lidar     ->  /gc/sensors/lidar_points
-#   /odom                   ->  /gc/sensors/odom
-#   /livox/mid360/imu       ->  /gc/sensors/imu
-#
-# Backend subscribes ONLY to /gc/sensors/* (canonical topics).
+# Golden Child SLAM v2 Backend Configuration (DEPRECATED)
+# Use config/gc_unified.yaml or config/gc_kimera.yaml for new deployments.
 
 gc_backend:
   ros__parameters:
-    # Frame configuration
     odom_frame: "odom"
     base_frame: "base_link"
-    
-    # Topic configuration - canonical /gc/sensors/* topics only
     lidar_topic: "/gc/sensors/lidar_points"
     odom_topic: "/gc/sensors/odom"
     imu_topic: "/gc/sensors/imu"
-    
-    # Output configuration
     trajectory_export_path: "/tmp/gc_slam_trajectory.tum"
     status_check_period_sec: 5.0
-    
-    # GC pipeline parameters
     forgetting_factor: 0.99
-
-livox_converter:
-  ros__parameters:
-    input_topic: "/livox/mid360/lidar"
-    # Explicit message type selection (no fallback / no "auto"):
-    # - MID360 bags: livox_ros_driver2/msg/CustomMsg
-    # - AVIA bags (if installed): livox_ros_driver/msg/CustomMsg
-    input_msg_type: "livox_ros_driver2/msg/CustomMsg"
-    output_topic: "/gc/sensors/lidar_points"
-    frame_id: ""  # Empty = preserve original frame

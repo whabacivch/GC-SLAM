@@ -683,7 +683,7 @@ class VisualFeatureExtractor:
 
             # Depth natural params for LiDAR–camera fusion (plan: lidar-camera_splat_fusion_and_bev_ot).
             # z_c = depth along ray (m), sigma_c_sq = effective variance used for 3D cov (m²).
-            # Lambda_c, theta_c = scalar natural params for 1D depth: fuse_depth_natural_params(Lambda_c, theta_c, Lambda_ell, theta_ell).
+            # Lambda_c, theta_c = scalar natural params for 1D depth; PoE: Λf = Λc + Λ_ell, θf = θc + θ_ell (lidar_depth_evidence returns Λ_ell, θ_ell).
             # Invalid depth: Lambda_c=0, theta_c=0 so fusion uses LiDAR-only on that ray.
             if z_valid and np.isfinite(z_m) and z_m > 0 and np.isfinite(var_z_eff) and var_z_eff > 0:
                 depth_sigma_c_sq = float(var_z_eff)

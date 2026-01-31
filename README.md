@@ -36,12 +36,12 @@ Embracing uncertainty is a cornerstone of robust robotics and SLAM: we use princ
 
 ## Status
 
-The **primary implementation** is **Golden Child SLAM v2** — a strict, branch-free, fixed-cost SLAM backend validated on the **M3DGR Dynamic01** rosbag.
+The **primary implementation** is **Golden Child SLAM v2** — a strict, branch-free, fixed-cost SLAM backend. Default evaluation uses the **Kimera** dataset; M3DGR Dynamic01 is archived (see `archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md`).
 
 - **22D augmented state:** pose (6D) + velocity (3D) + gyro bias (3D) + accel bias (3D) + time offset (1D) + LiDAR–IMU extrinsic (6D)
 - **Sensors fused:** LiDAR (Matrix Fisher rotation + planar translation evidence), IMU (time-resolved vMF tilt + gyro rotation + preintegration factor), odometry (pose + twist with kinematic consistency)
 - **Adaptive noise:** Inverse-Wishart for process Q and measurement Σ (gyro, accel, LiDAR); updates every scan (no gates)
-- **14-step pipeline per scan:** PointBudgetResample → PredictDiffusion → DeskewConstantTwist → BinSoftAssign → ScanBinMomentMatch → MatrixFisherRotation → PlanarTranslationEvidence → Evidence (odom pose + odom twist + planar priors + IMU + LiDAR) → FusionScaleFromCertificates → InfoFusionAdditive → PoseUpdateFrobeniusRecompose → PoseCovInflationPushforward → AnchorDriftUpdate
+- **14-step pipeline per scan:** Predict → Deskew → IMU+odom → z_lin → surfel+camera → association → visual_pose_evidence(M_{t-1}, z_lin) → fuse → recompose → map update(z_t) → cull/forget → anchor drift. See `docs/PIPELINE_ORDER_AND_EVIDENCE.md`.
 - **Canonical topic/bag reference:** `docs/BAG_TOPICS_AND_USAGE.md`
 
 **Known limitations** (see `docs/PIPELINE_DESIGN_GAPS.md`): cross-sensor consistency likelihoods are still diagnostics (gyro↔odom↔LiDAR yaw); IMU message covariances and LiDAR intensity are not consumed; nonlinear evidence still uses local quadraticization (vMF/MF → Gaussian info). Pipeline trace and causality: `docs/PIPELINE_TRACE_SINGLE_DOC.md`.
@@ -62,11 +62,21 @@ source install/setup.bash
 ### Run GC v2 (primary evaluation)
 
 ```bash
-# Full pipeline: SLAM + alignment + metrics + plots + audit tests
+# Full pipeline: SLAM + alignment + metrics + plots + audit tests (default: Kimera)
 bash tools/run_and_evaluate_gc.sh
 ```
 
-Uses the M3DGR Dynamic01 rosbag; artifacts go to `results/gc_YYYYMMDD_HHMMSS/` (trajectory, metrics, diagnostics, wiring summary, dashboard).
+Uses the Kimera rosbag by default; artifacts go to `results/gc_YYYYMMDD_HHMMSS/` (trajectory, metrics, diagnostics, wiring summary, dashboard). To use M3DGR Dynamic01 instead: `PROFILE=m3dgr bash tools/run_and_evaluate_gc.sh` (see `archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md`).
+
+### Viewing (Rerun, Wayland-friendly)
+
+Visualization uses [Rerun](https://rerun.io/) by default (replaces RViz; works on Wayland). The backend records map and trajectory to a file (default `/tmp/gc_slam.rrd`). After a run, open it with:
+
+```bash
+rerun /tmp/gc_slam.rrd
+```
+
+Or set `rerun_spawn:=true` when launching to spawn the Rerun viewer at startup. Disable with `use_rerun:=false`.
 
 ### Legacy pipeline (optional)
 
@@ -83,15 +93,15 @@ Results under `results/m3dgr_YYYYMMDD_HHMMSS/`.
 **GC v2** uses a single-process sensor hub and the backend node; the backend subscribes only to canonical `/gc/sensors/*` topics.
 
 ```
-Rosbag (M3DGR)  →  gc_sensor_hub  →  gc_backend_node  →  /gc/state, /gc/trajectory, TF
-                     livox_converter    (14-step pipeline
-                     odom_normalizer     + IW updates
-                     imu_normalizer      + hypothesis combine)
-                     dead_end_audit
+Rosbag (Kimera)  →  gc_sensor_hub  →  gc_backend_node  →  /gc/state, /gc/trajectory, TF
+                 pointcloud_passthrough   (14-step pipeline
+                 odom_normalizer          + IW updates
+                 imu_normalizer           + hypothesis combine)
+                 dead_end_audit
 ```
 
-- **Raw topics (from bag):** `/odom`, `/livox/mid360/lidar`, `/livox/mid360/imu`
-- **Canonical (hub → backend):** `/gc/sensors/lidar_points`, `/gc/sensors/odom`, `/gc/sensors/imu`
+- **Raw topics (Kimera bag):** PointCloud2 LiDAR, odom, IMU, RGB-D (see `gc_kimera.yaml`)
+- **Canonical (hub → backend):** `/gc/sensors/lidar_points`, `/gc/sensors/odom`, `/gc/sensors/imu`, `/gc/sensors/camera_image`, `/gc/sensors/camera_depth`
 - **Outputs:** `/gc/state`, `/gc/trajectory`, `/gc/status`, `/gc/runtime_manifest`, TF
 
 **14-step pipeline (per scan, per hypothesis):**
@@ -123,7 +133,7 @@ fl_ws/src/fl_slam_poc/
 │   ├── frontend/
 │   │   ├── hub/gc_sensor_hub.py      # Single process: converter + normalizers
 │   │   ├── sensors/
-│   │   │   ├── livox_converter.py
+│   │   │   ├── pointcloud_passthrough.py
 │   │   │   ├── imu_normalizer.py
 │   │   │   └── odom_normalizer.py
 │   │   └── audit/
@@ -132,6 +142,7 @@ fl_ws/src/fl_slam_poc/
 │   ├── backend/
 │   │   ├── backend_node.py            # Orchestration, IW state, hypothesis combine
 │   │   ├── pipeline.py                # process_scan_single_hypothesis (14 steps)
+│   │   ├── rendering.py               # Splat rendering (output from state/map)
 │   │   ├── operators/
 │   │   │   ├── point_budget.py
 │   │   │   ├── predict.py
@@ -175,7 +186,7 @@ fl_ws/src/fl_slam_poc/
 - Runs SLAM on M3DGR Dynamic01, aligns estimated trajectory to ground truth, computes ATE/RPE and per-axis errors, runs audit-invariant tests, and (if diagnostics are exported) builds a diagnostics dashboard.
 - Outputs: `results/gc_YYYYMMDD_HHMMSS/` — `metrics.txt`, `metrics.csv`, trajectory plots, `estimated_trajectory.tum`, `ground_truth_aligned.tum`, `diagnostics.npz`, `wiring_summary.json`, `audit_invariants.log`.
 
-Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for current gaps and `docs/PIPELINE_TRACE_SINGLE_DOC.md` for a full trace. The z‑drift mechanism documented in `docs/TRACE_Z_EVIDENCE_AND_TRAJECTORY.md` is legacy and now mitigated by planar translation/priors/map‑z fix.
+Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for current gaps and `docs/PIPELINE_TRACE_SINGLE_DOC.md` for a full trace. M3DGR-era z‑drift and trajectory/GT docs are in `archive/docs/` (planar translation/priors/map‑z fix are in code).
 
 ---
 
@@ -201,11 +212,12 @@ Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for cu
 | **docs/IMU_BELIEF_MAP_AND_FUSION.md** | Pipeline reference: topics, steps, evidence, fusion |
 | **docs/FRAME_AND_QUATERNION_CONVENTIONS.md** | Frames, quaternions, SE(3) |
 | **docs/PIPELINE_DESIGN_GAPS.md** | Known limitations (cross-sensor consistency, unused covariances, nonlinear approximations) |
-| **docs/TRACE_Z_EVIDENCE_AND_TRAJECTORY.md** | Where z in pose/trajectory comes from |
+| **archive/docs/** | M3DGR-era: TRACE_Z_EVIDENCE_AND_TRAJECTORY, RAW_MEASUREMENTS_VS_PIPELINE, TRACE_TRAJECTORY_AND_GROUND_TRUTH |
 | **docs/PREINTEGRATION_STEP_BY_STEP.md** | IMU preintegration steps (including gravity) |
 | **docs/EVALUATION.md** | Evaluation metrics and workflow |
 | **docs/TESTING.md** | Testing framework |
 | **tools/DIAGNOSTIC_TOOLS.md** | Diagnostic and inspection tools |
+| **tools/README_MCP.md** | Code Graph RAG MCP install (GitHub releases only) |
 
 ---
 

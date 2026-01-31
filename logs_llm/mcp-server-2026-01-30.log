@@ -1,13 +1,13 @@
-[2026-01-30T13:42:28.576Z] [INFO] [SYSTEM] MCP Server Transport Connecting DATA: {
+[2026-01-30T18:31:37.394Z] [INFO] [SYSTEM] MCP Server Transport Connecting DATA: {
   "transport": "stdio"
 }
-[2026-01-30T13:42:28.576Z] [INFO] [SYSTEM] MCP Server Ready DATA: {
+[2026-01-30T18:31:37.395Z] [INFO] [SYSTEM] MCP Server Ready DATA: {
   "directory": "/home/will/Documents/Coding/Phantom Fellowship MIT/Impact_Project_v1",
   "transport": "stdio",
   "toolsCount": 26,
-  "readyTime": 1769780548576
+  "readyTime": 1769797897395
 }
-[2026-01-30T13:42:28.710Z] [ERROR] [AGENT_INIT] Background agent initialization failed DATA: {
+[2026-01-30T18:31:37.415Z] [ERROR] [AGENT_INIT] Background agent initialization failed DATA: {
   "error": "The module '/home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/node_modules/better-sqlite3/build/Release/better_sqlite3.node'\nwas compiled against a different Node.js version using\nNODE_MODULE_VERSION 137. This version of Node.js requires\nNODE_MODULE_VERSION 115. Please try re-compiling or re-installing\nthe module (for instance, using `npm rebuild` or `npm install`)."
 } STACK: Error: The module '/home/will/.nvm/versions/node/v24.13.0/lib/node_modules/@er77/code-graph-rag-mcp/node_modules/better-sqlite3/build/Release/better_sqlite3.node'
 was compiled against a different Node.js version using

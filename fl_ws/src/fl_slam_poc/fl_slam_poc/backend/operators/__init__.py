@@ -27,13 +27,6 @@ from fl_slam_poc.backend.operators.deskew_constant_twist import (
     DeskewConstantTwistResult,
 )
 
-from fl_slam_poc.backend.operators.binning import (
-    bin_soft_assign,
-    scan_bin_moment_match,
-    BinSoftAssignResult,
-    ScanBinStats,
-)
-
 from fl_slam_poc.backend.operators.kappa import (
     kappa_from_resultant_v2,
     KappaResult,
@@ -63,7 +56,6 @@ from fl_slam_poc.backend.operators.recompose import (
 )
 
 from fl_slam_poc.backend.operators.map_update import (
-    pos_cov_inflation_pushforward,
     MapUpdateResult,
 )
 
@@ -104,11 +96,6 @@ __all__ = [
     # Deskew
     "deskew_constant_twist",
     "DeskewConstantTwistResult",
-    # Binning
-    "bin_soft_assign",
-    "scan_bin_moment_match",
-    "BinSoftAssignResult",
-    "ScanBinStats",
     # Kappa
     "kappa_from_resultant_v2",
     "KappaResult",
@@ -128,7 +115,6 @@ __all__ = [
     "pose_update_frobenius_recompose",
     "RecomposeResult",
     # Map update
-    "pos_cov_inflation_pushforward",
     "MapUpdateResult",
     # Anchor drift
     "anchor_drift_update",
