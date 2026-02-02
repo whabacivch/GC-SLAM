@@ -1,6 +1,6 @@
 # Pipeline Design Gaps (Known Limitations)
 
-This doc records **known design gaps** in the Golden Child SLAM v2 pipeline, based on the raw-measurements audit, message trace, and covariance inspection.
+This doc records **known design gaps** in the Geometric Compositional SLAM v2 pipeline, based on the raw-measurements audit, message trace, and covariance inspection.
 
 ## Audit status (source of truth)
 
@@ -11,7 +11,7 @@ Key code anchors (actual behavior):
 - Per-scan evidence assembly: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py` (time-resolved accel evidence at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:713`, planar translation at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:633`, planar priors at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:859`, odom twist evidence at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py:884`).
 - Map update planar z fix: `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py` (sets `t_hat[2]=0` at `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py:104`).
 
-**References (design context, may be stale vs code):** `docs/PIPELINE_TRACE_SINGLE_DOC.md`, `tools/inspect_odom_covariance.py`. M3DGR-era audits (raw measurements, z evidence, trajectory/GT frame) are in `archive/docs/`.
+**References (design context, may be stale vs code):** `docs/PIPELINE_TRACE_SINGLE_DOC.md`, `tools/inspect_odom_covariance.py`. Archived dataset audits are in `archive/docs/`.
 
 ---
 
@@ -107,7 +107,7 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 
 **Idea:** Right now we anchor the whole trajectory to the **first single odom message** (`first_odom_pose = odom_pose_absolute` on first callback). If that sample is noisy or an outlier (bag start, robot not yet stable), the reference frame is biased and the entire trajectory is shifted/rotated relative to ground truth. Evaluation then shows a mix of that **initial anchor error** and real drift.
 
-**Data availability:** In typical bags (e.g. M3DGR Dynamic01), IMU and odom start before or with the first LiDAR. At 200 Hz IMU and ~10 Hz LiDAR, even a short delay to first scan (e.g. 0.5 s) gives **on the order of 100 IMU samples** before the first LiDAR callback; we also get several odom messages in that window. So we already have plenty of pre–first-scan data to form a smoothed initial reference (mean position + quaternion mean over first K odom, optionally gravity/bias from first T_init seconds of IMU) without delaying the pipeline.
+**Data availability:** In the Kimera bag, IMU and odom start before or with the first LiDAR. At 200 Hz IMU and ~10 Hz LiDAR, even a short delay to first scan (e.g. 0.5 s) gives **on the order of 100 IMU samples** before the first LiDAR callback; we also get several odom messages in that window. So we already have plenty of pre–first-scan data to form a smoothed initial reference (mean position + quaternion mean over first K odom, optionally gravity/bias from first T_init seconds of IMU) without delaying the pipeline.
 
 **Proposal:** Form the initial reference from a **fixed window** of the first few odom (and optionally IMU) measurements, instead of a single sample.
 
@@ -175,7 +175,7 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 
 4. **Planar robot = roll ≈ 0, pitch ≈ 0** — We don’t have an explicit **tilt prior**. For a planar base, we could add a soft prior: roll ≈ 0, pitch ≈ 0 (rad), with a small sigma (e.g. 0.01 rad ≈ 0.6°), and only yaw free. That would pull tilt toward level and reduce the chance that wrong IMU/odom tilt dominates. **Implementation:** New evidence block (or extend planar prior): inject L[3,3] and L[4,4] (roll, pitch) with precision 1/sigma_tilt^2 and h[3], h[4] toward 0; leave yaw (index 5) unconstrained.
 
-5. **body_T_wheel residual** — We already apply `body_T_wheel` at evaluation time. If the residual rotation error is **constant** in the wheel frame, it could be a residual error in that transform or GT being in a slightly different frame. Re-check M3DGR calibration.md and the exact frame that GT uses; if needed, re-estimate or refine `body_T_wheel`.
+5. **Body-frame residual** — For Kimera, estimate and GT use the same body/base convention; no body_T_wheel transform. If residual is constant in one frame, check GT frame in dataset docs.
 
 #### Suggested order of work
 
@@ -191,15 +191,14 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 
 **Report first (code vs docs):**
 
-- **BAG_TOPICS_AND_USAGE.md** (line 79): "`livox_frame` uses **Z-down** convention; requires 180° rotation about X-axis to convert to Z-up `base_footprint` frame."
-- **FRAME_AND_QUATERNION_CONVENTIONS.md** (lines 72, 165–177): "`livox_frame` is **Z-up** for this dataset (ground normal points +Z)" and "`T_base_lidar` rotation is identity (rotvec=[0,0,0])."
-- **Code:** `backend_node.py:585` applies `pts_base = R_base_lidar @ pts_np.T + t_base_lidar`; `gc_rosbag.launch.py:149` and `gc_unified.yaml:78` set `T_base_lidar = [-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]` (rotation identity). So the code assumes livox_frame is Z-up.
+- **FRAME_AND_QUATERNION_CONVENTIONS.md**: Kimera LiDAR frame `acl_jackal2/velodyne_link` is **Z-up** (ground normal · Z ≈ 0.996); `T_base_lidar` from calibration.
+- **Code:** `backend_node.py` applies `pts_base = R_base_lidar @ pts_np.T + t_base_lidar`; `gc_kimera.yaml` sets `T_base_lidar` from Kimera calibration.
 
-**Observed (evaluation):** For M3DGR frame correction (wheel vs body, anchor smoothing) see `archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`.
+**Observed (evaluation):** For frame correction and anchor smoothing see `archive/docs/` (archived dataset docs).
 
-**Interpretation:** If livox_frame is actually Z-down and we use identity, all geometry (points, gravity alignment) is Z-flipped; the estimated pose would be in a frame that is 180° about X from base_footprint.
+**Interpretation:** If the LiDAR frame is actually Z-down and we use the current rotation, geometry would be Z-flipped; run `tools/diagnose_coordinate_frames.py` and set `T_base_lidar` rotation to `[π, 0, 0]` if the diagnostic reports Z-down.
 
-**Recommendation:** Run `tools/diagnose_coordinate_frames.py` on the bag; align `FRAME_AND_QUATERNION_CONVENTIONS.md` and `T_base_lidar` with the result. For M3DGR export/GT frame see `archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md`.
+**Recommendation:** Run `tools/diagnose_coordinate_frames.py` on the bag; align `FRAME_AND_QUATERNION_CONVENTIONS.md` and `T_base_lidar` with the result. See [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md).
 
 ---
 
@@ -330,7 +329,7 @@ If `Σ_eff,b = Σ_sensor + Σ_motion,b` is used in the likelihood, decide explic
 - Conservative (simple): update IW on residuals under `Σ_eff,b` (can over-inflate sensor noise).
 - Better (explicit approximation + certified): treat `Σ_motion,b` as known additive covariance and update IW for `Σ_sensor` using a corrected sufficient statistic (with a DomainProjection to SPD).
 
-This choice changes the model class and must be documented in `docs/GOLDEN_CHILD_INTERFACE_SPEC.md` terms (family in/out, approximation triggers, Frobenius applied).
+This choice changes the model class and must be documented in `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md` terms (family in/out, approximation triggers, Frobenius applied).
 
 ---
 

@@ -1,5 +1,5 @@
 """
-Golden Child SLAM v2 constants only.
+Geometric Compositional SLAM v2 constants only.
 
 Legacy constants have been moved to:
   archive/legacy_common/constants_legacy.py
@@ -33,8 +33,8 @@ EXTRINSICS:
 """
 
 # =============================================================================
-# GOLDEN CHILD MANIFEST CONSTANTS (RuntimeManifest)
-# Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 6
+# GEOMETRIC COMPOSITIONAL MANIFEST CONSTANTS (RuntimeManifest)
+# Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 6
 # These are HARD CONSTANTS - do not modify without spec change
 # =============================================================================
 
@@ -63,7 +63,7 @@ GC_EPS_DEN = 1e-12  # Denominator regularization in kappa
 GC_EXC_EPS = 1e-12  # Domain guard for excitation ratios
 
 # World gravity (m/s^2) in the odom/world frame used by evidence extraction.
-# M3DGR uses Z-UP convention (GT Z ≈ 0.86m), so gravity points down: (0, 0, -9.81)
+# Kimera (and GC) use Z-UP convention; gravity points down: (0, 0, -9.81).
 # NOTE: If world frame is Z-DOWN, use (0, 0, +9.81) instead.
 GC_GRAVITY_W = (0.0, 0.0, -9.81)  # Z-UP convention: gravity points in -Z direction
 
@@ -123,7 +123,7 @@ GC_TAU_SOFT_ASSIGN = 0.1  # Default temperature (configurable)
 GC_TIME_WARP_SIGMA_FRAC = 0.1
 
 # =============================================================================
-# END GOLDEN CHILD MANIFEST CONSTANTS
+# END GEOMETRIC COMPOSITIONAL MANIFEST CONSTANTS
 # =============================================================================
 
 # =============================================================================
@@ -269,13 +269,8 @@ GC_IW_RHO_MEAS_LIDAR = 0.99
 
 # Reference z height in the GC "body/base" frame (meters).
 #
-# IMPORTANT (frame contract): state/body frame is configurable (e.g. base_footprint for M3DGR,
-# acl_jackal2/base for Kimera). World Z of the base origin should be ~0 (ground contact).
-# See docs/FRAME_AND_QUATERNION_CONVENTIONS.md.
-#
-# NOTE: M3DGR ground truth is reported in a different body frame (`camera_imu`) with Z ≈ 0.85m.
-# Evaluation should compare in that frame by transforming the wheel-frame estimate via
-# `config/m3dgr_body_T_wheel.yaml` (see `tools/transform_estimate_to_body_frame.py`).
+# IMPORTANT (frame contract): state/body frame is configurable (Kimera: acl_jackal2/base).
+# World Z of the base origin should be ~0 (ground contact). See docs/FRAME_AND_QUATERNION_CONVENTIONS.md.
 GC_PLANAR_Z_REF = 0.0
 
 # Soft z constraint std dev (meters)

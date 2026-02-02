@@ -1,9 +1,9 @@
 """
-PoseUpdateFrobeniusRecompose operator for Golden Child SLAM v2.
+PoseUpdateFrobeniusRecompose operator for Geometric Compositional SLAM v2.
 
 Recompose pose with continuous Frobenius strength-blended BCH3 correction.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5.12
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.12
 """
 
 from __future__ import annotations

@@ -900,7 +900,11 @@ class VisualFeatureExtractor:
     def _ma_convexity_weight(self, lam_min: float) -> float:
         """Continuous convexity weight omega_MA = sigmoid(tau * lam_min)."""
         x = float(self.config.ma_tau) * lam_min
-        return 1.0 / (1.0 + math.exp(-x))
+        # Numerically stable sigmoid to avoid exp overflow on large |x|.
+        if x >= 0.0:
+            return 1.0 / (1.0 + math.exp(-x))
+        ex = math.exp(x)
+        return ex / (1.0 + ex)
 
     def _quadratic_fit(
         self,

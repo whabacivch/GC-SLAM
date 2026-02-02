@@ -23,6 +23,14 @@ def _ensure_rerun():
         return None
 
 
+def _set_rerun_time(rr, time_sec: float) -> None:
+    """Set current time on the 'time' timeline across rerun API versions."""
+    if hasattr(rr, "set_time_seconds"):
+        rr.set_time_seconds("time", time_sec)
+    else:
+        rr.set_time("time", timestamp=time_sec)
+
+
 class RerunVisualizer:
     """
     Log GC map and trajectory to Rerun (Wayland-friendly viewer).
@@ -77,7 +85,7 @@ class RerunVisualizer:
         if self._rr is None:
             return
         rr = self._rr
-        rr.set_time_seconds("time", time_sec)
+        _set_rerun_time(rr, time_sec)
         n = positions.shape[0]
         if n == 0:
             rr.log("gc/map/points", rr.Points3D(positions=np.zeros((0, 3))))
@@ -100,7 +108,7 @@ class RerunVisualizer:
         if self._rr is None:
             return
         rr = self._rr
-        rr.set_time_seconds("time", time_sec)
+        _set_rerun_time(rr, time_sec)
         if positions_xyz.shape[0] == 0:
             rr.log("gc/trajectory", rr.LineStrips3D([np.zeros((0, 3))]))
             return

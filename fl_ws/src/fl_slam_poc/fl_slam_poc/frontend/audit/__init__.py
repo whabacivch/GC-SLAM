@@ -1,5 +1,5 @@
 """
-Frontend audit/observability nodes for Golden Child.
+Frontend audit/observability nodes for Geometric Compositional.
 
 These nodes must not perform inference math; they provide accountability over
 what data streams exist, which ones are consumed, and which are intentionally

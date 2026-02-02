@@ -1,5 +1,5 @@
 """
-Audit Invariants Test Suite for Golden Child SLAM v2.
+Audit Invariants Test Suite for Geometric Compositional SLAM v2.
 
 This test file verifies the core invariants required by the audit checklist:
 1. Order invariance: Permuting evidence/hypothesis order should give same result

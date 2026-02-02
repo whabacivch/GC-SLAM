@@ -1,5 +1,5 @@
 """
-Sensor utility nodes for Golden Child SLAM v2.
+Sensor utility nodes for Geometric Compositional SLAM v2.
 
 LiDAR: pointcloud_passthrough (PointCloud2 bags, e.g. Kimera/VLP-16).
 Normalizers: odom_normalizer, imu_normalizer.

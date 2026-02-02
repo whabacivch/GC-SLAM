@@ -18,7 +18,7 @@ python tools/inspect_kimera_bag.py /path/to/Kimera_Data/ros2/10_14_acl_jackal-00
 python tools/inspect_kimera_bag.py /path/to/bag_dir --apply
 ```
 
-This runs: first-N messages summary, diagnose_coordinate_frames, estimate_lidar_base_extrinsic_rotation_from_ground (PointCloud2), estimate_imu_base_extrinsic_rotation. Parsed extrinsics use **rotation only** (translation 0,0,0). To get translation for LiDAR (e.g. height above base), use dataset/community calibration or run `estimate_lidar_base_extrinsic.py` if adapted for PointCloud2.
+This runs: first-N messages summary, diagnose_coordinate_frames, estimate_lidar_base_extrinsic_rotation_from_ground (PointCloud2), estimate_imu_base_extrinsic_rotation. Parsed extrinsics use **rotation only** (translation 0,0,0). To get translation for LiDAR (e.g. height above base), use dataset/community calibration or `estimate_lidar_base_extrinsic_rotation_from_ground.py` (rotation only); full 6D hand-eye tool `estimate_lidar_base_extrinsic.py` is in archive/legacy_tools/ (broken; requires ICP stub).
 
 ---
 
@@ -79,7 +79,7 @@ python tools/diagnose_coordinate_frames.py /path/to/Kimera_Data/ros2/<seq>_ros2 
 1. **Dataset/community:** [plusk01/Kimera-Multi-Data branch `parker/kmd_tools`](https://github.com/plusk01/Kimera-Multi-Data/tree/parker/kmd_tools) may provide LiDAR/IMU–base extrinsics. If format differs (quat, T_sensor_base), convert to GC format `[x,y,z,rx,ry,rz]` (m, rad, T_base_sensor) and either:
    - Put values in `config/gc_kimera.yaml` under `T_base_lidar` and `T_base_imu`, or
    - Write YAML files and set `extrinsics_source: file`, `T_base_lidar_file`, `T_base_imu_file`.
-2. **Estimation:** Use `tools/estimate_lidar_base_extrinsic_rotation_from_ground.py` and `tools/estimate_imu_base_extrinsic_rotation.py` (or `estimate_lidar_base_extrinsic.py`, `estimate_imu_base_extrinsic.py`) on the bag to get rotation/translation, then convert to 6D and put in config.
+2. **Estimation:** Use `tools/estimate_lidar_base_extrinsic_rotation_from_ground.py` and `tools/estimate_imu_base_extrinsic_rotation.py` on the bag to get rotation (and translation for IMU), then put in config. For full LiDAR 6D, use dataset calibration or see archive/legacy_tools/estimate_lidar_base_extrinsic.py (requires ICP stub to run).
 
 After updating extrinsics, run:
 

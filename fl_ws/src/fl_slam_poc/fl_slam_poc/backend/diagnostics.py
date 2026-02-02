@@ -1,5 +1,5 @@
 """
-Stage-0 Per-Scan Diagnostics for Golden Child SLAM v2.
+Stage-0 Per-Scan Diagnostics for Geometric Compositional SLAM v2.
 
 This module provides data structures and utilities for capturing per-scan
 diagnostic data needed for the debugging dashboard.

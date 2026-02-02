@@ -1,11 +1,11 @@
 """
-HypothesisBarycenterProjection operator for Golden Child SLAM v2.
+HypothesisBarycenterProjection operator for Geometric Compositional SLAM v2.
 
 Combines K hypotheses into a single belief for publishing.
 
 Fully vectorized over hypotheses - no Python for-loops in hot path.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5.15
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.15
 """
 
 from __future__ import annotations

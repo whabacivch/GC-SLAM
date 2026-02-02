@@ -1,5 +1,5 @@
 """
-Tests for Golden Child SLAM v2 invariants.
+Tests for Geometric Compositional SLAM v2 invariants.
 
 Verifies that the implementation follows the spec invariants:
 - Chart ID consistency
@@ -7,7 +7,7 @@ Verifies that the implementation follows the spec invariants:
 - Budget enforcement
 - No branching/gating
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
 """
 
 import os

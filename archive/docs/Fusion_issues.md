@@ -1,6 +1,6 @@
 # Fusion Issues (GC v2) — Code/Spec Consistency Notes
 
-This doc is a **code-level sanity check** of whether GC v2 currently fuses **LiDAR + IMU + odom**, and where it diverges from the intent in `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`.
+This doc is a **code-level sanity check** of whether GC v2 currently fuses **LiDAR + IMU + odom**, and where it diverges from the intent in `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`.
 
 ## TL;DR (current working tree)
 
@@ -118,7 +118,7 @@ flowchart LR
 
 ### 2.1 Subscriptions exist (LiDAR + odom + IMU)
 
-`GoldenChildBackend` subscribes to canonical `/gc/sensors/*` topics:
+`GeometricCompositionalBackend` subscribes to canonical `/gc/sensors/*` topics:
 
 - LiDAR `PointCloud2` on `/gc/sensors/lidar_points`
 - odom `nav_msgs/Odometry` on `/gc/sensors/odom`
@@ -174,7 +174,7 @@ The per-scan pipeline is the fixed 15-step sequence described in:
 
 The spec allocates IMU-related state (velocity, biases, time offset, LiDAR–IMU extrinsics) and includes the statement:
 
-- `docs/GOLDEN_CHILD_INTERFACE_SPEC.md:754` (“IMU uncertainty enters deskew UT … and therefore the quadratic evidence.”)
+- `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md:754` (“IMU uncertainty enters deskew UT … and therefore the quadratic evidence.”)
 
 **Clarification:** the spec statement is about **mathematical influence**, not “must subscribe to a ROS IMU topic”. In the current implementation:
 
@@ -244,7 +244,7 @@ These exist in the repo but are not in the GC eval runtime graph:
 
 ### 8.3 Publishers/subsystems that currently go nowhere in GC backend
 
-In `GoldenChildBackend` the following publisher exists but is not (currently) published to:
+In `GeometricCompositionalBackend` the following publisher exists but is not (currently) published to:
 
 - `/gc/certificate` (`self.pub_cert`) — declared but unused in the node’s logic
 

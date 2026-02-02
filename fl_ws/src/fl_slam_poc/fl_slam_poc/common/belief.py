@@ -1,5 +1,5 @@
 """
-Belief representation for Golden Child SLAM v2.
+Belief representation for Geometric Compositional SLAM v2.
 
 The BeliefGaussianInfo dataclass represents a Gaussian belief
 in information form on the augmented tangent space.
@@ -207,7 +207,7 @@ class BeliefGaussianInfo:
     All operations use the declared solve:
         δz* = (L + eps_lift * I)^{-1} h
         
-    Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 2.1
+    Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 2.1
     
     Attributes:
         chart_id: Must be "GC-RIGHT-01"

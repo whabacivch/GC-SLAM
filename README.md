@@ -8,7 +8,7 @@ Embracing uncertainty is a cornerstone of robust robotics and SLAM: we use princ
 
 ## Overview
 
-**Golden Child SLAM v2** is a **strict, branch‑free, fixed‑cost** backend designed for auditability and robustness. The pipeline builds **explicit likelihood‑based evidence** (vMF/Matrix Fisher + Gaussians), fuses in information form, and applies **self‑adaptive noise** at every scan — no gates, no hidden iteration.
+**Geometric Compositional SLAM v2** is a **strict, branch‑free, fixed‑cost** backend designed for auditability and robustness. The pipeline builds **explicit likelihood‑based evidence** (vMF/Matrix Fisher + Gaussians), fuses in information form, and applies **self‑adaptive noise** at every scan — no gates, no hidden iteration.
 
 ### Novelty / Why This Is Different
 
@@ -36,7 +36,7 @@ Embracing uncertainty is a cornerstone of robust robotics and SLAM: we use princ
 
 ## Status
 
-The **primary implementation** is **Golden Child SLAM v2** — a strict, branch-free, fixed-cost SLAM backend. Default evaluation uses the **Kimera** dataset; M3DGR Dynamic01 is archived (see `archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md`).
+The **primary implementation** is **Geometric Compositional SLAM v2** — a strict, branch-free, fixed-cost SLAM backend. Evaluation uses the **Kimera** dataset (see `docs/KIMERA_FRAME_MAPPING.md`).
 
 - **22D augmented state:** pose (6D) + velocity (3D) + gyro bias (3D) + accel bias (3D) + time offset (1D) + LiDAR–IMU extrinsic (6D)
 - **Sensors fused:** LiDAR (Matrix Fisher rotation + planar translation evidence), IMU (time-resolved vMF tilt + gyro rotation + preintegration factor), odometry (pose + twist with kinematic consistency)
@@ -66,7 +66,7 @@ source install/setup.bash
 bash tools/run_and_evaluate_gc.sh
 ```
 
-Uses the Kimera rosbag by default; artifacts go to `results/gc_YYYYMMDD_HHMMSS/` (trajectory, metrics, diagnostics, wiring summary, dashboard). To use M3DGR Dynamic01 instead: `PROFILE=m3dgr bash tools/run_and_evaluate_gc.sh` (see `archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md`).
+Uses the Kimera rosbag; artifacts go to `results/gc_YYYYMMDD_HHMMSS/` (trajectory, metrics, diagnostics, wiring summary, dashboard).
 
 ### Viewing (Rerun, Wayland-friendly)
 
@@ -84,7 +84,7 @@ Or set `rerun_spawn:=true` when launching to spawn the Rerun viewer at startup. 
 bash tools/run_and_evaluate.sh
 ```
 
-Results under `results/m3dgr_YYYYMMDD_HHMMSS/`.
+Results under `results/` (legacy script).
 
 ---
 
@@ -183,10 +183,10 @@ fl_ws/src/fl_slam_poc/
 
 **Primary:** `bash tools/run_and_evaluate_gc.sh`
 
-- Runs SLAM on M3DGR Dynamic01, aligns estimated trajectory to ground truth, computes ATE/RPE and per-axis errors, runs audit-invariant tests, and (if diagnostics are exported) builds a diagnostics dashboard.
+- Runs SLAM on the Kimera rosbag, aligns estimated trajectory to ground truth, computes ATE/RPE and per-axis errors, runs audit-invariant tests, and (if diagnostics are exported) builds a diagnostics dashboard.
 - Outputs: `results/gc_YYYYMMDD_HHMMSS/` — `metrics.txt`, `metrics.csv`, trajectory plots, `estimated_trajectory.tum`, `ground_truth_aligned.tum`, `diagnostics.npz`, `wiring_summary.json`, `audit_invariants.log`.
 
-Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for current gaps and `docs/PIPELINE_TRACE_SINGLE_DOC.md` for a full trace. M3DGR-era z‑drift and trajectory/GT docs are in `archive/docs/` (planar translation/priors/map‑z fix are in code).
+Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for current gaps and `docs/PIPELINE_TRACE_SINGLE_DOC.md` for a full trace.
 
 ---
 
@@ -208,11 +208,11 @@ Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for cu
 | **[ROADMAP.md](ROADMAP.md)** | Priorities and planned work |
 | **docs/BAG_TOPICS_AND_USAGE.md** | Bag topics and pipeline usage (canonical) |
 | **docs/PIPELINE_TRACE_SINGLE_DOC.md** | Single pipeline trace: value-as-object, spine, IMU/odom/LiDAR, belief/IW, z/performance |
-| **docs/GOLDEN_CHILD_INTERFACE_SPEC.md** | GC v2 interface and operator contracts |
+| **docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md** | GC v2 interface and operator contracts |
 | **docs/IMU_BELIEF_MAP_AND_FUSION.md** | Pipeline reference: topics, steps, evidence, fusion |
 | **docs/FRAME_AND_QUATERNION_CONVENTIONS.md** | Frames, quaternions, SE(3) |
 | **docs/PIPELINE_DESIGN_GAPS.md** | Known limitations (cross-sensor consistency, unused covariances, nonlinear approximations) |
-| **archive/docs/** | M3DGR-era: TRACE_Z_EVIDENCE_AND_TRAJECTORY, RAW_MEASUREMENTS_VS_PIPELINE, TRACE_TRAJECTORY_AND_GROUND_TRUTH |
+| **archive/docs/** | Archived dataset/docs (e.g. M3DGR_DYNAMIC01_ARCHIVE) |
 | **docs/PREINTEGRATION_STEP_BY_STEP.md** | IMU preintegration steps (including gravity) |
 | **docs/EVALUATION.md** | Evaluation metrics and workflow |
 | **docs/TESTING.md** | Testing framework |

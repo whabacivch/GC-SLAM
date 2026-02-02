@@ -7,11 +7,11 @@ This document lists all available tools to diagnose coordinate frame issues.
 Run the comprehensive diagnostic:
 ```bash
 # Use venv Python directly (recommended)
-.venv/bin/python tools/diagnose_coordinate_frames.py rosbags/m3dgr/Dynamic01_ros2
+.venv/bin/python tools/diagnose_coordinate_frames.py rosbags/Kimera_Data/ros2/10_14_acl_jackal-005
 
 # Or activate venv first, then python3 will use venv Python
 source .venv/bin/activate
-python3 tools/diagnose_coordinate_frames.py rosbags/m3dgr/Dynamic01_ros2
+python3 tools/diagnose_coordinate_frames.py rosbags/Kimera_Data/ros2/10_14_acl_jackal-005
 ```
 
 This will tell you:
@@ -75,21 +75,9 @@ This will tell you:
 
 ---
 
-### 4. `estimate_lidar_base_extrinsic.py`
+### 4. `estimate_lidar_base_extrinsic.py` (archived)
 
-**Purpose**: Estimate LiDAR extrinsics using hand-eye calibration.
-
-**What it checks**:
-- ICP-based scan-to-scan alignment
-- Compares with odometry/ground truth motion
-- Solves hand-eye calibration problem
-
-**Usage**:
-```bash
-.venv/bin/python tools/estimate_lidar_base_extrinsic.py <bag_path> --base-source odom
-```
-
-**Output**: Estimated `T_base_lidar` transform.
+**Status:** Moved to `archive/legacy_tools/`. Broken: imports `fl_slam_poc.frontend.scan.icp.icp_3d`, which does not exist. Use `estimate_lidar_base_extrinsic_rotation_from_ground.py` for LiDAR rotation from ground plane; for full 6D hand-eye calibration you would need to restore an ICP stub or use another tool.
 
 ---
 
@@ -147,7 +135,7 @@ This will tell you:
 ## Current Known Issues
 
 ### LiDAR Frame Convention
-- **Single source of truth**: `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` (LiDAR subsection). For M3DGR Dynamic01 it states `livox_frame` is **Z-up** and `T_base_lidar` rotation is identity.
+- **Single source of truth**: `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` (LiDAR subsection). For Kimera it states `acl_jackal2/velodyne_link` is **Z-up** and `T_base_lidar` from calibration.
 - **Conflict**: `docs/BAG_TOPICS_AND_USAGE.md` previously said Z-down (generic Livox); reconciled to defer to FRAME_AND_QUATERNION and the diagnostic.
 - **Code**: `T_base_lidar` rotation = `[0, 0, 0]` in `gc_rosbag.launch.py` and `config/gc_unified.yaml` (assumes Z-up).
 - **Evaluation**: If ATE rotation is ~180° with dominant roll error, run `diagnose_coordinate_frames.py`; if it reports Z-down, set `T_base_lidar` rotation to `[3.141593, 0.0, 0.0]` and update the frame doc. See `docs/PIPELINE_DESIGN_GAPS.md` §5.5.
@@ -166,18 +154,18 @@ This will tell you:
 ## Transformation Chain
 
 ### LiDAR Points
-1. **Raw from bag**: Points in `livox_frame` (sensor frame)
-2. **After `livox_converter`**: Still in `livox_frame` (frame_id preserved)
+1. **Raw from bag**: Points in `acl_jackal2/velodyne_link` (sensor frame)
+2. **After passthrough**: Still in `acl_jackal2/velodyne_link` (frame_id preserved)
 3. **In `backend_node.on_lidar()`** (line 556):
    ```python
    pts_base = (self.R_base_lidar @ pts_np.T).T + self.t_base_lidar[None, :]
    ```
-   - Transforms to `base_footprint` frame
+   - Transforms to base frame (Kimera: `acl_jackal2/base`)
    - Formula: `p_base = R_base_lidar @ p_lidar + t_base_lidar`
-4. **In pipeline**: All processing happens in `base_footprint` frame
+4. **In pipeline**: All processing happens in base frame
 
 ### IMU Data
-1. **Raw from bag**: IMU data in `livox_frame`
+1. **Raw from bag**: IMU data in `acl_jackal2/forward_imu_optical_frame`
 2. **In `imu_normalizer`**: Frame ID preserved (no transform applied)
 3. **In `backend_node`**: IMU samples are rotated using `R_base_imu` before preintegration
    - Location: Check `backend_node.py` for IMU transformation

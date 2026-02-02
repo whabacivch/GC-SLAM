@@ -1,5 +1,5 @@
 """
-Odometry twist evidence operators for Golden Child SLAM v2.
+Odometry twist evidence operators for Geometric Compositional SLAM v2.
 
 These operators add kinematic constraints from wheel odometry twist (velocity):
 1. Body velocity factor - constrains linear velocity

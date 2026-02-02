@@ -1,5 +1,5 @@
 #!/bin/bash
-# Golden Child SLAM v2: Run + Evaluate
+# Geometric Compositional SLAM v2: Run + Evaluate
 # Tests the branch-free implementation against ground truth
 #
 # Status bar shows: [STAGE] elapsed time | sensor counts | health
@@ -19,43 +19,24 @@ BAG_PLAY_RATE="${BAG_PLAY_RATE:-0.25}"
 BAG_DURATION="${BAG_DURATION:-60}"
 
 # ============================================================================
-# Profile: kimera (default) | m3dgr. Default is Kimera; M3DGR Dynamic01 is archived
-# (see archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md). Use PROFILE=m3dgr if you have the bag.
-PROFILE="${PROFILE:-kimera}"
-if [ "$PROFILE" = "m3dgr" ]; then
-  # Archived: M3DGR Dynamic01 — use only if bag is present; see archive/docs/M3DGR_DYNAMIC01_ARCHIVE.md
-  BAG_PATH="${BAG_PATH:-$PROJECT_ROOT/rosbags/m3dgr/Dynamic01_ros2}"
-  GT_FILE="${GT_FILE:-$PROJECT_ROOT/rosbags/m3dgr/Dynamic01.txt}"
-  CONFIG_PATH="${CONFIG_PATH:-}"
-  BODY_CALIB="${BODY_CALIB:-$PROJECT_ROOT/config/m3dgr_body_T_wheel.yaml}"
-  ODOM_FRAME="${ODOM_FRAME:-odom}"
-  BASE_FRAME="${BASE_FRAME:-base_footprint}"
-  POINTCLOUD_LAYOUT="${POINTCLOUD_LAYOUT:-vlp16}"
-  LIDAR_SIGMA_MEAS="${LIDAR_SIGMA_MEAS:-0.01}"
-  T_BASE_LIDAR="${T_BASE_LIDAR:-}"
-  T_BASE_IMU="${T_BASE_IMU:-}"
-  IMU_ACCEL_SCALE="${IMU_ACCEL_SCALE:-9.81}"
-else
-  # Default: Kimera; see docs/KIMERA_FRAME_MAPPING.md
-  BAG_PATH="${BAG_PATH:-$PROJECT_ROOT/rosbags/Kimera_Data/ros2/10_14_acl_jackal-005}"
-  GT_FILE="${GT_FILE:-$PROJECT_ROOT/rosbags/Kimera_Data/ground_truth/1014/acl_jackal_gt.tum}"
-  CONFIG_PATH="$PROJECT_ROOT/fl_ws/src/fl_slam_poc/config/gc_kimera.yaml"
-  BODY_CALIB="${BODY_CALIB:-}"  # Optional for Kimera; empty = no body transform
-  ODOM_FRAME="${ODOM_FRAME:-acl_jackal2/odom}"
-  BASE_FRAME="${BASE_FRAME:-acl_jackal2/base}"
-  POINTCLOUD_LAYOUT="${POINTCLOUD_LAYOUT:-vlp16}"
-  LIDAR_SIGMA_MEAS="${LIDAR_SIGMA_MEAS:-0.001}"
-  BAG_DURATION="${BAG_DURATION:-60}"
-  T_BASE_LIDAR="${T_BASE_LIDAR:-[-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]}"
-  T_BASE_IMU="${T_BASE_IMU:-[-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.000000]}"
-  IMU_ACCEL_SCALE="${IMU_ACCEL_SCALE:-1.0}"
-fi
-# When CONFIG_PATH is empty (M3DGR), launch uses its default (gc_unified.yaml)
+# Dataset: Kimera (rosbags/Kimera_Data/). See docs/KIMERA_FRAME_MAPPING.md.
+# ============================================================================
+BAG_PATH="${BAG_PATH:-$PROJECT_ROOT/rosbags/Kimera_Data/ros2/10_14_acl_jackal-005}"
+GT_FILE="${GT_FILE:-$PROJECT_ROOT/rosbags/Kimera_Data/ground_truth/1014/acl_jackal_gt.tum}"
+CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/fl_ws/src/fl_slam_poc/config/gc_kimera.yaml}"
+ODOM_FRAME="${ODOM_FRAME:-acl_jackal2/odom}"
+BASE_FRAME="${BASE_FRAME:-acl_jackal2/base}"
+POINTCLOUD_LAYOUT="${POINTCLOUD_LAYOUT:-vlp16}"
+LIDAR_SIGMA_MEAS="${LIDAR_SIGMA_MEAS:-0.001}"
+BAG_DURATION="${BAG_DURATION:-60}"
+T_BASE_LIDAR="${T_BASE_LIDAR:-[-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]}"
+T_BASE_IMU="${T_BASE_IMU:-[-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.000000]}"
+IMU_ACCEL_SCALE="${IMU_ACCEL_SCALE:-1.0}"
 [ -n "$CONFIG_PATH" ] && CONFIG_ARG="config_path:=$CONFIG_PATH" || CONFIG_ARG=""
 
 EST_FILE="/tmp/gc_slam_trajectory.tum"
 EST_BODY="/tmp/gc_slam_trajectory_body.tum"
-GT_ALIGNED="/tmp/m3dgr_ground_truth_aligned.tum"
+GT_ALIGNED="/tmp/gt_ground_truth_aligned.tum"
 WIRING_SUMMARY="/tmp/gc_wiring_summary.json"
 DIAGNOSTICS_FILE="$PROJECT_ROOT/results/gc_slam_diagnostics.npz"
 RESULTS_DIR="$PROJECT_ROOT/results/gc_$(date +%Y%m%d_%H%M%S)"
@@ -142,7 +123,7 @@ trap cleanup EXIT
 # ============================================================================
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║       ${CYAN}GOLDEN CHILD SLAM v2${NC}${BOLD} — Evaluation Pipeline            ║${NC}"
+echo -e "${BOLD}║       ${CYAN}GEOMETRIC COMPOSITIONAL SLAM v2${NC}${BOLD} — Evaluation Pipeline            ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "Bag:     ${CYAN}$(basename "$BAG_PATH")${NC} (play rate ${BAG_PLAY_RATE}, first ${BAG_DURATION}s)"
@@ -161,7 +142,7 @@ print_stage 0 5 "Preflight Checks"
 print_ok "Python venv selected: $VENV_PATH"
 print_ok "Using python: $PYTHON"
 
-# Check JAX + Golden Child imports
+# Check JAX + Geometric Compositional imports
 # Run with a clean PYTHONPATH so system Python packages can't shadow venv wheels
 # (common when ROS setup scripts have been sourced in the parent shell).
 env -u PYTHONPATH "$PYTHON" - <<'PY'
@@ -189,7 +170,7 @@ except Exception as e:
 try:
     from fl_slam_poc.backend.pipeline import RuntimeManifest
     from fl_slam_poc.common.belief import BeliefGaussianInfo
-    print("  Golden Child imports: OK")
+    print("  Geometric Compositional imports: OK")
 except Exception as e:
     print(f"ERROR: Import failed: {e}")
     import traceback; traceback.print_exc()
@@ -242,7 +223,7 @@ print_ok "Package built successfully"
 # ============================================================================
 # STAGE 2: RUN SLAM
 # ============================================================================
-print_stage 2 5 "Run Golden Child SLAM"
+print_stage 2 5 "Run Geometric Compositional SLAM"
 
 # ROS environment (use domain 1 to avoid CycloneDDS "free participant index" exhaustion on domain 0)
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
@@ -292,6 +273,8 @@ LAUNCH_OPTS=(
   lidar_sigma_meas:="$LIDAR_SIGMA_MEAS"
   odom_belief_diagnostic_file:="$RESULTS_DIR/odom_belief_diagnostic.csv"
   odom_belief_diagnostic_max_scans:="200"
+  rerun_recording_path:="$RESULTS_DIR/gc_slam.rrd"
+  splat_export_path:="$RESULTS_DIR/splat_export.npz"
 )
 [ -n "$CONFIG_ARG" ] && LAUNCH_OPTS+=( "$CONFIG_ARG" )
 [ -n "$T_BASE_LIDAR" ] && LAUNCH_OPTS+=( "T_base_lidar:=$T_BASE_LIDAR" )
@@ -410,18 +393,8 @@ echo "    odom=$LAST_ODOM  scan=$LAST_SCAN  imu=$LAST_IMU"
 # ============================================================================
 print_stage 3 5 "Evaluate Trajectory"
 
-# Transform estimate to body frame (M3DGR GT is in body/camera_imu frame)
-echo "  Transforming estimate to body frame..."
-if [ -f "$BODY_CALIB" ]; then
-  env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/transform_estimate_to_body_frame.py" \
-    "$EST_FILE" \
-    "$EST_BODY" \
-    --calib "$BODY_CALIB" 2>&1 | sed 's/^/    /'
-  EST_FOR_EVAL="$EST_BODY"
-else
-  print_warn "Body calib not found ($BODY_CALIB); evaluating wheel-frame estimate vs GT"
-  EST_FOR_EVAL="$EST_FILE"
-fi
+# Kimera: estimate and GT are in same body/base convention; no body-frame transform.
+EST_FOR_EVAL="$EST_FILE"
 
 # Align ground truth to estimate
 echo "  Aligning ground truth..."
@@ -433,7 +406,7 @@ env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/align_ground_truth.py" \
 # Create op_report with all required metrics fields
 OP_REPORT_FILE="$RESULTS_DIR/op_report.jsonl"
 cat > "$OP_REPORT_FILE" << 'OPREPORT'
-{"name":"GaussianPredictSE3","exact":false,"approximation_triggers":["GoldenChild"],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":true,"metrics":{"state_dim":22,"linearization_point":"identity","process_noise_trace":0.001},"timestamp":0}
+{"name":"GaussianPredictSE3","exact":false,"approximation_triggers":["GeometricCompositional"],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":true,"metrics":{"state_dim":22,"linearization_point":"identity","process_noise_trace":0.001},"timestamp":0}
 {"name":"AnchorCreate","exact":true,"approximation_triggers":[],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":false,"metrics":{"anchor_id":"gc_anchor","dt_sec":0.0,"timestamp_weight":1.0},"timestamp":0}
 {"name":"LoopFactorPublished","exact":false,"approximation_triggers":["ICP"],"family_in":"gaussian","family_out":"gaussian","closed_form":false,"domain_projection":true,"metrics":{"anchor_id":"gc_anchor","weight":1.0,"mse":0.01,"iterations":10,"converged":true,"point_source":"mid360"},"timestamp":0}
 {"name":"LoopFactorRecomposition","exact":false,"approximation_triggers":["Frobenius"],"family_in":"gaussian","family_out":"gaussian","closed_form":true,"domain_projection":true,"metrics":{"anchor_id":"gc_anchor","weight":1.0,"innovation_norm":0.01},"timestamp":0}
@@ -474,6 +447,7 @@ print_ok "Evaluation complete"
 print_stage 4 5 "Results Summary"
 
 echo ""
+echo -e "  ${BOLD}Rosbag:${NC} $(basename "$BAG_PATH") (first ${BAG_DURATION}s) | ${BOLD}GT:${NC} $(basename "$GT_FILE")"
 if [ -f "$RESULTS_DIR/metrics.txt" ]; then
     # Extract key metrics from SUMMARY (parsable) section
     ATE_TRANS=$(grep "ATE translation RMSE" "$RESULTS_DIR/metrics.txt" | head -1 | awk '{print $NF}')
@@ -483,6 +457,12 @@ if [ -f "$RESULTS_DIR/metrics.txt" ]; then
     echo -e "  ${BOLD}ATE translation RMSE (m):${NC}   ${CYAN}${ATE_TRANS:-N/A}${NC}"
     echo -e "  ${BOLD}ATE rotation RMSE (deg):${NC}   ${CYAN}${ATE_ROT:-N/A}${NC}"
     echo -e "  ${BOLD}RPE translation @ 1m (m/m):${NC} ${CYAN}${RPE_1M:-N/A}${NC}"
+    # If ATE/RPE are huge, likely GT vs estimate frame/axis mismatch (e.g. different Z-up vs planar)
+    if [ -n "$ATE_TRANS" ] && [ -n "$RPE_1M" ]; then
+        if awk "BEGIN { exit !($ATE_TRANS > 10 || $RPE_1M > 1) }" 2>/dev/null; then
+            echo -e "  ${YELLOW}Note: Very large ATE/RPE often mean GT and estimate use different frame or axis conventions. See docs/KIMERA_FRAME_MAPPING.md.${NC}"
+        fi
+    fi
 fi
 
 # Display wiring summary if available
@@ -607,5 +587,26 @@ if [ -f "$RESULTS_DIR/diagnostics.npz" ]; then
         print_ok "Dashboard opened in browser"
     else
         print_warn "Could not auto-open browser. Open manually: ${CYAN}$DASHBOARD_OUT${NC}"
+    fi
+
+    # Open Rerun recording if present (3D trajectory + map)
+    RERUN_RRD="$RESULTS_DIR/gc_slam.rrd"
+    if [ -f "$RERUN_RRD" ] && command -v rerun >/dev/null 2>&1; then
+        rerun "$RERUN_RRD" 2>/dev/null &
+        print_ok "Rerun recording opened: ${CYAN}$RERUN_RRD${NC}"
+    elif [ -f "$RERUN_RRD" ]; then
+        print_warn "Rerun recording saved: ${CYAN}$RERUN_RRD${NC} (install rerun and run: rerun \"$RERUN_RRD\")"
+    fi
+
+    # JAXsplat visualization: render splat export and open image
+    SPLAT_NPZ="$RESULTS_DIR/splat_export.npz"
+    if [ -f "$SPLAT_NPZ" ]; then
+        SPLAT_OUT="$RESULTS_DIR/splat_render.png"
+        if env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/view_splat_jaxsplat.py" \
+            "$SPLAT_NPZ" --output "$SPLAT_OUT" --open-image 2>/dev/null; then
+            print_ok "JAXsplat render saved: ${CYAN}$SPLAT_OUT${NC}"
+        else
+            print_warn "JAXsplat render skipped (install jaxsplat or check logs). Splat export: ${CYAN}$SPLAT_NPZ${NC}"
+        fi
     fi
 fi

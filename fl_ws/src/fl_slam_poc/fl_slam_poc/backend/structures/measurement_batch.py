@@ -1,5 +1,5 @@
 """
-MeasurementBatch: Unified measurement primitive structure for Golden Child SLAM v2.
+MeasurementBatch: Unified measurement primitive structure for Geometric Compositional SLAM v2.
 
 Reference: .cursor/plans/visual_lidar_rendering_integration_*.plan.md Section 4
 

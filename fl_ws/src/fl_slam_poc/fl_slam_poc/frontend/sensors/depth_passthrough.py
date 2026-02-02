@@ -41,21 +41,54 @@ def main():
     import numpy as np
 
     def cb(msg: Image):
-        if scale_mm_to_m and msg.encoding in ("16UC1", "16SC1"):
-            # 16-bit mm -> 32FC1 m (step is bytes per row; 16UC1 => step = width*2)
-            data = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.step // 2)
+        height = int(msg.height)
+        width = int(msg.width)
+        if height <= 0 or width <= 0:
+            node.get_logger().warn(
+                "Depth passthrough: invalid image size %sx%s" % (height, width)
+            )
+            return
+        if msg.encoding in ("16UC1", "16SC1"):
+            if not scale_mm_to_m:
+                node.get_logger().error(
+                    "Depth passthrough: received %s but scale_mm_to_m=False; "
+                    "depth output must be 32FC1 for backend" % msg.encoding
+                )
+                return
+            # 16-bit mm -> 32FC1 m (respect step; slice to width if padding exists)
+            row_elems = max(1, int(msg.step) // 2)
+            data = np.frombuffer(msg.data, dtype=np.uint16).reshape(height, row_elems)
+            data = data[:, :width]
             out = (data.astype(np.float32) / 1000.0)
             out_msg = Image()
             out_msg.header = msg.header
-            out_msg.height = msg.height
-            out_msg.width = msg.width
+            out_msg.height = height
+            out_msg.width = width
             out_msg.encoding = "32FC1"
             out_msg.is_bigendian = 0
-            out_msg.step = out_msg.width * 4
-            out_msg.data = out.astype(np.float32).tobytes()
+            out_msg.step = width * 4
+            out_msg.data = out.tobytes()
             pub.publish(out_msg)
-        else:
-            pub.publish(msg)
+            return
+        if msg.encoding == "32FC1":
+            # Ensure packed rows (no padding) for backend reshape.
+            row_elems = max(1, int(msg.step) // 4)
+            data = np.frombuffer(msg.data, dtype=np.float32).reshape(height, row_elems)
+            data = data[:, :width]
+            out_msg = Image()
+            out_msg.header = msg.header
+            out_msg.height = height
+            out_msg.width = width
+            out_msg.encoding = "32FC1"
+            out_msg.is_bigendian = 0
+            out_msg.step = width * 4
+            out_msg.data = data.astype(np.float32).tobytes()
+            pub.publish(out_msg)
+            return
+        node.get_logger().error(
+            "Depth passthrough: unsupported encoding %r (expected 16UC1 or 32FC1)"
+            % msg.encoding
+        )
 
     sub = node.create_subscription(Image, depth_in, cb, qos_sensor)
     node.get_logger().info(

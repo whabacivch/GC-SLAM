@@ -4,11 +4,11 @@ These rules apply only to this project. Other projects have their own rules.
 
 ## Project Intent
 - Build a Frobenius–Legendre compositional inference backend for dynamic SLAM.
-- Implement and verify **Golden Child SLAM v2** as a strict, branch-free, fixed-cost SLAM backend.
+- Implement and verify **Geometric Compositional SLAM v2** as a strict, branch-free, fixed-cost SLAM backend.
 
 ## Target Endstate (GC v2 Full Implementation)
 
-The current pipeline is LiDAR-only with fixed noise parameters. The target endstate implements the full spec from `docs/GOLDEN_CHILD_INTERFACE_SPEC.md` including:
+The current pipeline is LiDAR-only with fixed noise parameters. The target endstate implements the full spec from `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md` including:
 
 ### Adaptive Noise (Inverse-Wishart)
 - **Process noise Q**: Per-block Inverse-Wishart states (rot, trans, vel, biases, dt, extrinsic) with conjugate updates from innovation residuals.
@@ -36,7 +36,7 @@ The current pipeline is LiDAR-only with fixed noise parameters. The target endst
 - Branch-free: IW updates happen every scan regardless of "convergence".
 
 ## Canonical References (Do Not Drift)
-- Golden Child strict interface/spec anchor: `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`
+- Geometric Compositional strict interface/spec anchor: `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`
 - Self-adaptive constraints: `docs/Self-Adaptive Systems Guide.md`
 - Math reference: `docs/Comprehensive Information Geometry.md`
 - **Build-by-construction anchors** (conventions and pipeline written first; implementation and tracing must align):
@@ -92,7 +92,7 @@ The root failure mode to prevent is: *multiple math paths silently coexist*, mak
 - `fl_slam_poc/backend/`: inference + fusion + kernels; outputs (trajectory, state, rendering) live in backend (e.g. `backend/rendering.py`).
 
 ## Operator Reporting (Required)
-- Every operator returns `(result, CertBundle, ExpectedEffect)` per `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`.
+- Every operator returns `(result, CertBundle, ExpectedEffect)` per `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`.
 - `CertBundle` must report: `exact`, `approximation_triggers`, `family_in/out` (where applicable), `closed_form`, `solver_used`, `frobenius_applied`.
 - Enforcement rule: `approximation_triggers != ∅` ⇒ `frobenius_applied == True` (no exceptions).
 

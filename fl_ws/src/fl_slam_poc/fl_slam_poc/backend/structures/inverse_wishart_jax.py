@@ -1,5 +1,5 @@
 """
-Inverse-Wishart state containers (arrays-only) for Golden Child SLAM v2.
+Inverse-Wishart state containers (arrays-only) for Geometric Compositional SLAM v2.
 
 This module defines JAX-pytree-friendly containers for adaptive noise.
 All structures here are arrays-only and safe to pass through @jax.jit codepaths.

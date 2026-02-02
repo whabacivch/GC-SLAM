@@ -1,10 +1,10 @@
 """
-Bin atlas and map structures for Golden Child SLAM v2 (ARCHIVED).
+Bin atlas and map structures for Geometric Compositional SLAM v2 (ARCHIVED).
 
 ARCHIVED: Not importable by fl_slam_poc. PrimitiveMap is the canonical map;
 bin-based pose evidence and MapBinStats are no longer used.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Sections 4.1, 4.2
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Sections 4.1, 4.2
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ class MapBinStats:
     All statistics are stored as sufficient statistics that can be
     additively updated without losing information.
 
-    Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 4.2
+    Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 4.2
     """
     # Directional sufficient stats
     S_dir: jnp.ndarray  # (B_BINS, 3) resultant vectors Σ w u

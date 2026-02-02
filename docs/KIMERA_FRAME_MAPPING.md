@@ -1,6 +1,6 @@
 # Kimera Dataset Frame Mapping (GC v2)
 
-This document is the **single source of truth** for mapping Kimera dataset frames to GC v2 parameters. Frame names and conventions were taken from the Kimera bag sample summary `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005_sample25.md` (first-25-messages inspection). When a physical Kimera ROS 2 bag is available, use **[KIMERA_BAG_INSPECTION.md](KIMERA_BAG_INSPECTION.md)** for the full inspection checklist (frames, first-N messages, Z-up/Z-down, extrinsics, timing); run `tools/validate_frame_conventions.py` or `tools/inspect_rosbag_deep.py` to confirm or update frame values.
+This document is the **single source of truth** for mapping Kimera dataset frames to GC v2 parameters. For **where calibration and frame info live** in the Kimera bag directory and how to fix evaluation alignment, see [KIMERA_CALIBRATION_AND_FRAME.md](KIMERA_CALIBRATION_AND_FRAME.md). Frame names and conventions were taken from the Kimera bag sample summary `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005_sample25.md` (first-25-messages inspection). When a physical Kimera ROS 2 bag is available, use **[KIMERA_BAG_INSPECTION.md](KIMERA_BAG_INSPECTION.md)** for the full inspection checklist (frames, first-N messages, Z-up/Z-down, extrinsics, timing); run `tools/validate_frame_conventions.py` or `tools/inspect_rosbag_deep.py` to confirm or update frame values.
 
 **Reference:** [FRAME_AND_QUATERNION_CONVENTIONS.md](FRAME_AND_QUATERNION_CONVENTIONS.md) for GC internal conventions (Z-up world, base planar, T_{parent<-child}).
 
@@ -15,7 +15,7 @@ This document is the **single source of truth** for mapping Kimera dataset frame
 | **LiDAR / pointcloud frame** | `acl_jackal2/velodyne_link` | `/acl_jackal/lidar_points` `header.frame_id` |
 | **IMU frame** | `acl_jackal2/forward_imu_optical_frame` | `/acl_jackal/forward/imu` `header.frame_id` |
 
-- **Odometry:** Pose is `T_{odom_frame <- base_frame}` = `T_{acl_jackal2/odom <- acl_jackal2/base}`. Same semantics as M3DGR; do not invert at ingest.
+- **Odometry:** Pose is `T_{odom_frame <- base_frame}` = `T_{acl_jackal2/odom <- acl_jackal2/base}`. Do not invert at ingest.
 - **LiDAR:** Points are in `acl_jackal2/velodyne_link`; extrinsics `T_base_lidar` = T_{base <- velodyne_link}.
 - **IMU:** Measurements are in `acl_jackal2/forward_imu_optical_frame`; extrinsics `T_base_imu` = T_{base <- imu_frame}.
 
@@ -102,7 +102,7 @@ Sensor hub input topics (Kimera):
 
 ## Config options (dataset / noise)
 
-- **lidar_sigma_meas:** Scalar (m²) isotropic LiDAR measurement prior. Kimera/VLP-16: `1e-3`; M3DGR: `0.01`.
+- **lidar_sigma_meas:** Scalar (m²) isotropic LiDAR measurement prior. Kimera VLP-16: `1e-3`.
 - **extrinsics_source:** `inline` (use T_base_lidar, T_base_imu from config) | `file` (load from T_base_lidar_file, T_base_imu_file).
 - **use_imu_message_covariance:** (Optional) When `true`, derive Sigma_g / Sigma_a from first N IMU messages (units and fallback documented in pipeline). When `false`, use configured/datasheet priors only. No heuristic auto-switch.
 

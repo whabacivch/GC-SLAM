@@ -1,10 +1,10 @@
 """
-Golden Child SLAM v2 Backend Node.
+Geometric Compositional SLAM v2 Backend Node.
 
 Actually uses the GC operators to process LiDAR scans.
 This is NOT passthrough - it runs the full 14-step pipeline.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
 """
 
 import json
@@ -308,9 +308,9 @@ def parse_pointcloud2_vlp16(
     )
 
 
-class GoldenChildBackend(Node):
+class GeometricCompositionalBackend(Node):
     """
-    Golden Child SLAM v2 Backend.
+    Geometric Compositional SLAM v2 Backend.
     
     Actually runs the 14-step pipeline on each LiDAR scan.
     """
@@ -323,7 +323,7 @@ class GoldenChildBackend(Node):
         self._init_ros()
         self._publish_runtime_manifest()
 
-        self.get_logger().info("Golden Child SLAM v2 Backend initialized - PIPELINE ENABLED")
+        self.get_logger().info("Geometric Compositional SLAM v2 Backend initialized - PIPELINE ENABLED")
 
     def _declare_parameters(self):
         """Declare ROS parameters."""
@@ -335,6 +335,7 @@ class GoldenChildBackend(Node):
         self.declare_parameter("imu_topic", "/gc/sensors/imu")
         self.declare_parameter("trajectory_export_path", "/tmp/gc_slam_trajectory.tum")
         self.declare_parameter("diagnostics_export_path", "results/gc_slam_diagnostics.npz")
+        self.declare_parameter("splat_export_path", "")
         self.declare_parameter("status_check_period_sec", 5.0)
         self.declare_parameter("forgetting_factor", 0.99)
         # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] rotvec (radians).
@@ -344,7 +345,7 @@ class GoldenChildBackend(Node):
         self.declare_parameter("T_base_imu_file", "")
         self.declare_parameter("T_base_lidar", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.declare_parameter("T_base_imu", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        # LiDAR measurement noise prior (m² isotropic). Kimera/VLP-16: 1e-3; M3DGR: 0.01.
+        # LiDAR measurement noise prior (m² isotropic). Kimera VLP-16: 1e-3.
         self.declare_parameter("lidar_sigma_meas", 0.01)
         # When true, derive Sigma_g/Sigma_a from first N IMU messages (units/fallback doc'd). When false, use priors only.
         self.declare_parameter("use_imu_message_covariance", False)
@@ -379,7 +380,7 @@ class GoldenChildBackend(Node):
         self.declare_parameter("rerun_spawn", False)
 
     def _init_state(self):
-        """Initialize Golden Child state."""
+        """Initialize Geometric Compositional state."""
         # Pipeline configuration
         self.config = PipelineConfig()
         
@@ -700,7 +701,7 @@ class GoldenChildBackend(Node):
         manifest_dict = manifest.to_dict()
         
         self.get_logger().info("=" * 60)
-        self.get_logger().info("GOLDEN CHILD RUNTIME MANIFEST")
+        self.get_logger().info("GEOMETRIC COMPOSITIONAL RUNTIME MANIFEST")
         self.get_logger().info("=" * 60)
         for key, value in manifest_dict.items():
             self.get_logger().info(f"  {key}: {value}")
@@ -755,8 +756,8 @@ class GoldenChildBackend(Node):
         # Convert to SE3 pose [trans, rotvec]
         #
         # IMPORTANT (frame convention, by construction):
-        # - msg.header.frame_id is the parent frame (e.g., odom_combined)
-        # - msg.child_frame_id is the child frame (e.g., base_footprint)
+        # - msg.header.frame_id is the parent frame (e.g., acl_jackal2/odom)
+        # - msg.child_frame_id is the child frame (e.g., acl_jackal2/base)
         # - ROS Odometry pose encodes T_{parent<-child} in the usual rigid-transform form:
         #       p_parent = R_parent_child * p_child + t_parent_child
         #   This matches se3_jax/se3_compose convention (t_out = t_a + R_a @ t_b).
@@ -764,8 +765,8 @@ class GoldenChildBackend(Node):
         # Therefore: DO NOT invert here. Downstream code treats odom_pose as a pose in the
         # parent/world frame of the body, consistent with LiDAR/Wahba and IMU operators.
         #
-        # Planar robot: wheel odom does not observe Z (M3DGR bag has garbage Z ~30m, cov ~1e6).
-        # By construction our state body frame is `base_footprint`, so base height is ~0.
+        # Planar robot: wheel odom often does not observe Z (cov ~1e6 for z/roll/pitch).
+        # By construction our state body frame is the configured base_frame, so base height is ~0.
         # Use the planar Z reference (GC_PLANAR_Z_REF) so anchor and trajectory are not polluted.
         z_planar = float(constants.GC_PLANAR_Z_REF)
         odom_pose_absolute = se3_from_rotvec_trans(
@@ -845,8 +846,14 @@ class GoldenChildBackend(Node):
         """Store latest RGB from C++ image_decompress output (rgb8 H×W×3); view only, no OpenCV."""
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         try:
-            # Contract: C++ node publishes rgb8; step = width*3
-            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3).copy()
+            # Contract: C++ node publishes rgb8; respect step in case of row padding.
+            height = int(msg.height)
+            width = int(msg.width)
+            if height <= 0 or width <= 0:
+                raise ValueError(f"invalid image size {height}x{width}")
+            row_elems = max(1, int(msg.step) // 3)
+            data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, row_elems, 3)
+            rgb = data[:, :width, :].copy()
             self._latest_rgb = (stamp_sec, rgb)
         except Exception as e:
             self.get_logger().warn("Camera RGB buffer view failed: %s" % e)
@@ -856,7 +863,15 @@ class GoldenChildBackend(Node):
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         try:
             # Contract: canonical depth is always 32FC1 in meters (C++ or depth_passthrough)
-            depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width).astype(np.float64)
+            if msg.encoding != "32FC1":
+                raise ValueError(f"depth encoding must be 32FC1; got {msg.encoding!r}")
+            height = int(msg.height)
+            width = int(msg.width)
+            if height <= 0 or width <= 0:
+                raise ValueError(f"invalid image size {height}x{width}")
+            row_elems = max(1, int(msg.step) // 4)
+            data = np.frombuffer(msg.data, dtype=np.float32).reshape(height, row_elems)
+            depth = data[:, :width].astype(np.float64)
             self._latest_depth = (stamp_sec, depth)
         except Exception as e:
             self.get_logger().warn("Camera depth buffer view failed: %s" % e)
@@ -1399,12 +1414,42 @@ class GoldenChildBackend(Node):
             except Exception as e:
                 self.get_logger().warn(f"Failed to save diagnostics: {e}")
 
+        # Export primitive map for post-run JAXsplat (or other) visualization
+        splat_path = str(self.get_parameter("splat_export_path").value).strip()
+        if splat_path and self.primitive_map is not None and self.primitive_map.count > 0:
+            try:
+                import os
+                from fl_slam_poc.backend.structures.primitive_map import extract_primitive_map_view
+                view = extract_primitive_map_view(self.primitive_map)
+                n = view.count
+                # Convert to numpy for NPZ (JAX arrays may be on device)
+                positions = np.asarray(view.positions)
+                covariances = np.asarray(view.covariances)
+                colors = np.asarray(view.colors) if view.colors is not None else np.zeros((n, 3), dtype=np.float64)
+                weights = np.asarray(view.weights)
+                directions = np.asarray(view.directions)
+                kappas = np.asarray(view.kappas)
+                os.makedirs(os.path.dirname(splat_path) or ".", exist_ok=True)
+                np.savez_compressed(
+                    splat_path,
+                    positions=positions,
+                    covariances=covariances,
+                    colors=colors,
+                    weights=weights,
+                    directions=directions,
+                    kappas=kappas,
+                    n=n,
+                )
+                self.get_logger().info(f"Splat export saved: {splat_path} ({n} primitives)")
+            except Exception as e:
+                self.get_logger().warn(f"Failed to save splat export: {e}")
+
         super().destroy_node()
 
 
 def main():
     rclpy.init()
-    node = GoldenChildBackend()
+    node = GeometricCompositionalBackend()
     node.get_logger().info("Backend node created, entering spin loop...")
     
     # Use MultiThreadedExecutor to allow IMU callbacks to run while lidar pipeline processes.

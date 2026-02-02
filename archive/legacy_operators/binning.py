@@ -1,9 +1,9 @@
 """
-Binning operators for Golden Child SLAM v2.
+Binning operators for Geometric Compositional SLAM v2.
 
 Soft assignment and moment matching for directional bins.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Sections 5.4, 5.5
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Sections 5.4, 5.5
 """
 
 from __future__ import annotations

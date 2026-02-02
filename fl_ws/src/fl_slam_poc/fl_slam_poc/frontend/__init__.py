@@ -1,5 +1,5 @@
 """
-Frontend package for Golden Child SLAM v2.
+Frontend package for Geometric Compositional SLAM v2.
 
 Architecture:
     Rosbag → gc_sensor_hub (pointcloud_passthrough, odom_normalizer, imu_normalizer, dead_end_audit)

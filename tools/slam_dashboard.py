@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Golden Child SLAM v2 diagnostics dashboard.
+Geometric Compositional SLAM v2 diagnostics dashboard.
 
 Loads an NPZ from a SLAM run and builds an interactive HTML dashboard (Plotly.js from CDN).
 Panels: A = timeline (conditioning, MF, posterior health), B = L_pose6 heatmap, C = 3D trajectory, D = factor influence + top-K bins.
@@ -637,7 +637,7 @@ def create_full_dashboard(
     </style>
 </head>
 <body>
-    <h1>Golden Child SLAM v2 Diagnostics Dashboard</h1>
+    <h1>Geometric Compositional SLAM v2 Diagnostics Dashboard</h1>
     <p class="subtitle">Interactive per-scan pipeline diagnostics | {n_scans} scans loaded</p>
     <p class="subtitle" id="minimal-tape-notice" style="display: none; color: #f7b731;">Minimal tape mode: trajectory and some panels (MF, bins, factor influence) not recorded. Use save_full_diagnostics=True for full dashboard.</p>
 
@@ -1327,7 +1327,7 @@ def create_full_dashboard(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Golden Child SLAM v2 Debugging Dashboard"
+        description="Geometric Compositional SLAM v2 Debugging Dashboard"
     )
     parser.add_argument(
         "diagnostics_file",

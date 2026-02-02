@@ -111,4 +111,4 @@ Many open-source tools (ROS velodyne driver, PCL) have built-in VLP-16 support w
 ## Relation to This Project
 
 - **Kimera-Multi-Data 10_14** (Campus-Outdoor): LiDAR point clouds are from **Velodyne VLP-16** (`/xxx/lidar_points`, `sensor_msgs/PointCloud2`). See `rosbags/Kimera_Data/TOPICS.md` and `PREP_README.md`.
-- **M3DGR** (current GC eval): Uses **Livox MID-360**, not VLP-16. See `docs/BAG_TOPICS_AND_USAGE.md`.
+- **Kimera** (current GC eval): Uses **Velodyne VLP-16** (`/acl_jackal/lidar_points`). See `docs/BAG_TOPICS_AND_USAGE.md` and [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md).

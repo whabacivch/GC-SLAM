@@ -1,10 +1,10 @@
 """
-Certificate structures for Golden Child SLAM v2.
+Certificate structures for Geometric Compositional SLAM v2.
 
 Certificates provide the audit trail for all approximations
 and numerical stabilizations.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 2.3
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 2.3
 """
 
 from __future__ import annotations

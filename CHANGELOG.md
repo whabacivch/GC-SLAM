@@ -4,6 +4,54 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-02-02: Kimera-only cleanup — remove non-Kimera dataset references
+
+- **Dataset:** Project uses only the Kimera rosbag/dataset. All M3DGR/Dynamic01 references removed from active code and docs.
+- **run_and_evaluate_gc.sh:** Single dataset path (Kimera); removed PROFILE=m3dgr and body-frame transform step. GT_ALIGNED renamed to /tmp/gt_ground_truth_aligned.tum.
+- **Launch:** Default odom_frame/base_frame and T_base_lidar/T_base_imu set to Kimera values (acl_jackal2/odom, acl_jackal2/base; lidar_sigma_meas 0.001).
+- **Archive:** config/m3dgr_body_T_wheel.yaml and tools/transform_estimate_to_body_frame.py moved to archive/config/ and archive/legacy_tools/ (M3DGR-only).
+- **Docs:** FRAME_AND_QUATERNION_CONVENTIONS, BAG_TOPICS_AND_USAGE, SYSTEM_DATAFLOW_DIAGRAM, KIMERA_FRAME_MAPPING, PIPELINE_DESIGN_GAPS, POINTCLOUD2_LAYOUTS, VELODYNE_VLP16, DIAGNOSTIC_TOOLS, README, ROADMAP, and docs/datasets/DATASET_DOWNLOAD_GUIDE updated to Kimera-only. Constants and backend_node comments updated.
+
+## 2026-02-02: Bloat cleanup — .gitignore, archive docs/tool/configs
+
+- **.gitignore:** Added `.venv_test/`, `vectors.db`, `vectors.db-shm`, `vectors.db-wal` (root); added jaxsplat debug patterns (`gdb_bt*.txt`, `repro_segfault.log`, `repro_versions.txt`, `jaxsplat/gdb_bt.txt`).
+- **Docs moved to archive/docs/:** BLOAT_AND_COMPLEXITY_AUDIT.md, MAP_AND_BELIEF_AUDIT_2026-01-30.md, MAP_VISUALIZATION.md, PRODUCTION_READINESS_SPLAT_PIPELINE.md, POST_INTEGRATION_CHECKLIST_AUDIT.md, system_dataflow_d3.html.
+- **Tool moved to archive/legacy_tools/:** estimate_lidar_base_extrinsic.py (broken: missing frontend.scan.icp).
+- **Config moved to archive/config/:** cyclonedds_0.xml through cyclonedds_3.xml (only cyclonedds.xml is used).
+- **Deleted:** archive/docs/Untitled (accidental file).
+
+## 2026-02-02: Kimera calibration doc, splat export, JAXsplat post-run viz
+
+- **Kimera calibration/frame:** New `docs/KIMERA_CALIBRATION_AND_FRAME.md` summarizes where extrinsics and frame info live in the Kimera bag directory (calibration/README, robots/acl_jackal/extrinsics.yaml, dataset_ready_manifest, PREP_README) and how GC uses them. Explains why ATE can be wrong (GT vs estimate frame mismatch) and points to dataset “Align frames to GC v2 conventions before eval.” KIMERA_FRAME_MAPPING.md now references it.
+- **Splat export:** Backend and launch support optional `splat_export_path`. When set, on shutdown the backend exports the primitive map (positions, covariances, colors, weights, directions, kappas) to an NPZ for post-run visualization.
+- **JAXsplat post-run viz:** New `tools/view_splat_jaxsplat.py` loads splat_export.npz and trajectory, renders a view with jaxsplat.render_v2, and saves an image. `run_and_evaluate_gc.sh` passes `splat_export_path:=$RESULTS_DIR/splat_export.npz` and, after dashboard/Rerun, runs the viewer to produce `splat_render.png` and optionally open it.
+
+## 2026-02-02: Eval script — Rerun in results, rosbag/metrics clarity, frame-mismatch note
+
+- **run_and_evaluate_gc.sh:** Rerun recording is written to `$RESULTS_DIR/gc_slam.rrd` (no longer only /tmp). After the run, script opens the diagnostics dashboard and, if `rerun` is installed, opens the Rerun recording so trajectory + map can be inspected.
+- **Results summary:** Stage 4 now prints which rosbag and GT file were used. If ATE translation RMSE > 10 m or RPE @ 1m > 1, a note is shown that large errors often indicate GT vs estimate frame/axis convention mismatch (see docs/KIMERA_FRAME_MAPPING.md).
+
+## 2026-02-02: Rename Golden Child → Geometric Compositional
+
+- **Spec:** `docs/GOLDEN_CHILD_INTERFACE_SPEC.md` renamed to `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`; all internal and cross-repo references updated.
+- **Backend:** Class `GoldenChildBackend` renamed to `GeometricCompositionalBackend` in `backend_node.py`; entry point script and docs updated.
+- **Tests:** `test_golden_child_invariants.py` renamed to `test_geometric_compositional_invariants.py`; PRODUCTION_READINESS and CHANGELOG references updated.
+- **Prose:** All "Golden Child" / "GOLDEN CHILD" / "GoldenChild" prose and identifiers replaced with "Geometric Compositional" / "GEOMETRIC COMPOSITIONAL" / "GeometricCompositional" across docs, config, tools, and archive. GC prefix (gc_backend, gc_rosbag, etc.) unchanged.
+- **Depth + JAXsplat stability:** Depth passthrough repacks to packed 32FC1 rows (respecting `step`/padding) and backend depth/RGB handlers honor row stride; legacy custom_call lowering now forces `api_version=0` for JAX 0.9+ compatibility.
+- **Visual feature stability:** Convexity weight sigmoid is now numerically stable to avoid exp overflow in `visual_feature_extractor.py`.
+- **Surfel extraction stability:** Zero-weight padded points are filtered before voxelization to prevent zero-mass plane fits.
+- **Primitive map view call:** Fixed `extract_primitive_map_view` keyword name to match `prim_map` signature.
+- **Visual pose evidence:** Filter OT responsibilities/candidates to valid measurement rows to avoid shape mismatches.
+- **Rerun compatibility:** Use `rerun.set_time` fallback when `set_time_seconds` is unavailable.
+
+## 2026-02-01: jaxsplat render_v2/bev_v2 typed FFI hardening (handler, stream, buffers, layouts)
+
+- **Handler lifetime:** Typed FFI entry points (`RenderV2ForwardFFI`, `BevForwardFFI`) use thread-local handler creation on first use instead of a single static pointer, so XLA FFI’s expected per-call or thread-local handler lifetime is respected.
+- **Stream/buffer validation:** C++ FFI impls validate non-null CUDA stream and non-null typed buffer pointers before calling `RenderV2Forward`/`BevForward`; host entries defensively check stream/buffers/opaque and return early if null.
+- **Python ffi_call:** Config operand is a copied 1D uint8 array (stable buffer for C++); `input_layouts` and `output_layouts` are passed explicitly (major-to-minor) so runtime passes correct strides to the C++ binding.
+- **Build for JAX 0.9 + CUDA 13:** CMake prefers CUDA 13 nvcc from the Python env (`nvidia/cu13/bin/nvcc` when present) for ABI compatibility with jax-cuda13-plugin. Typed FFI targets registered with `api_version=1`. README documents the correct build/run for current versions.
+- **Typed FFI segfault:** If the typed FFI path still segfaults after a clean rebuild with CUDA 13, capture a full backtrace (e.g. `gdb -ex run -ex bt -ex quit --args python -X faulthandler repro_segfault.py`) to determine whether the crash is in the jaxsplat handler or the JAX/jaxlib runtime.
+
 ## 2026-01-31: Livox removed; Kimera-only default; clean target; minimal-files audit
 
 - **Livox removed:** LiDAR path is pointcloud_passthrough only (PointCloud2 bags). livox_converter archived; livox_ros_driver2 removed from package.xml. gc_sensor_hub requires pointcloud_passthrough.input_topic; no Livox branch. Backend parses PointCloud2 via parse_pointcloud2_vlp16 only; parse_pointcloud2_vectorized (Livox-style) removed.
@@ -45,7 +93,7 @@ This file tracks all significant changes, design decisions, and implementation m
 - **operators/__init__.py:** Removed dead exports only: bin_soft_assign, scan_bin_moment_match, BinSoftAssignResult, ScanBinStats (binning already in archive); pos_cov_inflation_pushforward. Kept sinkhorn_ot_bev and ot_fusion exports for future wiring.
 - **archive/legacy_operators:** lidar_evidence.py now imports `from .binning import ScanBinStats`; added `__init__.py`.
 - **Root file `os`:** Deleted (large accidental PostScript); `/os` added to .gitignore.
-- **docs/BLOAT_AND_COMPLEXITY_AUDIT.md:** Updated to state binning/matrix_fisher archived only; BEV/splat/visual/ot_fusion kept and to be wired.
+- **docs/BLOAT_AND_COMPLEXITY_AUDIT.md:** Moved to archive/docs/ (bloat audit applied; doc retained in archive).
 
 ## 2026-01-30: Rerun visualization (Wayland-friendly; replaces RViz)
 
@@ -570,7 +618,7 @@ This diagnostic helps pinpoint the root cause of yaw sign mismatches that cause 
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/structures/inverse_wishart_jax.py`: process-noise block ordering and priors updated for `[trans, rot]`.
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py`: pose covariance extraction updated.
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py`: diagnostics block ordering updated to `[trans, rot]`.
-- `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`: state ordering table updated to `[trans, rot]`.
+- `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`: state ordering table updated to `[trans, rot]`.
 - `docs/FRAME_AND_QUATERNION_CONVENTIONS.md`, `docs/Fusion_issues.md`, `docs/CODE_DIFF_SUMMARY.md`, `tools/DIAGNOSTIC_TOOLS.md`: documentation updated to the unified convention.
 - `tools/diagnose_coordinate_frames.py`: odom covariance ordering analysis updated for ROS-standard vs legacy-permuted ordering.
 - `tools/slam_dashboard.py`: pose heatmap labels updated to `[trans, rot]`.
@@ -956,11 +1004,11 @@ Tightened GC v2 “single-path” wiring so Livox conversion and backend/operato
 2. **Livox converter strict config**: removed `input_msg_type: "auto"` from GC config and made the GC rosbag launcher pass an explicit `livox_input_msg_type` (default `livox_ros_driver2/msg/CustomMsg`).
 3. **Dead-end audit node (topic accountability)**: added `gc_dead_end_audit_node` to subscribe to unused rosbag topics (explicit message types, fail-fast on missing required streams) and publish `/gc/dead_end_status`.
 
-## 2026-01-23: Golden Child SLAM v2 Implementation ✅
+## 2026-01-23: Geometric Compositional SLAM v2 Implementation ✅
 
 ### Summary
 
-Complete implementation of the Golden Child SLAM v2 specification - a strict "branch-free, fixed-cost, local-chart" SLAM backend that eliminates all methodology issues from the previous audit.
+Complete implementation of the Geometric Compositional SLAM v2 specification - a strict "branch-free, fixed-cost, local-chart" SLAM backend that eliminates all methodology issues from the previous audit.
 
 ### Key Features
 
@@ -1010,7 +1058,7 @@ Archived legacy constants and tightened runtime wiring to prevent confusing mult
 - `fl_slam_poc/backend/pipeline.py` - 15-step per-scan execution, RuntimeManifest
 
 **Tests:**
-- `test/test_golden_child_invariants.py` - Chart ID, dimensions, budgets
+- `test/test_geometric_compositional_invariants.py` - Chart ID, dimensions, budgets
 - `test/test_primitives.py` - Branch-free primitive correctness
 - `test/test_operators.py` - Operator contract verification
 
@@ -1034,7 +1082,7 @@ Archived legacy constants and tightened runtime wiring to prevent confusing mult
 
 ### Reference
 
-docs/GOLDEN_CHILD_INTERFACE_SPEC.md - Full specification
+docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md - Full specification
 
 ---
 

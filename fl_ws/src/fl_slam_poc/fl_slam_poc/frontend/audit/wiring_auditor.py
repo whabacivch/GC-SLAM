@@ -1,6 +1,6 @@
 """
 =============================================================================
-WIRING AUDITOR - End-of-Run Summary for Golden Child SLAM
+WIRING AUDITOR - End-of-Run Summary for Geometric Compositional SLAM
 =============================================================================
 
 Collects status from all GC nodes and produces a consolidated end-of-run
@@ -15,7 +15,7 @@ Outputs:
     - Formatted summary to stdout at shutdown
     - JSON file to configured path (for evaluation script integration)
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
 """
 
 from __future__ import annotations

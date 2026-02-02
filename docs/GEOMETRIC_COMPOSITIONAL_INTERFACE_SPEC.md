@@ -1,6 +1,6 @@
-# Golden Child SLAM v2 — Strict Interface Spec (Branch-Free, Fixed-Cost, Local-Chart) (2026-01-23)
+# Geometric Compositional SLAM v2 — Strict Interface Spec (Branch-Free, Fixed-Cost, Local-Chart) (2026-01-23)
 
-This document is the **strict interface + budget spec** for the “Golden Child SLAM Method (v2)”, rewritten to eliminate **all `if/else` gates and regime switches**. Every operator is a **total function** (always runs), with **continuous influence scalars** whose effect may smoothly go to ~0. Any numerical/domain stabilization is **declared**, **always applied in the same way**, and **accounted for** in certificates.
+This document is the **strict interface + budget spec** for the “Geometric Compositional SLAM Method (v2)”, rewritten to eliminate **all `if/else` gates and regime switches**. Every operator is a **total function** (always runs), with **continuous influence scalars** whose effect may smoothly go to ~0. Any numerical/domain stabilization is **declared**, **always applied in the same way**, and **accounted for** in certificates.
 
 Scope:
 
@@ -766,9 +766,9 @@ All steps run every time; influence may go to ~0 smoothly. No gates.
 
 ---
 
- Golden Child SLAM v2 — Adaptive Process Noise via Inverse-Wishart Conjugacy
+ Geometric Compositional SLAM v2 — Adaptive Process Noise via Inverse-Wishart Conjugacy
 
-**Addendum to**: Golden Child SLAM v2 Strict Interface Spec (Branch-Free, Fixed-Cost, Local-Chart)  
+**Addendum to**: Geometric Compositional SLAM v2 Strict Interface Spec (Branch-Free, Fixed-Cost, Local-Chart)  
 **Version**: 2026-01-24  
 **Status**: Proposed Extension
 
@@ -1518,7 +1518,7 @@ This makes the entire ProcessNoise module JIT-friendly.
 
 ## 10. Summary
 
-This specification adds **adaptive process noise estimation** to Golden Child SLAM v2 using:
+This specification adds **adaptive process noise estimation** to Geometric Compositional SLAM v2 using:
 
 1. **Inverse-Wishart conjugate priors** for each block of the process noise covariance
 2. **Forgetful retention** to bound memory and enable adaptivity
@@ -1535,7 +1535,7 @@ This completes the previously unspecified "process noise module" referenced in �
 
 ---
 
-I) Golden Child IMU v2 — Strict First-Principles Spec (Rosbag-Constrained)
+I) Geometric Compositional IMU v2 — Strict First-Principles Spec (Rosbag-Constrained)
 0) Non-negotiable system invariants
 0.1 No gates, no heuristics, branch-free
 
@@ -2347,7 +2347,7 @@ gc_slam_adaptive_process_noise_…
 
 No step is conditional; “influence” only changes continuously via inferred covariances and latent precisions.
 
-8) What this spec changes relative to current Golden Child decisions
+8) What this spec changes relative to current Geometric Compositional decisions
 
 IMU is not handled as “diffusion prediction + ad hoc evidence.” It becomes true factors + canonical Gaussian projection.
 

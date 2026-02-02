@@ -1,5 +1,5 @@
 """
-Primitive Association via Optimal Transport for Golden Child SLAM v2.
+Primitive Association via Optimal Transport for Geometric Compositional SLAM v2.
 
 Reference: .cursor/plans/visual_lidar_rendering_integration_*.plan.md Section 6
 

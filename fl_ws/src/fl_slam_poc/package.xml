@@ -2,7 +2,7 @@
 <package format="3">
   <name>fl_slam_poc</name>
   <version>0.1.0</version>
-  <description>Golden Child SLAM v2 - Branch-free compositional inference SLAM (ROS 2 Jazzy)</description>
+  <description>Geometric Compositional SLAM v2 - Branch-free compositional inference SLAM (ROS 2 Jazzy)</description>
   <maintainer email="whab13@mit.edu">Will Haber</maintainer>
   <license>Apache-2.0</license>
 

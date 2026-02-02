@@ -1,6 +1,6 @@
 # Pipeline order and evidence
 
-Corrected spine for Golden Child SLAM v2 per-scan pipeline: evidence uses the pre-update map; visual pose evidence is linearized at an IMU+odom-informed pose; map update uses the post-recompose pose.
+Corrected spine for Geometric Compositional SLAM v2 per-scan pipeline: evidence uses the pre-update map; visual pose evidence is linearized at an IMU+odom-informed pose; map update uses the post-recompose pose.
 
 ## Corrected spine (order)
 
@@ -24,5 +24,5 @@ Corrected spine for Golden Child SLAM v2 per-scan pipeline: evidence uses the pr
 ## References
 
 - Pipeline and data flow: `docs/IMU_BELIEF_MAP_AND_FUSION.md`
-- Golden Child spec: `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`
+- Geometric Compositional spec: `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`
 - Depth contract: `docs/PIPELINE_DEPTH_CONTRACT.md`

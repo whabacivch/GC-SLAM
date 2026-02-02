@@ -1,5 +1,5 @@
 """
-Geometry package for Golden Child SLAM v2.
+Geometry package for Geometric Compositional SLAM v2.
 
 Runtime backend uses JAX-only `se3_jax` functions.
 NumPy helpers have been archived under `archive/legacy_common/geometry/`.

@@ -1,4 +1,4 @@
-# Golden Child SLAM v2 Backend Configuration (DEPRECATED)
+# Geometric Compositional SLAM v2 Backend Configuration (DEPRECATED)
 # Use config/gc_unified.yaml or config/gc_kimera.yaml for new deployments.
 
 gc_backend:

@@ -1,4 +1,4 @@
-# Golden Child SLAM v2 configuration
+# Geometric Compositional SLAM v2 configuration
 
 **Use `gc_unified.yaml` only** for deployments. Launch loads `gc_backend.ros__parameters` from this file.
 

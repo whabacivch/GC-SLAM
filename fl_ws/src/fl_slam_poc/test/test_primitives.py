@@ -1,9 +1,9 @@
 """
-Tests for Golden Child SLAM v2 primitives.
+Tests for Geometric Compositional SLAM v2 primitives.
 
 Verifies that primitives are branch-free and always execute.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 3
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 3
 """
 
 import pytest

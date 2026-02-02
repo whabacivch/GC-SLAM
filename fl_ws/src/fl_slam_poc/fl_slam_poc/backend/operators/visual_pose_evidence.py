@@ -1,5 +1,5 @@
 """
-Visual Pose Evidence Operator for Golden Child SLAM v2.
+Visual Pose Evidence Operator for Geometric Compositional SLAM v2.
 
 Reference: .cursor/plans/visual_lidar_rendering_integration_*.plan.md Section 7
 
@@ -338,12 +338,18 @@ def visual_pose_evidence(
 
     # Filter to valid measurements
     valid_mask = measurement_batch.valid_mask
-    valid_indices = jnp.where(valid_mask)[0]
+    valid_indices = jnp.where(valid_mask)[0][:N_meas]
 
-    meas_positions = meas_positions[valid_indices[:N_meas]]
-    meas_directions = meas_directions[valid_indices[:N_meas]]
-    meas_kappas = meas_kappas[valid_indices[:N_meas]]
-    meas_precisions = Lambda_reg[valid_indices[:N_meas]]
+    meas_positions = meas_positions[valid_indices]
+    meas_directions = meas_directions[valid_indices]
+    meas_kappas = meas_kappas[valid_indices]
+    meas_precisions = Lambda_reg[valid_indices]
+
+    # Filter associations to valid measurement rows
+    responsibilities = association_result.responsibilities[valid_indices]
+    candidate_indices = association_result.candidate_indices[valid_indices]
+    row_masses = association_result.row_masses[valid_indices]
+    N_assoc, K_assoc = responsibilities.shape
 
     # Get map arrays
     map_positions = map_view.positions  # Already in world frame
@@ -355,8 +361,8 @@ def visual_pose_evidence(
         meas_positions=meas_positions,
         meas_precisions=meas_precisions,
         map_positions=map_positions,
-        responsibilities=association_result.responsibilities,
-        candidate_indices=association_result.candidate_indices,
+        responsibilities=responsibilities,
+        candidate_indices=candidate_indices,
         R_pred=R_pred,
         t_pred=t_pred,
         eps_lift=eps_lift,
@@ -368,8 +374,8 @@ def visual_pose_evidence(
         meas_kappas=meas_kappas,
         map_directions=map_directions,
         map_kappas=map_kappas,
-        responsibilities=association_result.responsibilities,
-        candidate_indices=association_result.candidate_indices,
+        responsibilities=responsibilities,
+        candidate_indices=candidate_indices,
         R_pred=R_pred,
         eps_lift=eps_lift,
     )
@@ -390,7 +396,7 @@ def visual_pose_evidence(
 
     # Compute diagnostics
     total_cost = trans_cost + rot_cost
-    mean_resp = float(jnp.mean(association_result.row_masses)) if N_assoc > 0 else 0.0
+    mean_resp = float(jnp.mean(row_masses)) if N_assoc > 0 else 0.0
 
     result = VisualPoseEvidenceResult(
         L_pose=L_pose,
@@ -411,7 +417,7 @@ def visual_pose_evidence(
         triggers=["linearization", "ot_soft_correspondence"],
         frobenius_applied=True,  # We use predicted pose for linearization
         support=SupportCert(
-            ess_total=float(jnp.sum(association_result.row_masses)),
+            ess_total=float(jnp.sum(row_masses)),
             support_frac=float(N_assoc) / float(max(N_meas, 1)),
         ),
         influence=InfluenceCert(

@@ -1,6 +1,6 @@
 # Pipeline Depth Contract
 
-Single contract for depth in the Golden Child visual–LiDAR pipeline.
+Single contract for depth in the Geometric Compositional visual–LiDAR pipeline.
 
 ## Contract
 
@@ -17,4 +17,4 @@ Single contract for depth in the Golden Child visual–LiDAR pipeline.
 ## Reference
 
 - Pipeline and data flow: `docs/IMU_BELIEF_MAP_AND_FUSION.md`
-- Golden Child spec: `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`
+- Geometric Compositional spec: `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`

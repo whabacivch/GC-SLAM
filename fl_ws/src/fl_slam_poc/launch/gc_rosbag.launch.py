@@ -1,7 +1,7 @@
 """
-Golden Child SLAM v2 Rosbag Launch File.
+Geometric Compositional SLAM v2 Rosbag Launch File.
 
-Launches the Golden Child backend with a rosbag for evaluation.
+Launches the Geometric Compositional backend with a rosbag for evaluation.
 Default profile: Kimera (PointCloud2 LiDAR, standard IMU).
 
 Architecture:
@@ -36,7 +36,7 @@ _BACKEND_NUMERIC_PARAMS = {
 
 
 def generate_launch_description():
-    """Generate launch description for Golden Child SLAM evaluation."""
+    """Generate launch description for Geometric Compositional SLAM evaluation."""
 
     # =========================================================================
     # Launch Arguments
@@ -62,6 +62,11 @@ def generate_launch_description():
         "diagnostics_export_path",
         default_value="results/gc_slam_diagnostics.npz",
         description="Path to export per-scan diagnostics for dashboard.",
+    )
+    splat_export_path_arg = DeclareLaunchArgument(
+        "splat_export_path",
+        default_value="",
+        description="Path to export primitive map (splats) for post-run JAXsplat viz. Empty = do not export.",
     )
 
     imu_gravity_scale_arg = DeclareLaunchArgument(
@@ -135,18 +140,18 @@ def generate_launch_description():
     imu_topic_arg = DeclareLaunchArgument("imu_topic", default_value="/gc/sensors/imu")
     odom_frame_arg = DeclareLaunchArgument(
         "odom_frame",
-        default_value="odom",
-        description="Odom/parent frame (e.g. odom_combined for M3DGR, acl_jackal2/odom for Kimera).",
+        default_value="acl_jackal2/odom",
+        description="Odom/parent frame (Kimera: acl_jackal2/odom).",
     )
     base_frame_arg = DeclareLaunchArgument(
         "base_frame",
-        default_value="base_footprint",
-        description="Base/child frame (e.g. base_footprint for M3DGR, acl_jackal2/base for Kimera).",
+        default_value="acl_jackal2/base",
+        description="Base/child frame (Kimera: acl_jackal2/base).",
     )
     pointcloud_layout_arg = DeclareLaunchArgument(
         "pointcloud_layout",
         default_value="vlp16",
-        description="PointCloud2 layout: vlp16 (Kimera/VLP-16). See docs/POINTCLOUD2_LAYOUTS.md.",
+        description="PointCloud2 layout: vlp16 (Kimera VLP-16). See docs/POINTCLOUD2_LAYOUTS.md.",
     )
     extrinsics_source_arg = DeclareLaunchArgument(
         "extrinsics_source",
@@ -155,12 +160,12 @@ def generate_launch_description():
     )
     T_base_lidar_file_arg = DeclareLaunchArgument("T_base_lidar_file", default_value="")
     T_base_imu_file_arg = DeclareLaunchArgument("T_base_imu_file", default_value="")
-    T_base_lidar_arg = DeclareLaunchArgument("T_base_lidar", default_value="[-0.011, 0.0, 0.778, 0.0, 0.0, 0.0]")
-    T_base_imu_arg = DeclareLaunchArgument("T_base_imu", default_value="[0.0, 0.0, 0.0, -0.015586, 0.489293, 0.0]")
+    T_base_lidar_arg = DeclareLaunchArgument("T_base_lidar", default_value="[-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]")
+    T_base_imu_arg = DeclareLaunchArgument("T_base_imu", default_value="[-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.0]")
     lidar_sigma_meas_arg = DeclareLaunchArgument(
         "lidar_sigma_meas",
-        default_value="0.01",
-        description="LiDAR measurement noise prior (m² isotropic). Kimera/VLP-16: 1e-3; M3DGR: 0.01.",
+        default_value="0.001",
+        description="LiDAR measurement noise prior (m² isotropic). Kimera VLP-16: 1e-3.",
     )
 
     # Camera (always enabled; backend requires camera for primitive pose evidence)
@@ -280,6 +285,7 @@ def generate_launch_description():
             "imu_topic": LaunchConfiguration("imu_topic").perform(context),
             "trajectory_export_path": LaunchConfiguration("trajectory_export_path").perform(context),
             "diagnostics_export_path": LaunchConfiguration("diagnostics_export_path").perform(context),
+            "splat_export_path": LaunchConfiguration("splat_export_path").perform(context),
             "odom_frame": LaunchConfiguration("odom_frame").perform(context),
             "base_frame": LaunchConfiguration("base_frame").perform(context),
             "pointcloud_layout": LaunchConfiguration("pointcloud_layout").perform(context),
@@ -342,6 +348,7 @@ def generate_launch_description():
         trajectory_path_arg,
         wiring_summary_path_arg,
         diagnostics_path_arg,
+        splat_export_path_arg,
         imu_gravity_scale_arg,
         imu_accel_scale_arg,
         deskew_rotation_only_arg,

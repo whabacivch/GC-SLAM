@@ -82,7 +82,7 @@ index 01abf32..d29ff9b 100644
  
  import tf2_ros
  from geometry_msgs.msg import PoseStamped, TransformStamped
-@@ -335,8 +336,11 @@ class GoldenChildBackend(Node):
+@@ -335,8 +336,11 @@ class GeometricCompositionalBackend(Node):
          self.first_odom_pose = None  # (6,) SE3 pose [trans, rotvec]
          
          # IMU buffer for high-rate prediction
@@ -95,7 +95,7 @@ index 01abf32..d29ff9b 100644
          
          # Tracking
          self.imu_count = 0
-@@ -363,7 +367,7 @@ class GoldenChildBackend(Node):
+@@ -363,7 +367,7 @@ class GeometricCompositionalBackend(Node):
          qos_sensor = QoSProfile(
              reliability=ReliabilityPolicy.BEST_EFFORT,
              history=HistoryPolicy.KEEP_LAST,
@@ -104,7 +104,7 @@ index 01abf32..d29ff9b 100644
              durability=DurabilityPolicy.VOLATILE,
          )
          
-@@ -378,14 +382,23 @@ class GoldenChildBackend(Node):
+@@ -378,14 +382,23 @@ class GeometricCompositionalBackend(Node):
          odom_topic = str(self.get_parameter("odom_topic").value)
          imu_topic = str(self.get_parameter("imu_topic").value)
          
@@ -131,7 +131,7 @@ index 01abf32..d29ff9b 100644
          )
          
          self.get_logger().info(f"LiDAR: {lidar_topic} (PIPELINE ACTIVE)")
-@@ -585,10 +598,27 @@ class GoldenChildBackend(Node):
+@@ -585,10 +598,27 @@ class GeometricCompositionalBackend(Node):
          # This must be captured BEFORE updating self.last_scan_stamp.
          t_prev_scan = float(self.last_scan_stamp) if self.last_scan_stamp > 0.0 else 0.0
          

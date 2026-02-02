@@ -1,5 +1,5 @@
 """
-Common package for Golden Child SLAM v2.
+Common package for Geometric Compositional SLAM v2.
 
 Contains shared utilities:
 - belief: Gaussian belief representations (BeliefGaussianInfo)

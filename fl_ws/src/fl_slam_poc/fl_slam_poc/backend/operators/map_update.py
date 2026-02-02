@@ -1,11 +1,11 @@
 """
-PoseCovInflationPushforward operator for Golden Child SLAM v2.
+PoseCovInflationPushforward operator for Geometric Compositional SLAM v2.
 
 Push scan statistics into map frame with pose covariance inflation.
 
 Fully vectorized over bins - no Python for-loops in hot path.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5.13
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.13
 """
 
 from __future__ import annotations

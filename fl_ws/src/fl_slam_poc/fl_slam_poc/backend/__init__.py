@@ -1,7 +1,7 @@
 """
-Golden Child SLAM v2 Backend.
+Geometric Compositional SLAM v2 Backend.
 
-Branch-free compositional inference backend per docs/GOLDEN_CHILD_INTERFACE_SPEC.md.
+Branch-free compositional inference backend per docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md.
 
 Structure:
 - operators/: Branch-free operators (predict, fuse, recompose, visual_pose_evidence, etc.)
@@ -10,7 +10,7 @@ Structure:
 - backend_node.py: ROS2 node entry point
 - rendering.py: Splat rendering (EWA, vMF, fBm) — output from state; currently deferred / point cloud only
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
 """
 
 # Lazy imports to avoid circular dependencies

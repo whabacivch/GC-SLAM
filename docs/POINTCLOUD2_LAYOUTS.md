@@ -1,14 +1,20 @@
 # PointCloud2 Field Layouts (GC v2)
 
-This document is the **single source of truth** for PointCloud2 field layouts supported by the GC v2 backend. The backend selects the parser by **explicit config** (`pointcloud_layout: livox | vlp16`). No silent fallback; fail-fast if layout does not match message fields.
+This document is the **single source of truth** for PointCloud2 field layouts supported by the GC v2 backend. The backend selects the parser by **explicit config** (`pointcloud_layout: vlp16` for Kimera). No silent fallback; fail-fast if layout does not match message fields.
 
 **Reference:** [BAG_TOPICS_AND_USAGE.md](BAG_TOPICS_AND_USAGE.md) for topic and frame conventions.
 
 ---
 
-## Livox (current / M3DGR)
+## VLP-16 (Kimera)
 
-**Used for:** M3DGR Dynamic01 (Livox MID-360); CustomMsg is converted to PointCloud2 by `livox_converter` with Livox-specific fields.
+**Used for:** Kimera acl_jackal (`/acl_jackal/lidar_points`, `sensor_msgs/PointCloud2`). See [VELODYNE_VLP16.md](VELODYNE_VLP16.md).
+
+---
+
+## Livox (archived)
+
+**Used for:** Archived M3DGR Dynamic01 (Livox MID-360); CustomMsg was converted to PointCloud2 by `livox_converter`.
 
 **Required fields:**
 

@@ -1,10 +1,10 @@
 """
-Golden Child SLAM v2 Pipeline.
+Geometric Compositional SLAM v2 Pipeline.
 
 Main per-scan execution following spec Section 7.
 All steps run every time; influence may go to ~0 smoothly. No gates.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 7
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 7
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ from fl_slam_poc.common.primitives import (
 
 @dataclass
 class PipelineConfig:
-    """Configuration for the Golden Child pipeline."""
+    """Configuration for the Geometric Compositional pipeline."""
     # Budgets (hard constants)
     K_HYP: int = constants.GC_K_HYP
     B_BINS: int = constants.GC_B_BINS
@@ -803,7 +803,7 @@ def process_scan_single_hypothesis(
 
         # Step 3.5c: Extract map view for association (M_{t-1}; do not mutate map yet)
         map_view = extract_primitive_map_view(
-            pmap=primitive_map,
+            prim_map=primitive_map,
             eps_lift=config.eps_lift,
             eps_mass=config.eps_mass,
         )

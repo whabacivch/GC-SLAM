@@ -50,7 +50,7 @@ This project is built **by construction**: design and conventions are explicit; 
 
 ## 3. Canonical references
 
-- **Golden Child spec:** `docs/GOLDEN_CHILD_INTERFACE_SPEC.md`
+- **Geometric Compositional spec:** `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`
 - **Frame and quaternion conventions:** `docs/FRAME_AND_QUATERNION_CONVENTIONS.md`
 - **Pipeline and data flow:** `docs/IMU_BELIEF_MAP_AND_FUSION.md`
 - **Project instructions and checklist:** `AGENTS.md`

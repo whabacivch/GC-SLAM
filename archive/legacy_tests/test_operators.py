@@ -1,12 +1,12 @@
 """
-Tests for Golden Child SLAM v2 operators.
+Tests for Geometric Compositional SLAM v2 operators.
 
 Verifies that operators follow spec contracts:
 - Return (result, CertBundle, ExpectedEffect) tuple
 - Are branch-free (total functions)
 - Apply domain projections correctly
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5
 """
 
 import pytest

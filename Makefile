@@ -1,4 +1,4 @@
-# Impact Project v1 — Golden Child SLAM v2
+# Impact Project v1 — Geometric Compositional SLAM v2
 # Run from project root.
 
 .PHONY: eval gc-eval build clean

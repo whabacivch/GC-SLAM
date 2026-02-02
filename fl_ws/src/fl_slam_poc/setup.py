@@ -4,7 +4,7 @@ package_name = "fl_slam_poc"
 
 setup(
     name=package_name,
-    version="0.1.0",  # Golden Child v2
+    version="0.1.0",  # Geometric Compositional v2
     packages=find_packages(exclude=["test"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
@@ -28,12 +28,12 @@ setup(
     zip_safe=True,
     maintainer="Will Haber",
     maintainer_email="whab13@mit.edu",
-    description="Golden Child SLAM v2 - Branch-free compositional inference SLAM (ROS 2 Jazzy)",
+    description="Geometric Compositional SLAM v2 - Branch-free compositional inference SLAM (ROS 2 Jazzy)",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            # Golden Child backend (branch-free implementation)
+            # Geometric Compositional backend (branch-free implementation)
             "gc_backend_node = fl_slam_poc.backend.backend_node:main",
             # Sensor Hub (single process with all frontend nodes)
             "gc_sensor_hub = fl_slam_poc.frontend.hub.gc_sensor_hub:main",

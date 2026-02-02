@@ -1,5 +1,5 @@
 """
-GC Sensor Hub - Single-process frontend for Golden Child SLAM.
+GC Sensor Hub - Single-process frontend for Geometric Compositional SLAM.
 
 This module provides a unified sensor hub that runs all frontend
 preprocessing nodes in a single process with MultiThreadedExecutor.

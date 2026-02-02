@@ -2,15 +2,15 @@
 """
 Transform estimated trajectory (T_world<-wheel) to body frame (T_world<-body).
 
-Use when M3DGR ground truth is in body (camera_imu) frame and our estimate
-is in wheel (base_footprint) frame. Applies: T_world_body = T_world_wheel @ inv(body_T_wheel).
+ARCHIVED: For M3DGR dataset only. Kimera is the current dataset; no body-frame
+transform is used. Use when M3DGR ground truth is in body (camera_imu) frame and
+our estimate is in wheel (base_footprint) frame.
+Applies: T_world_body = T_world_wheel @ inv(body_T_wheel).
 
 Usage:
   transform_estimate_to_body_frame.py <estimate.tum> <output.tum> [--calib <calib>]
 
-Calib can be:
-  - config/m3dgr_body_T_wheel.yaml (default; plain YAML with body_T_wheel_row_major_4x4)
-  - M3DGR calibration.md (markdown with body_T_wheel !!opencv-matrix block; no OpenCV needed)
+Calib: archive/config/m3dgr_body_T_wheel.yaml (body_T_wheel_row_major_4x4)
 """
 import argparse
 import re
@@ -21,8 +21,9 @@ import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation
 
-# Project root (parent of tools/)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# When run from repo root, archive/legacy_tools/ -> parent.parent = repo root
+_ARCHIVE_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_CALIB = _ARCHIVE_ROOT / "config" / "m3dgr_body_T_wheel.yaml"
 
 
 def _parse_calibration_md(body: str) -> np.ndarray:
@@ -30,7 +31,6 @@ def _parse_calibration_md(body: str) -> np.ndarray:
     idx = body.find("body_T_wheel")
     if idx < 0:
         raise ValueError("calibration.md: body_T_wheel not found")
-    # From body_T_wheel onward, find the first data: [ ... ] block
     rest = body[idx:]
     match = re.search(r"data:\s*\[\s*(.*?)\s*\]", rest, re.DOTALL)
     if not match:
@@ -47,7 +47,6 @@ def load_body_T_wheel(calib_path: Path) -> np.ndarray:
     """Load body_T_wheel 4x4. Supports: (1) calibration.md (!!opencv-matrix block), (2) m3dgr_body_T_wheel.yaml."""
     with open(calib_path, "r", encoding="utf-8") as f:
         body = f.read()
-    # Prefer format by extension so YAML comments (e.g. "!!opencv-matrix" in text) don't trigger MD parser
     if calib_path.suffix.lower() == ".yaml" or calib_path.suffix.lower() == ".yml":
         data = yaml.safe_load(body)
         if "body_T_wheel_row_major_4x4" in data:
@@ -57,10 +56,8 @@ def load_body_T_wheel(calib_path: Path) -> np.ndarray:
         if arr.size != 16:
             raise ValueError(f"Expected 16 elements, got {arr.size}")
         return arr.reshape(4, 4)
-    # M3DGR calibration.md: markdown with body_T_wheel !!opencv-matrix
     if calib_path.suffix.lower() == ".md" and "body_T_wheel" in body:
         return _parse_calibration_md(body)
-    # Fallback: try YAML
     data = yaml.safe_load(body)
     if "body_T_wheel_row_major_4x4" in data:
         arr = np.array(data["body_T_wheel_row_major_4x4"], dtype=np.float64)
@@ -92,19 +89,19 @@ def se3_to_tum_line(timestamp: float, T: np.ndarray) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Transform estimate TUM (wheel frame) to body frame for M3DGR GT comparison."
+        description="Transform estimate TUM (wheel frame) to body frame for M3DGR GT comparison (archived)."
     )
     ap.add_argument("estimate_tum", help="Input TUM trajectory (T_world<-wheel)")
     ap.add_argument("output_tum", help="Output TUM trajectory (T_world<-body)")
     ap.add_argument(
         "--calib",
         type=Path,
-        default=_PROJECT_ROOT / "config" / "m3dgr_body_T_wheel.yaml",
-        help="Calib file: config/m3dgr_body_T_wheel.yaml or M3DGR calibration.md (body_T_wheel !!opencv-matrix)",
+        default=_DEFAULT_CALIB,
+        help="Calib file: archive/config/m3dgr_body_T_wheel.yaml",
     )
     args = ap.parse_args()
 
-    calib_path = args.calib if args.calib.is_absolute() else _PROJECT_ROOT / args.calib
+    calib_path = args.calib if args.calib.is_absolute() else _ARCHIVE_ROOT / args.calib
     if not calib_path.exists():
         print(f"ERROR: Calibration file not found: {calib_path}", file=sys.stderr)
         return 1

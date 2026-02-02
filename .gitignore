@@ -20,6 +20,7 @@ build/
 
 # Virtual environments
 .venv/
+.venv_test/
 venv/
 env/
 
@@ -62,6 +63,11 @@ config/*.rviz
 
 # Code Graph RAG MCP (per-repo SQLite DB)
 .code-graph-rag/
+
+# SQLite runtime (e.g. Cursor indexing, other tools)
+vectors.db
+vectors.db-shm
+vectors.db-wal
 
 # Temporary files
 *.tmp

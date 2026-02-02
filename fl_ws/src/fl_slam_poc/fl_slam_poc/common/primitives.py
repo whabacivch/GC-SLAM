@@ -1,5 +1,5 @@
 """
-Branch-free numeric primitives for Golden Child SLAM v2.
+Branch-free numeric primitives for Geometric Compositional SLAM v2.
 
 All functions in this module are TOTAL FUNCTIONS that always run.
 They return (result, magnitude) where magnitude can be exactly 0.
@@ -11,7 +11,7 @@ Design invariants:
 - Magnitude fields record the effect (can be 0 if no change)
 - Uses JAX for all math operations
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 3
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 3
 """
 
 from __future__ import annotations

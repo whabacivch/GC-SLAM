@@ -1,11 +1,11 @@
 """
-Golden Child SLAM v2 Operators.
+Geometric Compositional SLAM v2 Operators.
 
 All operators are total functions that always run.
 Each returns (result, CertBundle, ExpectedEffect).
 No gates, no conditional branching.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5
 """
 
 from fl_slam_poc.backend.operators.point_budget import (

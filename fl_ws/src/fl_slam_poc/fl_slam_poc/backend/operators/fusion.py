@@ -1,9 +1,9 @@
 """
-Fusion operators for Golden Child SLAM v2.
+Fusion operators for Geometric Compositional SLAM v2.
 
 FusionScaleFromCertificates and InfoFusionAdditive.
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Sections 5.10, 5.11
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Sections 5.10, 5.11
 """
 
 from __future__ import annotations

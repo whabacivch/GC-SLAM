@@ -1,8 +1,8 @@
 # FL-SLAM Roadmap (Impact Project v1)
 
-This roadmap is organized around the **Golden Child SLAM v2** implementation. **Code is the source of truth;** this doc reflects the repo as of **2026-01-29**.
+This roadmap is organized around the **Geometric Compositional SLAM v2** implementation. **Code is the source of truth;** this doc reflects the repo as of **2026-01-29**.
 
-- **Primary operational code**: Required to run `tools/run_and_evaluate_gc.sh` (GC v2 on M3DGR Dynamic01).
+- **Primary operational code**: Required to run `tools/run_and_evaluate_gc.sh` (GC v2 on Kimera).
 - **Immediate priorities**: IW tuning/diagnostics, remaining design gaps (see `docs/PIPELINE_DESIGN_GAPS.md`), optional bin-level motion smear.
 - **Future work**: Additional datasets, dense RGB-D, visual loop factors, semantic/categorical layer.
 
@@ -23,15 +23,15 @@ This roadmap is organized around the **Golden Child SLAM v2** implementation. **
 
 ### Package & Entry Points
 - **Package**: `fl_ws/src/fl_slam_poc/fl_slam_poc/` — `common/`, `frontend/` (hub, sensors, audit), `backend/` (pipeline, operators, structures)
-- **Launch**: `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `config/gc_unified.yaml`
-- **Nodes**: `gc_sensor_hub` (frontend), `gc_backend_node` (backend); sensors: livox_converter, odom_normalizer, imu_normalizer
+- **Launch**: `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `config/gc_kimera.yaml`
+- **Nodes**: `gc_sensor_hub` (frontend), `gc_backend_node` (backend); sensors: pointcloud_passthrough, odom_normalizer, imu_normalizer
 - **Reference**: `docs/Self-Adaptive Systems Guide.md`, `docs/PIPELINE_DESIGN_GAPS.md`, `docs/IMU_BELIEF_MAP_AND_FUSION.md`
 
 ---
 
 ## Immediate Priority: Hardening & Design Gaps
 
-**Goal:** Align with full spec (`docs/GOLDEN_CHILD_INTERFACE_SPEC.md`), close remaining design gaps in `docs/PIPELINE_DESIGN_GAPS.md`, and improve robustness/metrics.
+**Goal:** Align with full spec (`docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`), close remaining design gaps in `docs/PIPELINE_DESIGN_GAPS.md`, and improve robustness/metrics.
 
 ### Done (current pipeline)
 - **IW process + measurement + LiDAR bucket**: Per-block IW states; readiness weights (no gates); datasheet priors; updates every scan. Files: `backend/structures/inverse_wishart_jax.py`, `operators/measurement_noise_iw_jax.py`, `operators/lidar_bucket_noise_iw_jax.py`, `operators/inverse_wishart_jax.py`.
@@ -58,15 +58,17 @@ This roadmap is organized around the **Golden Child SLAM v2** implementation. **
 
 ---
 
-## 0) Ground-Truth Facts (M3DGR Dynamic01 Bag) + “No Silent Assumptions”
+## 0) Ground-Truth Facts (Kimera Bag) + “No Silent Assumptions”
 
-These are **observed facts from the bag** and should be treated as the default configuration unless explicitly overridden:
+These are **observed facts from the Kimera bag** and should be treated as the default configuration unless explicitly overridden:
 
 - **No `CameraInfo` topics in the bag** → intrinsics must be declared via parameters and logged.
 - **No `/tf` or `/tf_static` topics in the bag** → camera extrinsics are not available online unless we provide them (URDF/static transform parameter).
-- **Odom frames in the bag**:
-  - `world_frame` = `/odom.header.frame_id` = `odom_combined`
-  - `base_frame` = `/odom.child_frame_id` = `base_footprint`
+- **Odom frames in the bag** (Kimera acl_jackal):
+  - `world_frame` = `/odom.header.frame_id` = `acl_jackal2/odom`
+  - `base_frame` = `/odom.child_frame_id` = `acl_jackal2/base`
+- **LiDAR frame**: `/acl_jackal/lidar_points.header.frame_id` = `acl_jackal2/velodyne_link`
+- **IMU frame**: `/acl_jackal/forward/imu.header.frame_id` = `acl_jackal2/forward_imu_optical_frame`. See [KIMERA_FRAME_MAPPING.md](docs/KIMERA_FRAME_MAPPING.md).
 - **RGB + aligned depth frames in the bag**:
   - `/camera/color/image_raw/compressed.header.frame_id` = `camera_color_optical_frame`
   - `/camera/aligned_depth_to_color/image_raw/compressedDepth.header.frame_id` = `camera_color_optical_frame`
@@ -81,15 +83,15 @@ These are **observed facts from the bag** and should be treated as the default c
 ## 1) GC v2 Status (Current Baseline)
 
 **Primary entrypoint**
-- `tools/run_and_evaluate_gc.sh`: runs GC v2 on M3DGR Dynamic01 end-to-end (SLAM + alignment + metrics + plots + audit). Artifacts under `results/gc_YYYYMMDD_HHMMSS/`.
+- `tools/run_and_evaluate_gc.sh`: runs GC v2 on Kimera end-to-end (SLAM + alignment + metrics + plots + audit). Artifacts under `results/gc_YYYYMMDD_HHMMSS/`.
 
 **Launch**
-- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `fl_ws/src/fl_slam_poc/config/gc_unified.yaml`
+- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `fl_ws/src/fl_slam_poc/config/gc_kimera.yaml`
 
 **Nodes**
 - Frontend: `gc_sensor_hub` (`fl_slam_poc/frontend/hub/gc_sensor_hub.py`) — publishes `/gc/sensors/lidar_points`, `/gc/sensors/odom`, `/gc/sensors/imu`
 - Backend: `gc_backend_node` (`fl_slam_poc/backend/backend_node.py`) — 14-step pipeline, IW updates, hypothesis combine
-- Sensors (used by hub): `livox_converter`, `odom_normalizer`, `imu_normalizer`; optional: `dead_end_audit_node`, `wiring_auditor`
+- Sensors (used by hub): `pointcloud_passthrough`, `odom_normalizer`, `imu_normalizer`; optional: `dead_end_audit_node`, `wiring_auditor`
 
 **Evaluation**
 - `tools/align_ground_truth.py`, `tools/evaluate_slam.py`, `tools/slam_dashboard.py`

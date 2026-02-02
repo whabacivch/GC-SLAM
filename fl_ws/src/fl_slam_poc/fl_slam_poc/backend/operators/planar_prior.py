@@ -1,5 +1,5 @@
 """
-Planar robot priors for Golden Child SLAM v2.
+Planar robot priors for Geometric Compositional SLAM v2.
 
 Soft constraints for ground-hugging robots:
 1. z = z_ref (robot height stays constant)

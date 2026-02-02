@@ -1,6 +1,6 @@
 # Frame and Quaternion Conventions (Canonical Reference)
 
-This document is the **single source of truth** for coordinate frame and quaternion conventions used throughout the Golden Child SLAM v2 codebase.
+This document is the **single source of truth** for coordinate frame and quaternion conventions used throughout the Geometric Compositional SLAM v2 codebase.
 
 ## Status Labels (Read This First)
 
@@ -52,28 +52,27 @@ GC v2 runs without `/tf` as a dependency, so we must declare a single, stable
 "world" frame by construction.
 
 - **ASSUMED-CONTRACT**: We treat the **world / map frame** as the frame used by the odometry message's
-  `header.frame_id` (in this bag: `odom_combined`).
-- **CONFIRMED (Dynamic01_ros2)**: `header.frame_id` is stable across the entire rosbag (0 changes observed).
+  `header.frame_id` (Kimera: `acl_jackal2/odom`).
+- **CONFIRMED (Kimera)**: `header.frame_id` is stable across the entire rosbag.
 - **ASSUMED-CONTRACT**: The state pose is interpreted as **pose of the body in the world** as an SE(3)
   element `T_{world<-body}`.
 - **ASSUMED-CONTRACT**: Runtime should fail-fast if `header.frame_id` changes mid-run (add explicit audit if/when needed).
 
 Body axes convention (GC assumes a standard mobile base convention):
 
-- **CONFIRMED (Dynamic01_ros2)**: `base_footprint` behaves as a standard planar mobile base frame:
+- **CONFIRMED (Kimera)**: Base frame (`acl_jackal2/base`) behaves as a standard planar mobile base frame:
   linear motion is along +X and yaw is about +Z (right-handed, ENU-like).
 
-- **CONFIRMED (Dynamic01_ros2)**: The odom twist is purely planar (`v_x` and `ω_z` nonzero; `v_y=v_z=ω_x=ω_y=0`)
-  and the pose+twist satisfy `dp_parent ≈ R_parent_child @ v_child * dt` with cosine similarity ~0.9998 in XY.
-  This confirms the intended base planar axes usage in this dataset.
+- **CONFIRMED (Kimera)**: The odom twist is purely planar (`v_x` and `ω_z` nonzero; `v_y=v_z=ω_x=ω_y=0`)
+  and the pose+twist satisfy `dp_parent ≈ R_parent_child @ v_child * dt` in XY.
 
-### Frame Names (from rosbag)
-- **CONFIRMED (Dynamic01_ros2)**: `base_footprint` is the body/base frame (planar base; Z-up convention implied by covariance and gravity alignment).
-- **CONFIRMED (Dynamic01_ros2)**: `livox_frame` is the Livox MID-360 sensor frame and is **Z-up** for this dataset (ground normal points +Z).
-- **camera_imu_optical_frame**: RealSense D435i IMU frame
-- **odom_combined**: Odometry frame (parent of base_footprint)
+### Frame Names (Kimera)
+- **odom_frame**: `acl_jackal2/odom` — Odometry / world parent frame.
+- **base_frame**: `acl_jackal2/base` — Body/base frame (planar base; Z-up).
+- **LiDAR frame**: `acl_jackal2/velodyne_link` — Velodyne VLP-16; **Z-up** (ground normal · Z ≈ 0.996).
+- **IMU frame**: `acl_jackal2/forward_imu_optical_frame` — Forward camera/IMU optical frame.
 
-**Dataset-specific frame mapping:** For Kimera bags, frame names and axis verification are documented in [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md).
+**Reference:** [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md).
 
 ### Odometry Message Semantics (nav_msgs/Odometry) - MUST MATCH SE(3) MATH
 
@@ -82,8 +81,8 @@ how we interpret `nav_msgs/Odometry` by construction.
 
 Canonical ROS meaning (per message comments and common TF usage):
 
-- **CONFIRMED (bag)**: `header.frame_id` is used as the **parent** frame (e.g., `odom_combined`).
-- **CONFIRMED (bag)**: `child_frame_id` is used as the **child** frame (e.g., `base_footprint`).
+- **CONFIRMED (bag)**: `header.frame_id` is used as the **parent** frame (Kimera: `acl_jackal2/odom`).
+- **CONFIRMED (bag)**: `child_frame_id` is used as the **child** frame (Kimera: `acl_jackal2/base`).
 - **CONFIRMED (code+bag)**: `msg.pose.pose` is interpreted as the rigid transform `T_{parent<-child}` in the usual
   rigid-body form:
 
@@ -114,7 +113,7 @@ Therefore:
 
 Twist semantics:
 
-- **CONFIRMED (Dynamic01_ros2)**: `msg.twist` is specified in the coordinate frame given by `child_frame_id`
+- **CONFIRMED (Kimera)**: `msg.twist` is specified in the coordinate frame given by `child_frame_id`
   (linear/angular velocity expressed in the child/body frame). Empirically, the finite-difference
   position increments match `dp_parent ≈ R_parent_child @ v_child * dt` with cosine similarity ~0.9998 in XY.
 - GC v2 currently uses odom as a pose observation (not a twist constraint).
@@ -140,7 +139,7 @@ Practical note for this codebase today:
 
 - **CONFIRMED (code)**: We transform incoming LiDAR points into **base frame** before any inference.
   Therefore, the "LiDAR body" used by the state and LiDAR evidence effectively
-  coincides with `base_footprint` for geometry. The LiDAR origin offset is still
+  coincides with the configured base frame for geometry. The LiDAR origin offset is still
   used for ray directions via `t_base_lidar`.
 
 ### Extrinsics Direction Convention (No Silent Inverses)
@@ -163,34 +162,19 @@ t_sensor_base = -R_base_sensor^T * t_base_sensor
 
 No swapping of parameter names and no implicit "maybe it's the other direction".
 
-#### LiDAR Frame (Livox MID-360)
-- **Sensor frame**: `livox_frame` (**CONFIRMED (Dynamic01_ros2): Z-up**)
-- **Base frame**: `base_footprint` (Z-up)
-- **Extrinsic**: `T_base_lidar = [x, y, z, rx, ry, rz]` (rotvec in radians)
-- **TO-CONFIRM**: `T_base_lidar` translation values are correct for this dataset:
-  `t_base_lidar = [-0.011, 0.0, 0.778]` meters (requires physical/calibration confirmation).
-
-  Note: We attempted to infer sensor height from raw LiDAR scans, but in this dataset the dominant planar
-  structures are not consistently the ground plane (many points lie near z≈0 and there are large negative
-  z outliers), so a purely bag-based "ground height" estimate is not stable enough to certify `tz=0.778`.
-  See `results/confirm_remaining_dynamic01.json` for the attempted estimates and why they are inconclusive.
-- **CONFIRMED (Dynamic01_ros2)**: `T_base_lidar` rotation is identity (`rotvec=[0,0,0]`) and consistent with the bag's
-  point cloud Z-up convention (ground normal points +Z in `livox_frame`).
-- **If evaluation shows ~180° roll offset vs ground truth:** Run `tools/diagnose_coordinate_frames.py` on the bag. If it reports Z-down, set `T_base_lidar` rotation to `[π, 0, 0]` and update this subsection to record dataset-specific Z-down. See `docs/PIPELINE_DESIGN_GAPS.md` §5.5.
+#### LiDAR Frame (Kimera: Velodyne VLP-16)
+- **Sensor frame**: `acl_jackal2/velodyne_link` (**CONFIRMED (Kimera): Z-up**, ground normal · Z ≈ 0.996)
+- **Base frame**: `acl_jackal2/base` (Z-up)
+- **Extrinsic**: `T_base_lidar = [x, y, z, rx, ry, rz]` (rotvec in radians). Kimera: from calibration; small roll/pitch (~1.3°) in `gc_kimera.yaml`.
 - **Transformation**: `p_base = R_base_lidar @ p_lidar + t_base_lidar`
-- **Location**: `fl_slam_poc/backend/backend_node.py:556`
+- **Location**: `fl_slam_poc/backend/backend_node.py`
+- **If evaluation shows ~180° roll offset vs ground truth:** Run `tools/diagnose_coordinate_frames.py` on the bag. If it reports Z-down, set `T_base_lidar` rotation to `[π, 0, 0]`. See `docs/PIPELINE_DESIGN_GAPS.md` §5.5.
 
-#### IMU Frame
-- **Current sensor**: `/livox/mid360/imu` → `livox_frame`
-- **Alternative**: `/camera/imu` → `camera_imu_optical_frame` (not currently used)
-- **Extrinsic**: `T_base_imu = [x, y, z, rx, ry, rz]` (rotvec in radians)
-- **CONFIRMED (Dynamic01_ros2)**: `T_base_imu` rotation is gravity-aligned for this dataset:
-  applying `R_base_imu` to the mean specific force yields `a_base_mean ≈ [0, 0, +g]`.
-  Current value used in runs: `[0.0, 0.0, 0.0, -0.015586, 0.489293, 0.0]` (~28°).
-  - Translation: `[0.0, 0.0, 0.0]` (co-located with LiDAR)
-  - Rotation: `[-0.015586, 0.489293, 0.0]` radians (~28° to align specific force with +Z)
-- **Transformation**: `accel_base = R_base_imu @ accel_imu`
-- **Location**: `fl_slam_poc/backend/backend_node.py:470-471`
+#### IMU Frame (Kimera)
+- **Current sensor**: `/acl_jackal/forward/imu` → `acl_jackal2/forward_imu_optical_frame`
+- **Extrinsic**: `T_base_imu = [x, y, z, rx, ry, rz]` (rotvec in radians). Kimera: from calibration + bag-estimated rotation (forward_imu_optical_frame differs from gyro).
+- **Transformation**: `accel_base = R_base_imu @ accel_imu`, `gyro_base = R_base_imu @ gyro_imu`
+- **Location**: `fl_slam_poc/backend/backend_node.py`
 
 ## Gravity and IMU Conventions (CRITICAL)
 
@@ -229,26 +213,15 @@ Fix:
 - **Location**: `fl_slam_poc/backend/operators/imu_evidence.py:148-170`
 
 ### IMU Units
-- **CONFIRMED (Dynamic01_ros2)**: Livox MID-360 raw output acceleration units are **g's** for this dataset
-  (mean ||a_raw|| ≈ 0.998 g; after scaling by 9.81, mean ||a|| ≈ 9.79 m/s²).
-- **GC_IMU_ACCEL_SCALE**: `9.81` (conversion factor from g's to m/s²)
+- **Kimera**: IMU message units are dataset-dependent; config `imu_accel_scale` (default 1.0) converts to m/s² when needed.
 - **Internal units**: All acceleration in **m/s²**
-- **Location**: `fl_slam_poc/backend/backend_node.py:466`
-  ```python
-  accel = accel_raw * constants.GC_IMU_ACCEL_SCALE  # g → m/s²
-  ```
+- **Location**: `fl_slam_poc/common/constants.py`, `backend_node.py` (accel scale from config)
 
 ### Gyroscope Convention
-- **CONFIRMED (Dynamic01_ros2, base frame)**: Gyro angular velocity magnitudes are consistent with rad/s
-  (mean ||ω|| ≈ 0.157 rad/s, max ≈ 0.649 rad/s), and the sign of `ωz` after applying `R_base_imu`
-  agrees with odom yaw-rate sign on average (positive sign-product mean).
-- **TO-CONFIRM (native IMU frame)**: Exact native-frame axis and sign conventions of the IMU driver
-  (the base-frame convention is what GC uses after applying `T_base_imu`).
-  We can, however, empirically confirm that after applying `R_base_imu`, `omega_base.z` correlates with
-  odom yaw-rate with positive sign and high correlation (see `results/confirm_remaining_dynamic01.json`).
-- **Right-hand rule**: Positive rotation about +Z axis is counter-clockwise when viewed from above
+- **CONFIRMED (Kimera, base frame)**: Gyro angular velocity after applying `R_base_imu`; `omega_base.z` correlates with odom yaw-rate.
+- **Right-hand rule**: Positive rotation about +Z axis is counter-clockwise when viewed from above.
 - **After extrinsic**: `gyro_base = R_base_imu @ gyro_imu`
-- **Location**: `fl_slam_poc/backend/backend_node.py:470`
+- **Location**: `fl_slam_poc/backend/backend_node.py`
 
 ## Yaw / Rotation Sign Convention (Audit-Ready)
 
@@ -440,22 +413,16 @@ These are not "heuristics"; they are deterministic symptoms of convention mismat
 - **TUM format**: https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats
 - **SE(3) Lie group**: Barfoot (2017), Forster et al. (2017)
 
-## Empirical Validation Artifacts (Dynamic01_ros2)
+## Empirical Validation Artifacts (Kimera)
 
 The following files are produced by deterministic inspection of the rosbag and
-serve as audit evidence for the **CONFIRMED (Dynamic01_ros2)** labels above:
+serve as audit evidence for the **CONFIRMED (Kimera)** labels above:
 
-- `results/frame_validation_dynamic01.json`
-  - Confirms: `/odom` frame_id stability, `/livox/mid360/imu` frame_id, accel units (~1 g),
-    odom twist semantics (dp ≈ R v dt), and gyro-vs-odom yaw-rate sign agreement.
-- `results/frame_diagnose_dynamic01.txt`
-  - Confirms: LiDAR point cloud Z-up convention and that `T_base_lidar` rotation can be identity for this bag;
-  also confirms odom covariance ordering is ROS-standard for this dataset.
-- `results/confirm_remaining_dynamic01.json`
-  - Confirms: IMU yaw-axis sign consistency after applying `R_base_imu` (regression and correlation vs odom yaw-rate).
-  - Attempts: LiDAR height/translation inference from raw scans; currently inconclusive for certifying `t_base_lidar.z`.
-- `results/turn_invariant_dynamic01.json`
-  - Method: left-turn invariant test on a CCW segment selected by `/odom` yaw-rate (`> 0.05 rad/s`).
-  - Result: `gyro_base_z_mean` and `accel_base_y_mean` are both **positive** in the selected turn window
+- Run `tools/diagnose_coordinate_frames.py` on a Kimera bag (LiDAR Z-up, odom twist, IMU gravity).
+- Run `tools/validate_frame_conventions.py` when available (frame IDs, accel units, odom twist semantics).
+See [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md) for diagnostic commands and results (e.g. 10_14_acl_jackal-005).
+- (Legacy Dynamic01 artifacts removed; use Kimera diagnostics above.)
+  (Legacy Dynamic01 turn-invariant test; Kimera uses diagnose_coordinate_frames above.)
+  - Result (archived): turn-invariant test
     (`t_start=1732437253.3068836`, `t_end=1732437260.0567005`), so the “gyro Z flipped vs accel” hypothesis
     is **not supported** for this bag segment.

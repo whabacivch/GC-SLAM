@@ -1,5 +1,5 @@
 """
-Data structures for Golden Child SLAM v2.
+Data structures for Geometric Compositional SLAM v2.
 
 PrimitiveMap and MeasurementBatch are the canonical map and measurement types.
 IW states (process/measurement noise) live in operators/structures as needed.

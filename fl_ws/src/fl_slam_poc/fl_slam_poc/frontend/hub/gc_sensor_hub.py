@@ -1,6 +1,6 @@
 """
 =============================================================================
-GC SENSOR HUB - Single-Process Frontend for Golden Child SLAM
+GC SENSOR HUB - Single-Process Frontend for Geometric Compositional SLAM
 =============================================================================
 
 Runs all frontend preprocessing in one process (MultiThreadedExecutor).
@@ -15,7 +15,7 @@ Architecture:
         ▼
     /gc/sensors/* (canonical topics for backend)
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
 """
 
 from __future__ import annotations

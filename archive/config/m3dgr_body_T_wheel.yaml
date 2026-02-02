@@ -2,7 +2,7 @@
 # Source: M3DGR calibration.md (# wheel 2 camera_imu -> body_T_wheel, !!opencv-matrix).
 # Used to transform our estimated trajectory (T_world<-wheel) to body frame
 # (T_world<-body) before evaluation when GT is in body frame.
-# See docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md § M3DGR calibration.
+# See archive/docs/TRACE_TRAJECTORY_AND_GROUND_TRUTH.md § M3DGR calibration.
 #
 # 4x4 row-major: [R | t; 0 0 0 1]. Values copied from calibration.md data line
 # (element 8 is 0.0477569625897234e-01 = 0.00477569625897234).

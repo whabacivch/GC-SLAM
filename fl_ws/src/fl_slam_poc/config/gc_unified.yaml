@@ -1,5 +1,5 @@
 # =============================================================================
-# GC UNIFIED CONFIG - Golden Child SLAM v2 (Kimera / PointCloud2 default)
+# GC UNIFIED CONFIG - Geometric Compositional SLAM v2 (Kimera / PointCloud2 default)
 # =============================================================================
 #
 # Default profile: Kimera bags (PointCloud2 LiDAR, standard IMU). Use gc_kimera.yaml
@@ -8,7 +8,7 @@
 # Topic flow: raw bag → pointcloud_passthrough / odom_normalizer / imu_normalizer
 #             → /gc/sensors/* → gc_backend_node
 #
-# Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md
+# Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
 # =============================================================================
 
 # -----------------------------------------------------------------------------

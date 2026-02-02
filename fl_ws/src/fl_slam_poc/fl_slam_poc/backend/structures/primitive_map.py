@@ -1,5 +1,5 @@
 """
-PrimitiveMap: Probabilistic primitive atlas for Golden Child SLAM v2.
+PrimitiveMap: Probabilistic primitive atlas for Geometric Compositional SLAM v2.
 
 Reference: .cursor/plans/visual_lidar_rendering_integration_*.plan.md
 

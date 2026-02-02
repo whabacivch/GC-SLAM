@@ -10,7 +10,7 @@ This tool is intentionally simple and conservative:
 Notes:
 - With gravity alone, yaw about gravity is unobservable. This tool estimates roll/pitch alignment only.
 - For Livox Mid-360 bags, /livox/mid360/imu is typically in "livox_frame" and reports acceleration in g.
-- Golden Child uses Z-up world gravity (0,0,-9.81), so the expected *specific force* direction at rest is +Z.
+- Geometric Compositional uses Z-up world gravity (0,0,-9.81), so the expected *specific force* direction at rest is +Z.
 """
 
 from __future__ import annotations

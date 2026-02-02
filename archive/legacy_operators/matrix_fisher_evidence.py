@@ -1,5 +1,5 @@
 """
-Matrix Fisher rotation evidence operator for Golden Child SLAM v2.
+Matrix Fisher rotation evidence operator for Geometric Compositional SLAM v2.
 
 Replaces Wahba + vMF Laplace with principled Matrix Fisher distribution on SO(3).
 
@@ -15,7 +15,7 @@ gives the ML rotation R* = U V^T.
 The information matrix (Fisher info) for rotation perturbations δθ is derived
 from the second-order expansion of tr(F^T exp([δθ]_×) R*).
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5.9 (replacement)
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.9 (replacement)
 """
 
 from __future__ import annotations

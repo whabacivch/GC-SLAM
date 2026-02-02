@@ -1,5 +1,5 @@
 """
-LiDAR Surfel Extraction for Golden Child SLAM v2.
+LiDAR Surfel Extraction for Geometric Compositional SLAM v2.
 
 Reference: .cursor/plans/visual_lidar_rendering_integration_*.plan.md Section 4
 
@@ -86,6 +86,13 @@ def _extract_surfels_core(
     points = np.asarray(points, dtype=np.float64)
     timestamps = np.asarray(timestamps, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
+
+    # Drop padded points (weight==0) before voxelization to avoid zero-mass planes.
+    if weights.size > 0:
+        mask = weights > 0.0
+        points = points[mask]
+        timestamps = timestamps[mask]
+        weights = weights[mask]
 
     if points.shape[0] == 0:
         return (

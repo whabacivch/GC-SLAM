@@ -1,5 +1,5 @@
 """
-PredictDiffusion operator for Golden Child SLAM v2.
+PredictDiffusion operator for Geometric Compositional SLAM v2.
 
 OU-style bounded propagation with continuous DomainProjectionPSD.
 
@@ -11,7 +11,7 @@ For A = -λI, the closed-form OU propagation is:
 
 This is continuous, smooth, and bounded: as Δt → ∞, Σ → Q/(2λ) (not ∞).
 
-Reference: docs/GOLDEN_CHILD_INTERFACE_SPEC.md Section 5.2
+Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.2
 """
 
 from __future__ import annotations

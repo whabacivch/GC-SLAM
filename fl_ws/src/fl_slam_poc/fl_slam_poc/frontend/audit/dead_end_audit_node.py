@@ -1,5 +1,5 @@
 """
-Dead-end Audit Node (Golden Child).
+Dead-end Audit Node (Geometric Compositional).
 
 Intentional "dead end" subscriber node for strict accountability:
 - Subscribes to explicitly listed topics that are *not* consumed by GC v2 math.
