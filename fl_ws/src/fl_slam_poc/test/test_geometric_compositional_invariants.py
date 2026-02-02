@@ -114,10 +114,6 @@ class TestBudgetConstants:
         expected = 0.01 / constants.GC_K_HYP
         assert abs(constants.GC_HYP_WEIGHT_FLOOR - expected) < 1e-10
 
-    def test_b_bins(self):
-        """B_BINS must be 48."""
-        assert constants.GC_B_BINS == 48
-
     def test_n_points_cap(self):
         """N_POINTS_CAP must be 8192."""
         assert constants.GC_N_POINTS_CAP == 8192
@@ -250,3 +246,27 @@ class TestSensorHubWiring:
             text = f.read()
         assert "dead_end_audit:" in text
         assert "topic_specs:" in text
+
+    def test_gc_rosbag_launch_uses_camera_rgbd_node(self):
+        """Single-path camera: launch must use camera_rgbd_node and must not wire the legacy two-node path."""
+        pkg_root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(pkg_root, "launch", "gc_rosbag.launch.py")
+        if not os.path.exists(path):
+            pytest.skip("gc_rosbag.launch.py not found")
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        assert 'executable="camera_rgbd_node"' in text
+        assert 'executable="image_decompress_cpp"' not in text
+        assert 'executable="depth_passthrough"' not in text
+
+    def test_unified_yaml_uses_camera_rgbd_topic(self):
+        """Backend config must specify camera_rgbd_topic (legacy camera_image_topic/camera_depth_topic removed)."""
+        pkg_root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(pkg_root, "config", "gc_unified.yaml")
+        if not os.path.exists(path):
+            pytest.skip("gc_unified.yaml not found")
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        assert "camera_rgbd_topic:" in text
+        assert "camera_image_topic:" not in text
+        assert "camera_depth_topic:" not in text

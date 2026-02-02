@@ -4,6 +4,57 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-02-02: BEV15 future scaffolds + exact vMF view pushforward + Rerun RGBD/LiDAR
+
+- Kept BEV15 in the spec as a future view-layer target; clarified that vMF pushforward under view rotation is exact (`η' = R η`) and no S¹ collapse is used.
+- Restored BEV OT scaffolds as explicitly FUTURE/EXPERIMENTAL modules (not wired into runtime).
+- Added exact vMF rotation helpers in `common/bev_pushforward.py` for future BEV15 view use.
+- Extended Rerun visualization to log RGB, depth, LiDAR points, and map/trajectory for a faithful probabilistic world view (recordable to .rrd for post-hoc viewing).
+- Added BEV15 post-run .rrd generation and a separate Rerun viewer launch in `tools/run_and_evaluate_gc.sh`.
+
+## 2026-02-02: Camera RGB → map/splat colors (root cause fix)
+
+**Root cause:** Splats in Rerun had no real colors and the map did not reflect the environment because camera RGB was never sampled or passed into the pipeline. The backend used camera for pose/geometry (visual_pose_evidence) but not for appearance.
+
+**Fix (by construction):**
+- **Feature3D:** Added optional `color: Optional[np.ndarray]` (3,) RGB in [0,1]. In `VisualFeatureExtractor.extract()`, sample RGB at each keypoint (u,v) via nearest pixel, bounds-clamped; attach to each Feature3D.
+- **splat_prep_fused:** When building fused Feature3D from LiDAR–camera depth fusion, propagate `feat.color` so fused splats keep camera color.
+- **feature_list_to_camera_batch:** Build a `colors` array from Feature3D.color (default gray when missing) and pass `colors=` to `measurement_batch_from_camera_splats()`. Camera batch now carries real RGB; map fusion (responsibility-weighted `colors_meas`) and splat_export then get camera-derived colors.
+
+**Result:** Primitive map and splat_export.npz / Rerun ellipsoids now receive camera RGB. Re-run eval and open the built .rrd to see colored splats and environment.
+
+## 2026-02-02: IMU extrinsic fix, odom z prior, validation diagnostics
+
+**Critical fix: IMU extrinsic rotation sign.** The D435i IMU accelerometer reads -Y when stationary (gravity in +Y in optical frame). T_base_imu rotation was incorrectly set to Rx(+90°) which mapped -Y → -Z; correct is Rx(-90°) = rotvec `[-1.57, 0, 0]` which maps -Y → +Z to cancel gravity_W = [0,0,-9.81]. This caused ~20 m/s² net Z acceleration and 636m+ trajectory Z drift. Fixed in gc_unified.yaml and calibration/kimera_acl_jackal2.yaml.
+
+**Odom z prior:** Backend now uses actual `pos.z` from odom (instead of forcing `GC_PLANAR_Z_REF=0`), but caps trust via `cov[2,2] = max(cov[2,2], GC_ODOM_Z_VARIANCE_PRIOR)`. Default 1e6 m² (σ_z ≥ 1000m = "don't trust odom z"). Anchor smoothing still uses z_planar reference.
+
+**Validation diagnostics:** Added twist-derived and IMU-derived scalars to ScanDiagnostics:
+- `distance_pose`: ||t_curr - t_prev|| from belief pose delta (m)
+- `distance_twist`: ||v_body|| × dt_sec from odom twist (m)
+- `speed_odom`: ||v_body|| scalar speed (m/s)
+- `speed_pose`: distance_pose / dt_sec (m/s)
+- `imu_jerk_norm_mean`, `imu_jerk_norm_max`: jerk proxy ||a_{i+1} - a_i|| / dt_i (m/s³)
+
+## 2026-02-02: Reality-aligned GC v2 interface spec (legacy purge)
+
+- Rewrote `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md` to match the current backend (PrimitiveMap + explicit backend selection + factor-based IMU/odom evidence + IW adaptive noise) and removed legacy descriptions that no longer reflect runtime behavior.
+- Added a non-negotiable modeling contract section (dependent evidence, no gating/heuristics, “every raw bit” accounting) with explicit information-geometry and Frobenius/pre-Frobenius invariants, anchored to `docs/Comprehensive Information Geometry.md`.
+- Extended runtime manifest reporting to include `deskew_rotation_only` so ablation modes can’t be hidden.
+- Added certificate support for continuous “overconfidence sentinel” metrics (diagnostic-only; no gating), and populated them in fusion-scale certificates.
+- Added dt/Z observability proxies (`overconfidence.dt_asymmetry`, `overconfidence.z_to_xy_ratio`) and documented dt-collapse/Z-collapse/IW-stiffness risks in the interface spec.
+- Expanded the interface spec’s PrimitiveMap section with concrete concepts and construction steps (MeasurementBatch natural parameters, MA-hex LiDAR surfels with Wishart regularization, LiDAR→camera depth fusion PoE, RGB payload fusion).
+- Made vMF non-optional in the measurement/map interface by moving to a fixed 3-lobe vMF representation (resultant eta is closed-form sum over lobes); added BEV15 pushforward/view utilities.
+- Removed camera-dependent scan skipping: when the camera ring buffer is empty, backend now runs with an empty camera MeasurementBatch (no gating).
+
+**Docs:** KIMERA_FRAME_MAPPING.md updated with root cause for "All motion in Z" symptom and correct IMU extrinsic info.
+
+## 2026-02-02: Post-hoc Rerun, BEV 15 shading, Ellipsoids3D
+
+- **Rerun after eval only:** Eval script no longer records Rerun during the run. After eval finishes, `tools/build_rerun_from_splat.py` builds a single .rrd from `splat_export.npz` + trajectory, then the script opens Rerun automatically so the user sees the full splat world once.
+- **Post-hoc builder:** New `tools/build_rerun_from_splat.py` loads splat export and TUM trajectory, computes Ellipsoids3D from covariances (same math as 3D Gaussian principal axes), BEV 15 shaded colors (vMF + fBm from `fl_slam_poc.backend.rendering`), trajectory as LineStrips3D and Transform3D per pose (with quat when TUM has 8 columns). Writes `gc_slam.rrd`; no JAXsplat required for Rerun.
+- **run_and_evaluate_gc.sh:** Passes `use_rerun:=false`; after dashboard, runs `build_rerun_from_splat.py "$RESULTS_DIR"` when `splat_export.npz` exists, then opens Rerun with the built .rrd.
+
 ## 2026-02-02: Kimera-only cleanup — remove non-Kimera dataset references
 
 - **Dataset:** Project uses only the Kimera rosbag/dataset. All M3DGR/Dynamic01 references removed from active code and docs.
@@ -196,7 +247,7 @@ This file tracks all significant changes, design decisions, and implementation m
 - **Launch (gc_rosbag.launch.py):** Added `enable_camera` (default false) and camera topic args: `camera_rgb_compressed_topic` (default `/acl_jackal/forward/color/image_raw/compressed`), `camera_rgb_output_topic` (`/gc/sensors/camera_image`), `camera_depth_compressed_topic` (default "" for Kimera), `camera_depth_output_topic` (`/gc/sensors/camera_depth`), `camera_depth_raw_topic` (default `/acl_jackal/forward/depth/image_rect_raw`). When `enable_camera:=true`, `image_decompress_cpp` runs (RGB only if depth_compressed empty). When `enable_camera:=true` and `camera_depth_raw_topic` non-empty, `depth_passthrough` runs.
 - **Depth passthrough (frontend/sensors/depth_passthrough.py):** New Python node: subscribes to raw depth (sensor_msgs/Image, e.g. 16UC1 mm), republishes to canonical topic with optional `scale_mm_to_m` (16UC1 → 32FC1 m). Entry point `depth_passthrough`. For Kimera bags that publish raw depth at `.../depth/image_rect_raw`.
 
-Usage (Kimera bag): `ros2 launch fl_slam_poc gc_rosbag.launch.py bag:=/path/to/kimera_ros2 enable_camera:=true` (defaults target acl_jackal topics; for acl_jackal2 use `camera_rgb_compressed_topic:=/acl_jackal2/forward/color/image_raw/compressed camera_depth_raw_topic:=/acl_jackal2/forward/depth/image_rect_raw`).
+Usage (canonical bag): `ros2 launch fl_slam_poc gc_rosbag.launch.py bag:=rosbags/Kimera_Data/ros2/10_14_acl_jackal-005 enable_camera:=true` (defaults target canonical bag topics; see docs/BAG_TOPICS_AND_USAGE.md).
 
 ## 2026-01-30: Production-readiness assessment (splat pipeline)
 

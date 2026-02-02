@@ -1,9 +1,9 @@
 # =============================================================================
-# GC UNIFIED CONFIG - Geometric Compositional SLAM v2 (Kimera / PointCloud2 default)
+# GC UNIFIED CONFIG - Geometric Compositional SLAM v2
 # =============================================================================
 #
-# Default profile: Kimera bags (PointCloud2 LiDAR, standard IMU). Use gc_kimera.yaml
-# for Kimera-Multi-Data; this file provides a generic fallback.
+# SINGLE SOURCE OF TRUTH for all configuration.
+# Extrinsics from: Kimera_Data/calibration/robots/acl_jackal2/extrinsics.yaml
 #
 # Topic flow: raw bag → pointcloud_passthrough / odom_normalizer / imu_normalizer
 #             → /gc/sensors/* → gc_backend_node
@@ -32,8 +32,11 @@ gc_sensor_hub:
       output_topic: /gc/sensors/imu
       output_frame: ""
 
+    # Dead-end audit: topics in bag not consumed by GC (accountability)
     dead_end_audit:
-      topic_specs: []
+      topic_specs:
+        - "/acl_jackal/forward/infra1/image_rect_raw/compressed|sensor_msgs/msg/CompressedImage"
+        - "/acl_jackal/forward/infra2/image_rect_raw/compressed|sensor_msgs/msg/CompressedImage"
       required_topics: []
       required_timeout_sec: 10.0
       status_publish_period_sec: 5.0
@@ -55,9 +58,17 @@ gc_backend:
     pointcloud_layout: vlp16
     lidar_sigma_meas: 1e-3
 
+    # Extrinsics: from Kimera_Data/calibration/robots/acl_jackal2/extrinsics.yaml
+    # Format: [x, y, z, rx, ry, rz] where rotation is in radians (rotvec).
+    # This is the SINGLE SOURCE OF TRUTH - no overrides in launch file or run script.
+    #
+    # IMU NOTE: The bag publishes IMU in forward_imu_optical_frame.
+    # D435i accelerometer reads -Y when stationary (gravity in +Y in optical frame).
+    # Base frame is Z-up: stationary accel should be [0, 0, +g] to cancel gravity_W [0, 0, -g].
+    # Rotation Rx(-90°) maps IMU -Y to base +Z: rotvec = [-pi/2, 0, 0] = [-1.570796, 0, 0]
     extrinsics_source: inline
-    T_base_lidar: [-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]
-    T_base_imu:   [-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.0]
+    T_base_lidar: [-0.065447, -0.100474, 0.108987, -0.002723, -0.069383, 0.028979]
+    T_base_imu:   [-0.016020, -0.030220, 0.007400, -1.570796, 0.0, 0.0]
 
     trajectory_export_path: /tmp/gc_slam_trajectory.tum
     status_check_period_sec: 5.0
@@ -68,15 +79,15 @@ gc_backend:
     map_backend: primitive_map
     pose_evidence_backend: primitives
 
-    n_feat: 512
-    n_surfel: 1024
+    # Reduced from 512/1024/8 to avoid OOM in primitive_map_fuse (flat_size = (n_feat+n_surfel)*k_assoc)
+    n_feat: 256
+    n_surfel: 512
     k_assoc: 8
     k_sinkhorn: 50
     primitive_map_max_size: 50000
     primitive_forgetting_factor: 0.999
 
-    camera_image_topic: /gc/sensors/camera_image
-    camera_depth_topic: /gc/sensors/camera_depth
+    camera_rgbd_topic: /gc/sensors/camera_rgbd
     camera_K: [500.0, 500.0, 320.0, 240.0]
     T_base_camera: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     ringbuf_len: 5

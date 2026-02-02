@@ -42,6 +42,17 @@ def feature_list_to_camera_batch(
     kappas = np.array([f.kappa_app for f in features[:n]], dtype=np.float64)
     timestamps = np.full(n, timestamp_sec, dtype=np.float64)
 
+    # Colors: from Feature3D.color (RGB [0,1]) when present, else default gray
+    default_gray = np.array([0.5, 0.5, 0.5], dtype=np.float64)
+    colors_list = []
+    for f in features[:n]:
+        c = getattr(f, "color", None)
+        if c is not None and np.size(c) >= 3:
+            colors_list.append(np.asarray(c, dtype=np.float64).ravel()[:3])
+        else:
+            colors_list.append(default_gray)
+    colors = np.array(colors_list, dtype=np.float64)
+
     # Directions: mu_app if present (unit), else view direction xyz / norm(xyz)
     directions = np.zeros((n, 3), dtype=np.float64)
     for i, f in enumerate(features[:n]):
@@ -59,6 +70,7 @@ def feature_list_to_camera_batch(
         kappas=jnp.array(kappas),
         weights=jnp.array(weights),
         timestamps=jnp.array(timestamps),
+        colors=jnp.array(colors),
         n_feat=n_feat,
         n_surfel=n_surfel,
         eps_lift=eps_lift,

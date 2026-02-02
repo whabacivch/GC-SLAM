@@ -1,9 +1,8 @@
 """
-BEV pushforward: 3D Gaussian (and optional vMF) to 2D BEV for OT/fusion.
+BEV pushforward: exact linear pushforward of 3D Gaussians to 2D BEV.
 
-Plan: lidar-camera_splat_fusion_and_bev_ot. Part B. Linear P ∈ R^{2×3}:
-μ_bev = P μ, Σ_bev = P Σ Pᵀ. Oblique P(φ) = [[1,0,0],[0,cos φ, sin φ]]; config oblique_phi_deg.
-vMF to map: project direction to horizontal (e.g. azimuth); pushforward to S¹ is approximate (stub).
+Linear P ∈ R^{2×3}:
+μ_bev = P μ, Σ_bev = P Σ Pᵀ. Oblique P(φ) = [[1,0,0],[0,cos φ, sin φ]].
 """
 
 from __future__ import annotations
@@ -18,8 +17,14 @@ import numpy as np
 class BEVPushforwardConfig:
     """Configuration for BEV pushforward."""
 
-    # Oblique angle (deg): P(φ) = [[1,0,0],[0,cos φ, sin φ]], φ ≈ 10°
+    # Single-view oblique angle (deg): P(φ) = [[1,0,0],[0,cos φ, sin φ]].
     oblique_phi_deg: float = 10.0
+
+    # Multi-view BEV15: generate N views along a 1D geodesic in the oblique angle parameter.
+    # This is an output-side/view-side construct for rendering/association diagnostics.
+    n_views: int = 15
+    phi_center_deg: float = 10.0
+    phi_span_deg: float = 14.0  # total span across views (deg)
 
 
 def _oblique_P(phi_deg: float) -> np.ndarray:
@@ -64,19 +69,51 @@ def oblique_P_from_config(config: BEVPushforwardConfig) -> np.ndarray:
     return _oblique_P(config.oblique_phi_deg)
 
 
-def pushforward_vmf_to_s1_stub(
-    mu_n: np.ndarray,
-    kappa: float,
-) -> Tuple[float, float]:
+def oblique_Ps_bev15(config: BEVPushforwardConfig) -> np.ndarray:
     """
-    Stub: push vMF on S² to S¹ (e.g. azimuth). Approximate (moment-match or sample).
+    Build BEV15 projection matrices P_k (N,2,3) by sweeping φ along a 1D geodesic in angle space.
 
-    Plan: e_u=(1,0,0), e_v=(0,cos φ, sin φ); d_b = (μ_n·e_u, μ_n·e_v); document
-    that pushforward of vMF to S¹ is approximate. Returns (theta_or_eta, kappa_map)
-    placeholder; implement moment-match when needed.
+    For 1D parameter φ, the geodesic is linear interpolation. We center at phi_center_deg and span phi_span_deg.
     """
-    mu_n = np.asarray(mu_n, dtype=np.float64).ravel()[:3]
-    # Placeholder: azimuth in [-pi, pi] from (x, y) component
-    theta = float(np.arctan2(mu_n[1], mu_n[0]))
-    kappa_map = float(kappa) * float(np.sqrt(mu_n[0] ** 2 + mu_n[1] ** 2 + 1e-12))
-    return (theta, kappa_map)
+    n = int(config.n_views)
+    n = max(1, n)
+    center = float(config.phi_center_deg)
+    span = float(config.phi_span_deg)
+    if n == 1:
+        phis = np.array([center], dtype=np.float64)
+    else:
+        offsets = np.linspace(-0.5, 0.5, n, dtype=np.float64) * span
+        phis = center + offsets
+    Ps = np.stack([_oblique_P(phi) for phi in phis], axis=0)  # (N,2,3)
+    return Ps
+
+
+def rotate_vmf_eta(R: np.ndarray, eta: np.ndarray) -> np.ndarray:
+    """
+    Exact SO(3) pushforward for vMF natural parameters.
+
+    vMF: f(u) ∝ exp(ηᵀ u), η = κ μ. Under rotation R, pushforward is η' = R η.
+    This is closed-form and in-family (κ unchanged, μ' = R μ).
+    """
+    R = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    eta = np.asarray(eta, dtype=np.float64).ravel()[:3]
+    return R @ eta
+
+
+def rotate_vmf_etas(R: np.ndarray, etas: np.ndarray) -> np.ndarray:
+    """
+    Vectorized SO(3) pushforward for multi-lobe vMF etas: (B,3) -> (B,3).
+    """
+    R = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    etas = np.asarray(etas, dtype=np.float64).reshape(-1, 3)
+    return (R @ etas.T).T
+
+
+__all__ = [
+    "BEVPushforwardConfig",
+    "pushforward_gaussian_3d_to_2d",
+    "oblique_P_from_config",
+    "oblique_Ps_bev15",
+    "rotate_vmf_eta",
+    "rotate_vmf_etas",
+]

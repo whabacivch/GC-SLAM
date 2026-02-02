@@ -43,8 +43,6 @@ setup(
             # Audit / accountability
             "gc_dead_end_audit_node = fl_slam_poc.frontend.audit.dead_end_audit_node:main",
             "wiring_auditor = fl_slam_poc.frontend.audit.wiring_auditor:main",
-            # Camera: depth passthrough for bags with raw depth (e.g. Kimera)
-            "depth_passthrough = fl_slam_poc.frontend.sensors.depth_passthrough:main",
         ],
     },
 )

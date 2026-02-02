@@ -456,6 +456,9 @@ class Feature3D:
     mu_app: Optional[np.ndarray] = None  # (3,) unit vector
     kappa_app: float = 0.0
 
+    # Optional RGB from image at (u,v); [0,1]; used for map/splat coloring
+    color: Optional[np.ndarray] = None  # (3,) RGB
+
 
 @dataclass
 class QuadFitResult:
@@ -708,6 +711,12 @@ class VisualFeatureExtractor:
                 "depth_theta_c": depth_theta_c,
             }
 
+            # Sample RGB at (u,v) for map/splat coloring (nearest pixel, bounds-clamped)
+            h, w = rgb.shape[0], rgb.shape[1]
+            ix = int(round(np.clip(u, 0, w - 1)))
+            iy = int(round(np.clip(v, 0, h - 1)))
+            rgb_sample = np.asarray(rgb[iy, ix], dtype=np.float64).ravel()[:3] / 255.0
+
             features.append(
                 Feature3D(
                     u=u,
@@ -723,6 +732,7 @@ class VisualFeatureExtractor:
                     meta=meta,
                     mu_app=mu_app,
                     kappa_app=float(kappa_app),
+                    color=rgb_sample,
                 )
             )
 

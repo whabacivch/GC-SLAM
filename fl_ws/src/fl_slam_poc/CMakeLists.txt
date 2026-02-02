@@ -18,7 +18,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AnchorCreate.msg"
   "msg/IMUSegment.msg"
   "msg/LoopFactor.msg"
-  DEPENDENCIES std_msgs geometry_msgs
+  "msg/RGBDImage.msg"
+  DEPENDENCIES std_msgs geometry_msgs sensor_msgs
 )
 
 install(DIRECTORY fl_slam_poc/
@@ -27,11 +28,14 @@ install(DIRECTORY fl_slam_poc/
   PATTERN "*.pyc" EXCLUDE
 )
 
-add_executable(image_decompress_cpp src/image_decompress_node.cpp)
-ament_target_dependencies(image_decompress_cpp rclcpp sensor_msgs)
-target_link_libraries(image_decompress_cpp cv_bridge::cv_bridge ${OpenCV_LIBRARIES})
+add_executable(camera_rgbd_node src/camera_rgbd_node.cpp)
+ament_target_dependencies(camera_rgbd_node rclcpp sensor_msgs)
+target_link_libraries(camera_rgbd_node cv_bridge::cv_bridge ${OpenCV_LIBRARIES})
+# Link with generated messages from this package
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
+target_link_libraries(camera_rgbd_node "${cpp_typesupport_target}")
 
-install(TARGETS image_decompress_cpp
+install(TARGETS camera_rgbd_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -40,7 +44,6 @@ install(TARGETS image_decompress_cpp
 install(PROGRAMS
   scripts/gc_backend_node
   scripts/gc_sensor_hub
-  scripts/depth_passthrough
   scripts/odom_normalizer
   scripts/imu_normalizer
   scripts/gc_dead_end_audit_node

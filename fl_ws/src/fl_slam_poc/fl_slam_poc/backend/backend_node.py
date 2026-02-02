@@ -24,6 +24,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import PointCloud2, Imu, PointField, Image
 from std_msgs.msg import String
+from fl_slam_poc.msg import RGBDImage
 
 from fl_slam_poc.common.jax_init import jnp
 from fl_slam_poc.common import constants
@@ -366,12 +367,8 @@ class GeometricCompositionalBackend(Node):
         # Odom vs belief diagnostic: when non-empty, write CSV (raw odom, belief start, belief end) per scan.
         self.declare_parameter("odom_belief_diagnostic_file", "")
         self.declare_parameter("odom_belief_diagnostic_max_scans", 0)  # 0 = all scans
-        # Map and pose evidence: always primitive_map / primitives (bins removed)
-        self.declare_parameter("map_backend", constants.GC_MAP_BACKEND_PRIMITIVE_MAP)
-        self.declare_parameter("pose_evidence_backend", constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES)
-        # Camera (required)
-        self.declare_parameter("camera_image_topic", "/gc/sensors/camera_image")
-        self.declare_parameter("camera_depth_topic", "/gc/sensors/camera_depth")
+        # Camera (required): single RGBD topic from camera_rgbd_node
+        self.declare_parameter("camera_rgbd_topic", "/gc/sensors/camera_rgbd")
         self.declare_parameter("camera_K", [500.0, 500.0, 320.0, 240.0])  # [fx, fy, cx, cy]
         self.declare_parameter("T_base_camera", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # 6D rotvec
         self.declare_parameter("ringbuf_len", constants.GC_RINGBUF_LEN)
@@ -397,9 +394,7 @@ class GeometricCompositionalBackend(Node):
 
         self.forgetting_factor = float(self.get_parameter("forgetting_factor").value)
 
-        # PrimitiveMap is the canonical map (bins removed)
-        self.config.map_backend = str(self.get_parameter("map_backend").value).strip()
-        self.config.pose_evidence_backend = str(self.get_parameter("pose_evidence_backend").value).strip()
+        # PrimitiveMap is the canonical map (single-path primitives)
         self.primitive_map = create_empty_primitive_map(
             max_size=self.config.primitive_map_max_size,
         )
@@ -610,27 +605,15 @@ class GeometricCompositionalBackend(Node):
         self.get_logger().info(f"Odom: {odom_topic}")
         self.get_logger().info(f"IMU: {imu_topic}")
 
-        # Camera (required): subscribe to canonical topics; fail-fast if not set
-        camera_image_topic = str(self.get_parameter("camera_image_topic").value).strip()
-        camera_depth_topic = str(self.get_parameter("camera_depth_topic").value).strip()
-        if not camera_image_topic or not camera_depth_topic:
-            raise ValueError(
-                "camera_image_topic and camera_depth_topic are required; "
-                "got camera_image_topic=%r camera_depth_topic=%r"
-                % (camera_image_topic or "(empty)", camera_depth_topic or "(empty)")
-            )
-        self._latest_rgb: Optional[Tuple[float, np.ndarray]] = None  # (stamp_sec, HxWx3)
-        self._latest_depth: Optional[Tuple[float, np.ndarray]] = None  # (stamp_sec, HxW)
-        self.sub_camera_rgb = self.create_subscription(
-            Image, camera_image_topic, self._on_camera_rgb, qos_sensor,
+        # Camera (required): single RGBD subscription with ring buffer
+        camera_rgbd_topic = str(self.get_parameter("camera_rgbd_topic").value).strip()
+        if not camera_rgbd_topic:
+            raise ValueError("camera_rgbd_topic is required but empty")
+        self.sub_camera_rgbd = self.create_subscription(
+            RGBDImage, camera_rgbd_topic, self._on_camera_rgbd, qos_sensor,
             callback_group=self.cb_group_sensors,
         )
-        self.sub_camera_depth = self.create_subscription(
-            Image, camera_depth_topic, self._on_camera_depth, qos_sensor,
-            callback_group=self.cb_group_sensors,
-        )
-        self.get_logger().info(f"Camera RGB: {camera_image_topic}")
-        self.get_logger().info(f"Camera depth: {camera_depth_topic}")
+        self.get_logger().info(f"Camera RGBD: {camera_rgbd_topic} (ring buffer len={self.camera_ringbuf_max})")
         
         # Publishers
         self.pub_state = self.create_publisher(Odometry, "/gc/state", 10)
@@ -661,7 +644,7 @@ class GeometricCompositionalBackend(Node):
         else:
             self.rerun_visualizer = None
 
-        # PrimitiveMap publisher: /gc/map/points (PointCloud2) when map_backend=primitive_map
+        # PrimitiveMap publisher: /gc/map/points (PointCloud2)
         self.map_publisher: Optional[PrimitiveMapPublisher] = None
         if self.primitive_map is not None:
             self.map_publisher = PrimitiveMapPublisher(
@@ -695,8 +678,21 @@ class GeometricCompositionalBackend(Node):
         """Publish RuntimeManifest at startup."""
         manifest = RuntimeManifest(
             imu_gravity_scale=float(self.config.imu_gravity_scale),
-            pose_evidence_backend=self.config.pose_evidence_backend,
-            map_backend=self.config.map_backend,
+            deskew_rotation_only=bool(self.config.deskew_rotation_only),
+            power_beta_min=float(self.config.power_beta_min),
+            power_beta_exc_c=float(self.config.power_beta_exc_c),
+            power_beta_z_c=float(self.config.power_beta_z_c),
+            pose_evidence_backend=constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES,
+            map_backend=constants.GC_MAP_BACKEND_PRIMITIVE_MAP,
+            topics={
+                "lidar": str(self.get_parameter("lidar_topic").value),
+                "odom": str(self.get_parameter("odom_topic").value),
+                "imu": str(self.get_parameter("imu_topic").value),
+                "camera_rgbd": str(self.get_parameter("camera_rgbd_topic").value),
+                "runtime_manifest": "/gc/runtime_manifest",
+                "certificate": "/gc/certificate",
+                "status": "/gc/status",
+            },
         )
         manifest_dict = manifest.to_dict()
         
@@ -766,12 +762,11 @@ class GeometricCompositionalBackend(Node):
         # parent/world frame of the body, consistent with LiDAR/Wahba and IMU operators.
         #
         # Planar robot: wheel odom often does not observe Z (cov ~1e6 for z/roll/pitch).
-        # By construction our state body frame is the configured base_frame, so base height is ~0.
-        # Use the planar Z reference (GC_PLANAR_Z_REF) so anchor and trajectory are not polluted.
-        z_planar = float(constants.GC_PLANAR_Z_REF)
+        # Use actual pos.z from the message; trust is capped via GC_ODOM_Z_VARIANCE_PRIOR below.
+        # Anchor smoothing still uses GC_PLANAR_Z_REF as a reference height (line 807).
         odom_pose_absolute = se3_from_rotvec_trans(
             jnp.array(rotvec, dtype=jnp.float64),
-            jnp.array([pos.x, pos.y, z_planar], dtype=jnp.float64),
+            jnp.array([pos.x, pos.y, pos.z], dtype=jnp.float64),
         )
         
         # Explicit anchor: provisional A0 on first odom (no scan drops); after K samples, set anchor_correction from A_smoothed
@@ -829,6 +824,8 @@ class GeometricCompositionalBackend(Node):
         # Pose covariance is row-major 6x6: [x,y,z,roll,pitch,yaw]
         # Note: Covariance is unchanged by the relative transformation (same uncertainty)
         cov = np.array(msg.pose.covariance, dtype=np.float64).reshape(6, 6)
+        # Cap z variance to limit trust in odom z (planar robots often have bad/unobserved z)
+        cov[2, 2] = max(cov[2, 2], constants.GC_ODOM_Z_VARIANCE_PRIOR)
         self.last_odom_cov_se3 = jnp.array(cov, dtype=jnp.float64)
 
         # Read twist (velocity) from odometry message
@@ -842,39 +839,37 @@ class GeometricCompositionalBackend(Node):
         twist_cov = np.array(msg.twist.covariance, dtype=np.float64).reshape(6, 6)
         self.last_odom_twist_cov = jnp.array(twist_cov, dtype=jnp.float64)
 
-    def _on_camera_rgb(self, msg: Image):
-        """Store latest RGB from C++ image_decompress output (rgb8 H×W×3); view only, no OpenCV."""
+    def _on_camera_rgbd(self, msg: RGBDImage):
+        """Store coherent (rgb, depth) pair in ring buffer from camera_rgbd_node."""
         stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         try:
-            # Contract: C++ node publishes rgb8; respect step in case of row padding.
-            height = int(msg.height)
-            width = int(msg.width)
+            # Decode RGB (rgb8)
+            rgb_msg = msg.rgb
+            height = int(rgb_msg.height)
+            width = int(rgb_msg.width)
             if height <= 0 or width <= 0:
-                raise ValueError(f"invalid image size {height}x{width}")
-            row_elems = max(1, int(msg.step) // 3)
-            data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, row_elems, 3)
-            rgb = data[:, :width, :].copy()
-            self._latest_rgb = (stamp_sec, rgb)
-        except Exception as e:
-            self.get_logger().warn("Camera RGB buffer view failed: %s" % e)
+                raise ValueError(f"invalid RGB size {height}x{width}")
+            row_elems = max(1, int(rgb_msg.step) // 3)
+            rgb_data = np.frombuffer(rgb_msg.data, dtype=np.uint8).reshape(height, row_elems, 3)
+            rgb = rgb_data[:, :width, :].copy()
 
-    def _on_camera_depth(self, msg: Image):
-        """Store latest depth from C++/depth_passthrough (32FC1 m); view only, no OpenCV."""
-        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        try:
-            # Contract: canonical depth is always 32FC1 in meters (C++ or depth_passthrough)
-            if msg.encoding != "32FC1":
-                raise ValueError(f"depth encoding must be 32FC1; got {msg.encoding!r}")
-            height = int(msg.height)
-            width = int(msg.width)
-            if height <= 0 or width <= 0:
-                raise ValueError(f"invalid image size {height}x{width}")
-            row_elems = max(1, int(msg.step) // 4)
-            data = np.frombuffer(msg.data, dtype=np.float32).reshape(height, row_elems)
-            depth = data[:, :width].astype(np.float64)
-            self._latest_depth = (stamp_sec, depth)
+            # Decode depth (32FC1, meters)
+            depth_msg = msg.depth
+            dh, dw = int(depth_msg.height), int(depth_msg.width)
+            if dh != height or dw != width:
+                raise ValueError(f"RGB/depth size mismatch: rgb {height}x{width}, depth {dh}x{dw}")
+            if depth_msg.encoding != "32FC1":
+                raise ValueError(f"depth encoding must be 32FC1; got {depth_msg.encoding!r}")
+            depth_row_elems = max(1, int(depth_msg.step) // 4)
+            depth_data = np.frombuffer(depth_msg.data, dtype=np.float32).reshape(dh, depth_row_elems)
+            depth = depth_data[:, :dw].astype(np.float64)
+
+            # Push to ring buffer (stamp, rgb, depth)
+            self.camera_ringbuf.append((stamp_sec, rgb, depth))
+            if len(self.camera_ringbuf) > self.camera_ringbuf_max:
+                self.camera_ringbuf.pop(0)
         except Exception as e:
-            self.get_logger().warn("Camera depth buffer view failed: %s" % e)
+            self.get_logger().warn("Camera RGBD buffer failed: %s" % e)
 
     def on_lidar(self, msg: PointCloud2):
         """
@@ -944,6 +939,9 @@ class GeometricCompositionalBackend(Node):
         # =====================================================================
         t_scan = stamp_sec  # CORRECT: scan time is header.stamp, not per-point timestamps
 
+        if self.rerun_visualizer is not None and points.shape[0] > 0:
+            self.rerun_visualizer.log_lidar(np.array(points, dtype=np.float64), t_scan)
+
         # Preserve previous scan time for scan-to-scan interval handling.
         # This must be captured BEFORE updating self.last_scan_stamp.
         t_prev_scan = float(self.last_scan_stamp) if self.last_scan_stamp > 0.0 else 0.0
@@ -1002,42 +1000,91 @@ class GeometricCompositionalBackend(Node):
             self._publish_state_from_pose(pose_6d, stamp)
             self._pending_publish = None
 
-        # Camera required: skip this scan until we have at least one RGB and one depth (ordering race).
-        if self._latest_rgb is None or self._latest_depth is None:
+        # Camera is a first-class sensor, but the pipeline must remain total (no gating).
+        # If the ring buffer is empty, run with an empty camera batch and rely on LiDAR/IMU/odom.
+        if not self.camera_ringbuf:
+            from fl_slam_poc.backend.structures.measurement_batch import create_empty_measurement_batch
+
             self.get_logger().warn(
-                "Skipping scan %d: camera not yet received (rgb=%s depth=%s); waiting for topics."
-                % (self.scan_count, self._latest_rgb is not None, self._latest_depth is not None)
+                f"Scan {self.scan_count}: camera ring buffer empty; using empty camera MeasurementBatch (no gating)."
             )
-            return
-        stamp_rgb, rgb = self._latest_rgb
-        _stamp_depth, depth = self._latest_depth
-        if rgb.shape[:2] != depth.shape[:2]:
-            raise RuntimeError(
-                "Camera RGB and depth shape mismatch: rgb %s depth %s"
-                % (rgb.shape, depth.shape)
+            camera_batch = create_empty_measurement_batch(
+                n_feat=self.config.n_feat,
+                n_surfel=self.config.n_surfel,
             )
-        extraction_result = self.visual_extractor.extract(
-            rgb, depth, color_order="BGR", timestamp_ns=int(stamp_rgb * 1e9)
-        )
-        # LiDAR points in base frame -> camera frame for lidar_depth_evidence
-        points_base = np.array(points, dtype=np.float64)
-        if points_base.shape[0] > 0:
-            points_cam = (self.R_base_camera.T @ (points_base.T - self.t_base_camera[:, None])).T
         else:
-            points_cam = np.zeros((0, 3), dtype=np.float64)
-        fused = splat_prep_fused(
-            extraction_result,
-            points_cam,
-            self.camera_intrinsics,
-            self.depth_fusion_config,
-        )
-        camera_batch = feature_list_to_camera_batch(
-            fused,
-            stamp_rgb,
-            n_feat=self.config.n_feat,
-            n_surfel=self.config.n_surfel,
-            eps_lift=self.config.eps_lift,
-        )
+            # Select frame closest to scan time (argmin |t_frame - t_scan|)
+            best_idx = 0
+            best_dt = abs(self.camera_ringbuf[0][0] - t_scan)
+            for i, (t_frame, _, _) in enumerate(self.camera_ringbuf):
+                dt_frame = abs(t_frame - t_scan)
+                if dt_frame < best_dt:
+                    best_dt = dt_frame
+                    best_idx = i
+            stamp_rgb, rgb, depth = self.camera_ringbuf[best_idx]
+            if self.scan_count <= 5:
+                self.get_logger().info(
+                    f"Camera frame selected: idx={best_idx}/{len(self.camera_ringbuf)}, "
+                    f"t_frame={stamp_rgb:.6f}, t_scan={t_scan:.6f}, dt={best_dt:.6f}s"
+                )
+            if self.rerun_visualizer is not None:
+                self.rerun_visualizer.log_rgbd(rgb, depth, stamp_rgb)
+            extraction_result = self.visual_extractor.extract(
+                rgb, depth, color_order="RGB", timestamp_ns=int(stamp_rgb * 1e9)
+            )
+            # LiDAR points in base frame -> camera frame for lidar_depth_evidence
+            points_base = np.array(points, dtype=np.float64)
+            if points_base.shape[0] > 0:
+                points_cam = (self.R_base_camera.T @ (points_base.T - self.t_base_camera[:, None])).T
+            else:
+                points_cam = np.zeros((0, 3), dtype=np.float64)
+            fused = splat_prep_fused(
+                extraction_result,
+                points_cam,
+                self.camera_intrinsics,
+                self.depth_fusion_config,
+            )
+            # Camera features are extracted in the camera frame; convert to base frame so all
+            # MeasurementBatch primitives share a common sensor frame (base) before world transform.
+            if fused:
+                R = self.R_base_camera
+                t = self.t_base_camera
+                fused_base = []
+                for f in fused:
+                    xyz_cam = np.asarray(f.xyz, dtype=np.float64).reshape(3)
+                    cov_cam = np.asarray(f.cov_xyz, dtype=np.float64).reshape(3, 3)
+                    xyz_base = R @ xyz_cam + t
+                    cov_base = R @ cov_cam @ R.T
+                    if f.mu_app is not None:
+                        mu_app_base = (R @ np.asarray(f.mu_app, dtype=np.float64).reshape(3))
+                    else:
+                        mu_app_base = None
+                    fused_base.append(
+                        f.__class__(
+                            u=f.u,
+                            v=f.v,
+                            xyz=xyz_base,
+                            cov_xyz=cov_base,
+                            info_xyz=f.info_xyz,  # not used downstream (MeasurementBatch recomputes in info form)
+                            logdet_cov=f.logdet_cov,
+                            canonical_theta=f.canonical_theta,
+                            canonical_log_partition=f.canonical_log_partition,
+                            desc=f.desc,
+                            weight=f.weight,
+                            meta=f.meta,
+                            mu_app=mu_app_base,
+                            kappa_app=f.kappa_app,
+                            color=f.color,
+                        )
+                    )
+                fused = fused_base
+            camera_batch = feature_list_to_camera_batch(
+                fused,
+                stamp_rgb,
+                n_feat=self.config.n_feat,
+                n_surfel=self.config.n_surfel,
+                eps_lift=self.config.eps_lift,
+            )
 
         # Slice IMU to integration window only (PIPELINE_DESIGN_GAPS §5.6): avoids 4000-step scan.
         # Window = [min(t_last_scan, scan_start), max(t_scan, scan_end)]; pad to GC_MAX_IMU_PREINT_LEN.
@@ -1347,7 +1394,7 @@ class GeometricCompositionalBackend(Node):
             )
             self.rerun_visualizer.log_trajectory(path_xyz, stamp_sec)
 
-        # PrimitiveMap as PointCloud2 (/gc/map/points) when map_backend=primitive_map
+        # PrimitiveMap as PointCloud2 (/gc/map/points)
         if self.map_publisher is not None and self.primitive_map is not None:
             self.map_publisher.publish(self.primitive_map, stamp_sec)
         

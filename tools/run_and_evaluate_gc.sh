@@ -19,18 +19,17 @@ BAG_PLAY_RATE="${BAG_PLAY_RATE:-0.25}"
 BAG_DURATION="${BAG_DURATION:-60}"
 
 # ============================================================================
-# Dataset: Kimera (rosbags/Kimera_Data/). See docs/KIMERA_FRAME_MAPPING.md.
+# Canonical bag: single Kimera bag used for all testing. See docs/BAG_TOPICS_AND_USAGE.md.
 # ============================================================================
 BAG_PATH="${BAG_PATH:-$PROJECT_ROOT/rosbags/Kimera_Data/ros2/10_14_acl_jackal-005}"
 GT_FILE="${GT_FILE:-$PROJECT_ROOT/rosbags/Kimera_Data/ground_truth/1014/acl_jackal_gt.tum}"
-CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/fl_ws/src/fl_slam_poc/config/gc_kimera.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/fl_ws/src/fl_slam_poc/config/gc_unified.yaml}"
 ODOM_FRAME="${ODOM_FRAME:-acl_jackal2/odom}"
 BASE_FRAME="${BASE_FRAME:-acl_jackal2/base}"
 POINTCLOUD_LAYOUT="${POINTCLOUD_LAYOUT:-vlp16}"
 LIDAR_SIGMA_MEAS="${LIDAR_SIGMA_MEAS:-0.001}"
 BAG_DURATION="${BAG_DURATION:-60}"
-T_BASE_LIDAR="${T_BASE_LIDAR:-[-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]}"
-T_BASE_IMU="${T_BASE_IMU:-[-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.000000]}"
+# Extrinsics now loaded from config yaml (single source of truth) - no inline overrides
 IMU_ACCEL_SCALE="${IMU_ACCEL_SCALE:-1.0}"
 [ -n "$CONFIG_PATH" ] && CONFIG_ARG="config_path:=$CONFIG_PATH" || CONFIG_ARG=""
 
@@ -273,12 +272,11 @@ LAUNCH_OPTS=(
   lidar_sigma_meas:="$LIDAR_SIGMA_MEAS"
   odom_belief_diagnostic_file:="$RESULTS_DIR/odom_belief_diagnostic.csv"
   odom_belief_diagnostic_max_scans:="200"
-  rerun_recording_path:="$RESULTS_DIR/gc_slam.rrd"
+  use_rerun:=false
   splat_export_path:="$RESULTS_DIR/splat_export.npz"
 )
 [ -n "$CONFIG_ARG" ] && LAUNCH_OPTS+=( "$CONFIG_ARG" )
-[ -n "$T_BASE_LIDAR" ] && LAUNCH_OPTS+=( "T_base_lidar:=$T_BASE_LIDAR" )
-[ -n "$T_BASE_IMU" ] && LAUNCH_OPTS+=( "T_base_imu:=$T_BASE_IMU" )
+# Extrinsics from config yaml only (no inline overrides)
 [ -n "$IMU_ACCEL_SCALE" ] && LAUNCH_OPTS+=( "imu_accel_scale:=$IMU_ACCEL_SCALE" )
 
 ros2 launch fl_slam_poc gc_rosbag.launch.py "${LAUNCH_OPTS[@]}" \
@@ -589,13 +587,76 @@ if [ -f "$RESULTS_DIR/diagnostics.npz" ]; then
         print_warn "Could not auto-open browser. Open manually: ${CYAN}$DASHBOARD_OUT${NC}"
     fi
 
-    # Open Rerun recording if present (3D trajectory + map)
+    # Post-hoc Rerun: build .rrd from splat_export + trajectory, then open
     RERUN_RRD="$RESULTS_DIR/gc_slam.rrd"
-    if [ -f "$RERUN_RRD" ] && command -v rerun >/dev/null 2>&1; then
-        rerun "$RERUN_RRD" 2>/dev/null &
-        print_ok "Rerun recording opened: ${CYAN}$RERUN_RRD${NC}"
-    elif [ -f "$RERUN_RRD" ]; then
-        print_warn "Rerun recording saved: ${CYAN}$RERUN_RRD${NC} (install rerun and run: rerun \"$RERUN_RRD\")"
+    SPLAT_NPZ="$RESULTS_DIR/splat_export.npz"
+    BEV15_RRD="$RESULTS_DIR/gc_bev15.rrd"
+    if [ -f "$SPLAT_NPZ" ]; then
+        if env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/build_rerun_from_splat.py" \
+            "$RESULTS_DIR" --output "$RERUN_RRD" --bev15-output "$BEV15_RRD"; then
+            print_ok "Rerun recording built: ${CYAN}$RERUN_RRD${NC}"
+            print_ok "BEV15 Rerun recording built: ${CYAN}$BEV15_RRD${NC}"
+        else
+            print_warn "Rerun build failed (see above). Splat: ${CYAN}$SPLAT_NPZ${NC}"
+        fi
+    else
+        print_warn "No splat_export.npz (backend may have exited before shutdown). Rerun not built."
+    fi
+    if [ -f "$RERUN_RRD" ]; then
+        RERUN_CMD=""
+        if [ -n "$VENV_PATH" ] && [ -x "$VENV_PATH/bin/rerun" ]; then
+            RERUN_CMD="$VENV_PATH/bin/rerun"
+        elif command -v rerun >/dev/null 2>&1; then
+            RERUN_CMD="rerun"
+        fi
+        if [ -n "$RERUN_CMD" ]; then
+            RERUN_WEB_PORT="${RERUN_WEB_PORT:-9090}"
+            "$RERUN_CMD" --serve-web --web-viewer --web-viewer-port "$RERUN_WEB_PORT" "$RERUN_RRD" 2>/dev/null &
+            RERUN_PID=$!
+            sleep 2
+            RERUN_URL="http://127.0.0.1:$RERUN_WEB_PORT"
+            if command -v xdg-open >/dev/null 2>&1; then
+                xdg-open "$RERUN_URL" 2>/dev/null &
+            elif [ -n "$BROWSER" ]; then
+                "$BROWSER" "$RERUN_URL" 2>/dev/null &
+            fi
+            if kill -0 "$RERUN_PID" 2>/dev/null; then
+                print_ok "Rerun recording opened in web viewer: ${CYAN}$RERUN_RRD${NC} → $RERUN_URL"
+            else
+                print_warn "Rerun viewer may have exited. Open manually: ${CYAN}$RERUN_URL${NC}"
+            fi
+        else
+            print_warn "Rerun recording saved: ${CYAN}$RERUN_RRD${NC} (install rerun-sdk and run: rerun --serve-web --web-viewer \"$RERUN_RRD\")"
+        fi
+    fi
+
+    # BEV15 post-run view-layer (separate Rerun viewer)
+    if [ -f "$BEV15_RRD" ]; then
+        RERUN_CMD=""
+        if [ -n "$VENV_PATH" ] && [ -x "$VENV_PATH/bin/rerun" ]; then
+            RERUN_CMD="$VENV_PATH/bin/rerun"
+        elif command -v rerun >/dev/null 2>&1; then
+            RERUN_CMD="rerun"
+        fi
+        if [ -n "$RERUN_CMD" ]; then
+            BEV15_WEB_PORT="${BEV15_WEB_PORT:-9091}"
+            "$RERUN_CMD" --serve-web --web-viewer --web-viewer-port "$BEV15_WEB_PORT" "$BEV15_RRD" 2>/dev/null &
+            BEV15_PID=$!
+            sleep 2
+            BEV15_URL="http://127.0.0.1:$BEV15_WEB_PORT"
+            if command -v xdg-open >/dev/null 2>&1; then
+                xdg-open "$BEV15_URL" 2>/dev/null &
+            elif [ -n "$BROWSER" ]; then
+                "$BROWSER" "$BEV15_URL" 2>/dev/null &
+            fi
+            if kill -0 "$BEV15_PID" 2>/dev/null; then
+                print_ok "BEV15 Rerun viewer opened: ${CYAN}$BEV15_RRD${NC} → $BEV15_URL"
+            else
+                print_warn "BEV15 Rerun viewer may have exited. Open manually: ${CYAN}$BEV15_URL${NC}"
+            fi
+        else
+            print_warn "BEV15 Rerun recording saved: ${CYAN}$BEV15_RRD${NC} (install rerun-sdk and run: rerun --serve-web --web-viewer \"$BEV15_RRD\")"
+        fi
     fi
 
     # JAXsplat visualization: render splat export and open image

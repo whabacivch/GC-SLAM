@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Align M3DGR ground truth timestamps with SLAM trajectory.
+Align ground truth timestamps with SLAM trajectory (Kimera or other TUM-format datasets).
 
-M3DGR ground truth timestamps are in absolute UNIX time.
-SLAM trajectory uses ROS2 simulation time starting near 0.
-
-This script finds the time offset and creates an aligned ground truth file.
+Ground truth and estimate may use different time bases (e.g. GT absolute time vs bag/sim time).
+This script computes the time offset from the first poses and rewrites GT so its timestamps
+match the estimate timeline, enabling evo to associate trajectories by time.
 """
 import sys
 

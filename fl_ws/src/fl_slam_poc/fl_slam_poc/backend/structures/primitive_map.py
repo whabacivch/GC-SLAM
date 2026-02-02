@@ -57,8 +57,8 @@ class Primitive:
     Lambda: jnp.ndarray  # (3, 3) precision matrix
     theta: jnp.ndarray   # (3,) information vector
 
-    # Orientation (vMF natural parameter)
-    eta: jnp.ndarray     # (3,) = kappa * mu_dir
+    # Orientation/appearance (multi-lobe vMF natural parameters, B=GC_VMF_N_LOBES)
+    etas: jnp.ndarray    # (B, 3) = kappa_b * mu_b; resultant eta = sum over lobes
 
     # Metadata
     primitive_id: int    # Stable unique ID
@@ -79,13 +79,15 @@ class Primitive:
         return jnp.linalg.inv(Lambda_reg)
 
     def kappa(self) -> float:
-        """vMF concentration kappa = ||eta||."""
-        return float(jnp.linalg.norm(self.eta))
+        """Resultant vMF concentration kappa = ||sum_b eta_b||."""
+        eta_sum = jnp.sum(self.etas, axis=0)
+        return float(jnp.linalg.norm(eta_sum))
 
     def mean_direction(self, eps_mass: float = constants.GC_EPS_MASS) -> jnp.ndarray:
-        """Mean direction mu_dir = eta / ||eta||."""
-        norm = jnp.linalg.norm(self.eta)
-        return self.eta / (norm + eps_mass)
+        """Resultant mean direction mu_dir = eta_sum / ||eta_sum||."""
+        eta_sum = jnp.sum(self.etas, axis=0)
+        norm = jnp.linalg.norm(eta_sum)
+        return eta_sum / (norm + eps_mass)
 
 
 # =============================================================================
@@ -115,7 +117,7 @@ class PrimitiveMap:
     """
     Lambdas: jnp.ndarray      # (MAX_SIZE, 3, 3)
     thetas: jnp.ndarray       # (MAX_SIZE, 3)
-    etas: jnp.ndarray         # (MAX_SIZE, 3)
+    etas: jnp.ndarray         # (MAX_SIZE, B, 3)
     weights: jnp.ndarray      # (MAX_SIZE,)
     timestamps: jnp.ndarray   # (MAX_SIZE,)
     primitive_ids: jnp.ndarray  # (MAX_SIZE,) int64
@@ -132,7 +134,7 @@ def create_empty_primitive_map(
     return PrimitiveMap(
         Lambdas=jnp.zeros((max_size, 3, 3), dtype=jnp.float64),
         thetas=jnp.zeros((max_size, 3), dtype=jnp.float64),
-        etas=jnp.zeros((max_size, 3), dtype=jnp.float64),
+        etas=jnp.zeros((max_size, constants.GC_VMF_N_LOBES, 3), dtype=jnp.float64),
         weights=jnp.zeros((max_size,), dtype=jnp.float64),
         timestamps=jnp.zeros((max_size,), dtype=jnp.float64),
         primitive_ids=jnp.zeros((max_size,), dtype=jnp.int64),
@@ -195,9 +197,10 @@ def _extract_primitive_map_view_core(
     positions = jax.vmap(jnp.linalg.solve)(Lambda_reg, thetas)
     covariances = jax.vmap(jnp.linalg.inv)(Lambda_reg)
 
-    # Compute directions and kappas from vMF
-    kappas = jnp.linalg.norm(etas, axis=1)
-    directions = etas / (kappas[:, None] + eps_mass)
+    # Compute resultant directions and kappas from multi-lobe vMF
+    eta_sum = jnp.sum(etas, axis=1)  # (N, 3)
+    kappas = jnp.linalg.norm(eta_sum, axis=1)
+    directions = eta_sum / (kappas[:, None] + eps_mass)
 
     return positions, covariances, directions, kappas, weights, primitive_ids, colors
 
@@ -290,7 +293,7 @@ def primitive_map_insert(
     prim_map: PrimitiveMap,
     Lambdas_new: jnp.ndarray,   # (M, 3, 3)
     thetas_new: jnp.ndarray,    # (M, 3)
-    etas_new: jnp.ndarray,      # (M, 3)
+    etas_new: jnp.ndarray,      # (M, B, 3)
     weights_new: jnp.ndarray,   # (M,)
     timestamp: float,
     colors_new: Optional[jnp.ndarray] = None,  # (M, 3)
@@ -394,12 +397,14 @@ def primitive_map_fuse(
     target_indices: jnp.ndarray,       # (K,) indices into map
     Lambdas_meas: jnp.ndarray,         # (K, 3, 3) measurement precisions
     thetas_meas: jnp.ndarray,          # (K, 3) measurement info vectors
-    etas_meas: jnp.ndarray,            # (K, 3) measurement vMF params
+    etas_meas: jnp.ndarray,            # (K, B, 3) measurement vMF params
     weights_meas: jnp.ndarray,         # (K,) measurement weights
     responsibilities: jnp.ndarray,     # (K,) soft association weights
     timestamp: float,
     valid_mask: Optional[jnp.ndarray] = None,  # (K,) bool; when provided, zero out invalid before segment_sum
+    colors_meas: Optional[jnp.ndarray] = None,  # (K, 3) measurement RGB; when provided, weighted blend per target
     eps_psd: float = constants.GC_EPS_PSD,
+    eps_mass: float = constants.GC_EPS_MASS,
     chart_id: str = constants.GC_CHART_ID,
     anchor_id: str = "primitive_map",
 ) -> Tuple[PrimitiveMapFuseResult, CertBundle, ExpectedEffect]:
@@ -408,24 +413,10 @@ def primitive_map_fuse(
 
     Gaussian info fusion: Lambda_post = Lambda_prior + sum_k r_k * Lambda_meas_k
     vMF natural param addition: eta_post = eta_prior + sum_k r_k * eta_meas_k
+    Colors: when colors_meas provided, map color at each target = responsibility-weighted mean of meas colors.
 
     Fixed-cost operator. Always applies (no gates).
     When valid_mask is provided (e.g. from JAX-only flatten), invalid entries contribute zero.
-
-    Args:
-        prim_map: Current primitive map
-        target_indices: Map indices to fuse into
-        Lambdas_meas: Measurement precision matrices
-        thetas_meas: Measurement information vectors
-        etas_meas: Measurement vMF natural parameters
-        weights_meas: Measurement weights
-        responsibilities: Soft association weights (from OT)
-        timestamp: Current time
-        valid_mask: Optional (K,) bool; True = include in fusion (enables fixed-size JAX flatten)
-        eps_psd: PSD regularization
-
-    Returns:
-        (result, CertBundle, ExpectedEffect)
     """
     K = target_indices.shape[0]
     if K == 0:
@@ -448,18 +439,28 @@ def primitive_map_fuse(
 
     Lambda_updates = r * Lambdas_meas    # (K, 3, 3)
     theta_updates = r_vec * thetas_meas  # (K, 3)
-    eta_updates = r_vec * etas_meas      # (K, 3)
+    eta_updates = r_vec[:, None, None] * etas_meas  # (K, B, 3)
 
     # Accumulate updates per target index
-    # Use segment_sum for efficiency
     unique_targets, inverse = jnp.unique(target_indices, return_inverse=True)
     n_unique = unique_targets.shape[0]
 
-    # Aggregate updates
     Lambda_agg = jax.ops.segment_sum(Lambda_updates, inverse, num_segments=n_unique)
     theta_agg = jax.ops.segment_sum(theta_updates, inverse, num_segments=n_unique)
     eta_agg = jax.ops.segment_sum(eta_updates, inverse, num_segments=n_unique)
     weight_agg = jax.ops.segment_sum(weight_updates, inverse, num_segments=n_unique)
+
+    # Color: responsibility-weighted mean per target (only when colors_meas provided)
+    if colors_meas is not None and colors_meas.shape[0] >= K:
+        r_c = jnp.clip(colors_meas[:K], 0.0, 1.0) * r_vec  # (K, 3)
+        sum_r_c = jax.ops.segment_sum(r_c, inverse, num_segments=n_unique)  # (n_unique, 3)
+        sum_r = jax.ops.segment_sum(responsibilities, inverse, num_segments=n_unique)  # (n_unique,)
+        sum_r_safe = jnp.maximum(sum_r[:, None], eps_mass)
+        color_agg = sum_r_c / sum_r_safe
+        color_agg = jnp.clip(color_agg, 0.0, 1.0)
+        colors = prim_map.colors.at[unique_targets].set(color_agg)
+    else:
+        colors = prim_map.colors
 
     # Update map at unique targets
     Lambdas = prim_map.Lambdas.at[unique_targets].add(Lambda_agg)
@@ -476,7 +477,7 @@ def primitive_map_fuse(
         timestamps=timestamps,
         primitive_ids=prim_map.primitive_ids,
         valid_mask=prim_map.valid_mask,
-        colors=prim_map.colors,
+        colors=colors,
         next_id=prim_map.next_id,
         count=prim_map.count,
     )

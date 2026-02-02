@@ -193,7 +193,7 @@ def hypothesis_barycenter_projection(
     cert_out = CertBundle.create_approx(
         chart_id=CHART_ID_GC_RIGHT_01,
         anchor_id=template.anchor_id,
-        triggers=["HypothesisProjection"],
+        triggers=["HypothesisProjection", "I-projection-info-barycenter"],
         conditioning=ConditioningCert(
             eig_min=eig_min,
             eig_max=eig_max,

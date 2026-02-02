@@ -1,0 +1,27 @@
+# =============================================================================
+# Kimera ACL Jackal2 Calibration - 6D Extrinsics
+# =============================================================================
+#
+# Source: rosbags/Kimera_Data/calibration/robots/acl_jackal2/extrinsics.yaml
+#
+# Format: [x, y, z, rx, ry, rz] where (rx, ry, rz) is a rotation vector in radians.
+# Transforms map sensor coordinates to base frame: p_base = R @ p_sensor + t
+#
+# IMPORTANT: The calibration file's T_cameralink_gyro has identity rotation because
+# it describes the gyro frame relative to cameralink. However, the ROS bag publishes
+# IMU messages in forward_imu_optical_frame.
+#
+# D435i accelerometer reads -Y when stationary (gravity in +Y in optical frame).
+# Base frame is Z-up: stationary accel should be [0, 0, +g] to cancel gravity_W.
+# Rotation Rx(-90°) maps IMU -Y to base +Z: rotvec = [-pi/2, 0, 0] = [-1.570796, 0, 0]
+#
+# =============================================================================
+
+# LiDAR extrinsic: Velodyne VLP-16 mounted on robot
+# Small rotation (roll/pitch/yaw ~1-4 degrees) + translation
+T_base_lidar: [-0.065447, -0.100474, 0.108987, -0.002723, -0.069383, 0.028979]
+
+# IMU extrinsic: Intel RealSense D435i in forward_imu_optical_frame
+# Rx(-90°) converts optical frame (gravity +Y, accel reads -Y) to base frame (Z-up)
+# Translation from T_cameralink_gyro calibration
+T_base_imu: [-0.016020, -0.030220, 0.007400, -1.570796, 0.0, 0.0]

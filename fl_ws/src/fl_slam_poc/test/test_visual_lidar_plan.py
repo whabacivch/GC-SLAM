@@ -18,8 +18,8 @@ from fl_slam_poc.backend.pipeline import RuntimeManifest
 
 
 # Valid backend values per constants
-VALID_POSE_EVIDENCE_BACKENDS = (constants.GC_POSE_EVIDENCE_BACKEND_BINS, constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES)
-VALID_MAP_BACKENDS = (constants.GC_MAP_BACKEND_BINS, constants.GC_MAP_BACKEND_PRIMITIVE_MAP)
+VALID_POSE_EVIDENCE_BACKENDS = (constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES,)
+VALID_MAP_BACKENDS = (constants.GC_MAP_BACKEND_PRIMITIVE_MAP,)
 
 
 def cert_satisfies_frobenius_policy(cert: CertBundle) -> bool:
@@ -41,7 +41,7 @@ class TestManifestPoseEvidenceAndMapBackend:
 
     def test_manifest_to_dict_has_map_backend(self):
         manifest = RuntimeManifest(
-            pose_evidence_backend=constants.GC_POSE_EVIDENCE_BACKEND_BINS,
+            pose_evidence_backend=constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES,
             map_backend=constants.GC_MAP_BACKEND_PRIMITIVE_MAP,
         )
         d = manifest.to_dict()
@@ -68,9 +68,9 @@ class TestManifestPoseEvidenceAndMapBackend:
 
 
 class TestSinglePoseEvidencePath:
-    """Only one pose-evidence path is active (no coexistence of bins + primitives for pose)."""
+    """Only one pose-evidence path is active (primitives only)."""
 
-    def test_pose_evidence_backend_is_either_bins_or_primitives(self):
+    def test_pose_evidence_backend_is_primitives(self):
         for backend in VALID_POSE_EVIDENCE_BACKENDS:
             manifest = RuntimeManifest(pose_evidence_backend=backend, map_backend=constants.GC_MAP_BACKEND_PRIMITIVE_MAP)
             d = manifest.to_dict()

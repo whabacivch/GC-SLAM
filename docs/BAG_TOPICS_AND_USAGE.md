@@ -1,5 +1,15 @@
 # Bag Topics and Usage Map (Canonical)
 
+**Canonical bag (only one we use):** The project uses a single bag for all testing. It is the one referenced in `tools/run_and_evaluate_gc.sh`:
+
+- **Bag:** `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005`
+- **Ground truth:** `rosbags/Kimera_Data/ground_truth/1014/acl_jackal_gt.tum`
+- **Config:** `fl_ws/src/fl_slam_poc/config/gc_kimera.yaml`
+
+All configs, docs, and diagnostic examples refer to this bag. We do not run or support other bags; the eval script is the only test path.
+
+---
+
 This document is the single source of truth for:
 
 - **What topics/messages exist** in supported datasets/bags

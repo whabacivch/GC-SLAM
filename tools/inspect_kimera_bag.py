@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run full Kimera bag inspection and optionally apply estimated extrinsics to gc_kimera.yaml.
+Run full Kimera bag inspection and optionally apply estimated extrinsics to gc_unified.yaml.
 
 Runs: first_n_messages_summary, diagnose_coordinate_frames,
       estimate_lidar_base_extrinsic_rotation_from_ground, estimate_imu_base_extrinsic_rotation.
@@ -71,12 +71,12 @@ def main() -> int:
     ap.add_argument(
         "--apply",
         action="store_true",
-        help="Update gc_kimera.yaml with estimated T_base_lidar and T_base_imu (rotation only; t=0,0,0).",
+        help="Update gc_unified.yaml with estimated T_base_lidar and T_base_imu (rotation only; t=0,0,0).",
     )
     ap.add_argument(
         "--config",
         default=None,
-        help="Path to backend config YAML to update (default: fl_ws/src/fl_slam_poc/config/gc_kimera.yaml).",
+        help="Path to backend config YAML to update (default: fl_ws/src/fl_slam_poc/config/gc_unified.yaml).",
     )
     ap.add_argument(
         "--lidar-topic",
@@ -183,11 +183,11 @@ def main() -> int:
     print()
 
     if not args.apply:
-        print("Run with --apply to write these to gc_kimera.yaml (no changes made).")
+        print("Run with --apply to write these to gc_unified.yaml (no changes made).")
         return 0
 
     # Update config (line-by-line to preserve comments and structure)
-    config_path = Path(args.config) if args.config else (_PROJECT_ROOT / "fl_ws" / "src" / "fl_slam_poc" / "config" / "gc_kimera.yaml")
+    config_path = Path(args.config) if args.config else (_PROJECT_ROOT / "fl_ws" / "src" / "fl_slam_poc" / "config" / "gc_unified.yaml")
     if not config_path.is_file():
         print(f"ERROR: Config not found: {config_path}", file=sys.stderr)
         return 1

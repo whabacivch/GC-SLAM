@@ -1,10 +1,13 @@
 # FL-SLAM Roadmap (Impact Project v1)
 
-This roadmap is organized around the **Geometric Compositional SLAM v2** implementation. **Code is the source of truth;** this doc reflects the repo as of **2026-01-29**.
+This roadmap is organized around the **Geometric Compositional SLAM v2** implementation. **Code is the source of truth;** this doc reflects the repo as of **2026-02-02**.
 
-- **Primary operational code**: Required to run `tools/run_and_evaluate_gc.sh` (GC v2 on Kimera).
-- **Immediate priorities**: IW tuning/diagnostics, remaining design gaps (see `docs/PIPELINE_DESIGN_GAPS.md`), optional bin-level motion smear.
-- **Future work**: Additional datasets, dense RGB-D, visual loop factors, semantic/categorical layer.
+- **Primary operational code**: Required to run `tools/run_and_evaluate_gc.sh` (GC v2 on Kimera). Config: `fl_ws/src/fl_slam_poc/config/gc_unified.yaml`.
+- **Current pipeline**: LiDAR + camera (RGBD). Camera: single topic from `camera_rgbd_node`, ring buffer, visual pose evidence, camera RGB → map/splat colors. Rerun: post-hoc build from `splat_export.npz` + trajectory; eval script opens browser.
+- **Immediate priorities**: Design gaps (see `docs/PIPELINE_DESIGN_GAPS.md`), IW tuning/diagnostics, optional bin-level motion smear.
+- **Future work**: Camera-frame vMF splat map (§4), alternative datasets (TB3, r2b), visual loop factors, semantic/categorical layer.
+
+**Where to look:** Current architecture and entry points are in **§1 (GC v2 Status)** and **Completed Milestones** above. Sections 2 (IMU) and 3–8 retain historical and future-work detail; implementation status is as of the date at the top.
 
 ---
 
@@ -12,20 +15,22 @@ This roadmap is organized around the **Geometric Compositional SLAM v2** impleme
 
 ### 22D State & 14-Step Pipeline (current)
 - **22D augmented state** (per `fl_ws/src/fl_slam_poc/fl_slam_poc/common/constants.py`): `[trans(3), rot(3), vel(3), bg(3), ba(3), dt(1), ex(6)]`
-- **14-step pipeline per scan**: PointBudgetResample → PredictDiffusion → DeskewConstantTwist → BinSoftAssign → ScanBinMomentMatch → MatrixFisherRotation → PlanarTranslationEvidence → Evidence (odom pose + odom twist + planar priors + IMU + LiDAR) → FusionScaleFromCertificates → InfoFusionAdditive → PoseUpdateFrobeniusRecompose → PoseCovInflationPushforward → AnchorDriftUpdate
+- **14-step pipeline per scan**: PointBudgetResample → PredictDiffusion → DeskewConstantTwist → BinSoftAssign → ScanBinMomentMatch → MatrixFisherRotation → PlanarTranslationEvidence → Evidence (odom pose + odom twist + planar priors + IMU + **visual pose** + LiDAR) → FusionScaleFromCertificates → InfoFusionAdditive → PoseUpdateFrobeniusRecompose → PoseCovInflationPushforward → AnchorDriftUpdate
 - **LiDAR evidence**: Matrix Fisher rotation + planarized translation with self-adaptive z precision (`matrix_fisher_evidence.py`, `build_combined_lidar_evidence_22d`)
+- **Camera evidence**: Single RGBD topic (`/gc/sensors/camera_rgbd` from `camera_rgbd_node`); ring buffer; pick frame by min |t_frame − t_scan|; VisualFeatureExtractor + splat_prep_fused → camera batch; **camera RGB sampled per feature (Feature3D.color)** and passed via `feature_list_to_camera_batch` → map fusion (responsibility-weighted colors). Visual pose evidence at z_lin (`visual_pose_evidence.py`). Pipeline merges camera batch with LiDAR surfels (`lidar_surfel_extraction.py` base_batch=camera_batch).
 - **IMU**: Time-resolved vMF tilt, gyro evidence, preintegration factor; preintegration window sliced to 512 steps (`GC_MAX_IMU_PREINT_LEN`)
 - **Odom**: Pose evidence + twist evidence (velocity, yaw-rate, pose–twist kinematic consistency); see `odom_evidence.py`, `odom_twist_evidence.py`
 - **Planar**: Planar z and vel_z priors; map update sets `t_hat[2]=0` to break z feedback (`planar_prior.py`, `map_update.py`)
 - **Adaptive noise**: Inverse-Wishart for process Q and measurement Σ (gyro, accel, LiDAR); readiness weights (no gates); updates every scan (`structures/inverse_wishart_jax.py`, `measurement_noise_iw_jax.py`, `lidar_bucket_noise_iw_jax.py`)
 - **Smoothed initial anchor**: Provisional A0 on first odom; after K odom, A_smoothed from closed-form aggregate; export = anchor_correction ∘ pose_belief (`backend_node.py`, `gc_unified.yaml` init_window_odom_count)
 - **Wahba removed**: Pipeline uses Matrix Fisher only; legacy Wahba in `archive/legacy_operators/`
+- **Rerun**: No live recording during eval. Post-run `tools/build_rerun_from_splat.py` builds `.rrd` from `splat_export.npz` + trajectory (Ellipsoids3D, BEV 15 shading, trajectory); `run_and_evaluate_gc.sh` opens Rerun in browser when available.
 
 ### Package & Entry Points
 - **Package**: `fl_ws/src/fl_slam_poc/fl_slam_poc/` — `common/`, `frontend/` (hub, sensors, audit), `backend/` (pipeline, operators, structures)
-- **Launch**: `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `config/gc_kimera.yaml`
-- **Nodes**: `gc_sensor_hub` (frontend), `gc_backend_node` (backend); sensors: pointcloud_passthrough, odom_normalizer, imu_normalizer
-- **Reference**: `docs/Self-Adaptive Systems Guide.md`, `docs/PIPELINE_DESIGN_GAPS.md`, `docs/IMU_BELIEF_MAP_AND_FUSION.md`
+- **Launch**: `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `config/gc_unified.yaml` (single source; `gc_kimera.yaml` removed)
+- **Nodes**: `gc_sensor_hub` (frontend), `camera_rgbd_node` (C++: compressed RGB + raw depth → RGBDImage), `gc_backend_node` (backend); sensors: pointcloud_passthrough, odom_normalizer, imu_normalizer
+- **Reference**: `docs/Self-Adaptive Systems Guide.md`, `docs/PIPELINE_DESIGN_GAPS.md`, `docs/IMU_BELIEF_MAP_AND_FUSION.md`, `docs/CAMERA_OVERHAUL_AND_SCAN_PATHWAY_PLAN.md`
 
 ---
 
@@ -60,6 +65,8 @@ This roadmap is organized around the **Geometric Compositional SLAM v2** impleme
 
 ## 0) Ground-Truth Facts (Kimera Bag) + “No Silent Assumptions”
 
+**Dataset:** Project uses **Kimera only** (M3DGR/Dynamic01 removed). Default bag/topics/extrinsics are Kimera.
+
 These are **observed facts from the Kimera bag** and should be treated as the default configuration unless explicitly overridden:
 
 - **No `CameraInfo` topics in the bag** → intrinsics must be declared via parameters and logged.
@@ -69,10 +76,7 @@ These are **observed facts from the Kimera bag** and should be treated as the de
   - `base_frame` = `/odom.child_frame_id` = `acl_jackal2/base`
 - **LiDAR frame**: `/acl_jackal/lidar_points.header.frame_id` = `acl_jackal2/velodyne_link`
 - **IMU frame**: `/acl_jackal/forward/imu.header.frame_id` = `acl_jackal2/forward_imu_optical_frame`. See [KIMERA_FRAME_MAPPING.md](docs/KIMERA_FRAME_MAPPING.md).
-- **RGB + aligned depth frames in the bag**:
-  - `/camera/color/image_raw/compressed.header.frame_id` = `camera_color_optical_frame`
-  - `/camera/aligned_depth_to_color/image_raw/compressedDepth.header.frame_id` = `camera_color_optical_frame`
-  - Depth is already registered to color (same pixel grid/frame_id).
+- **RGB + depth in the bag** (Kimera): Topics use `acl_jackal/forward/` prefix. Launch defaults: `camera_rgb_compressed_topic` = `/acl_jackal/forward/color/image_raw/compressed`, `camera_depth_raw_topic` = `/acl_jackal/forward/depth/image_rect_raw`. `camera_rgbd_node` pairs them and publishes `/gc/sensors/camera_rgbd` (RGBDImage). Depth scale mm→m applied when configured.
 
 **Policy (by construction):**
 - Do not “guess” frames or extrinsics silently.
@@ -83,18 +87,19 @@ These are **observed facts from the Kimera bag** and should be treated as the de
 ## 1) GC v2 Status (Current Baseline)
 
 **Primary entrypoint**
-- `tools/run_and_evaluate_gc.sh`: runs GC v2 on Kimera end-to-end (SLAM + alignment + metrics + plots + audit). Artifacts under `results/gc_YYYYMMDD_HHMMSS/`.
+- `tools/run_and_evaluate_gc.sh`: runs GC v2 on Kimera end-to-end (SLAM + alignment + metrics + plots + dashboard + Rerun). Artifacts under `results/gc_YYYYMMDD_HHMMSS/`. Uses `config/gc_unified.yaml`.
 
 **Launch**
-- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `fl_ws/src/fl_slam_poc/config/gc_kimera.yaml`
+- `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`; config: `fl_ws/src/fl_slam_poc/config/gc_unified.yaml`
 
 **Nodes**
 - Frontend: `gc_sensor_hub` (`fl_slam_poc/frontend/hub/gc_sensor_hub.py`) — publishes `/gc/sensors/lidar_points`, `/gc/sensors/odom`, `/gc/sensors/imu`
-- Backend: `gc_backend_node` (`fl_slam_poc/backend/backend_node.py`) — 14-step pipeline, IW updates, hypothesis combine
+- Camera: `camera_rgbd_node` (C++: `src/camera_rgbd_node.cpp`) — subscribes to compressed RGB + raw depth, pairs by timestamp, publishes `/gc/sensors/camera_rgbd` (RGBDImage). Required for backend (backend skips scan if camera ring buffer empty).
+- Backend: `gc_backend_node` (`fl_slam_poc/backend/backend_node.py`) — 14-step pipeline, IW updates, camera batch + LiDAR merge, visual pose evidence, map/splat export with camera colors
 - Sensors (used by hub): `pointcloud_passthrough`, `odom_normalizer`, `imu_normalizer`; optional: `dead_end_audit_node`, `wiring_auditor`
 
 **Evaluation**
-- `tools/align_ground_truth.py`, `tools/evaluate_slam.py`, `tools/slam_dashboard.py`
+- `tools/align_ground_truth.py`, `tools/evaluate_slam.py`, `tools/slam_dashboard.py`, `tools/build_rerun_from_splat.py` (post-run Rerun .rrd from splat_export + trajectory)
 
 **State (22D per chart)**
 ```python
@@ -293,7 +298,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 **Changes:**
 - Add rotation metrics (RPE rotation, ATE rotation) to `tools/evaluate_slam.py` (already present, verify)
-- Run baseline before/after IMU integration on M3DGR Outdoor01:
+- Run baseline before/after IMU integration on primary dataset (Kimera):
   - Baseline (current, no IMU): record ATE/RPE translation + rotation
   - With IMU: record ATE/RPE translation + rotation
   - **Expected:** rotation RPE should improve ~30-50%
@@ -314,12 +319,12 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 ### Phase 6: Launch File & Parameter Updates
 
-#### 6.1 M3DGR Launch File
+#### 6.1 Launch Parameters (Kimera / GC)
 
-**Files:** `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py`
+**Files:** `fl_ws/src/fl_slam_poc/launch/gc_rosbag.launch.py` (config: `config/gc_unified.yaml`)
 
 **Changes:**
-- Add IMU parameters:
+- Add IMU parameters (if not already in gc_unified):
   ```python
   DeclareLaunchArgument("enable_imu", default_value="true"),
   DeclareLaunchArgument("imu_topic", default_value="/camera/imu"),
@@ -351,12 +356,12 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 **Milestone 1: IMU Sensor + Preintegration (Phase 1) ✅ COMPLETED**
 - ✅ IMU I/O, message definition (`IMUSegment.msg`), frontend publishing
 - ✅ Contract B architecture: raw IMU segments published to `/sim/imu_segment`
-- ✅ **Validation:** M3DGR runs with `enable_imu:=true`, `/sim/imu_segment` messages published
+- ✅ **Validation:** Kimera (or primary dataset) runs with `enable_imu:=true`, `/sim/imu_segment` messages published
 - ✅ **Logs:** OpReport shows `Linearization` trigger + Frobenius correction
 
 **Milestone 2: 15D State + Backend Fusion (Phase 2) ✅ COMPLETED**
 - ✅ State representation extended to 15D, Contract B IMU fusion implemented
-- ✅ **Validation:** M3DGR runs, backend ingests IMU segments without errors
+- ✅ **Validation:** Kimera runs, backend ingests IMU segments without errors
 - ✅ **Logs:** Backend status shows IMU segments processed, Contract B diagnostics present
 
 **Milestone 3: Wheel Odom Separation (Phase 3.1)**
@@ -369,7 +374,7 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 
 **Milestone 5: Dense RGB-D in 3D Mode (Phase 4)**
 - Enable `_publish_rgbd_evidence` in 3D mode with optional TF
-- **Validation:** Run M3DGR with 3D mode + RGB-D evidence, verify no TF crashes
+- **Validation:** Run with 3D mode + RGB-D evidence, verify no TF crashes (current pipeline already uses camera RGBD via camera_rgbd_node + visual evidence + map colors)
 
 **Milestone 6: Evaluation Hardening (Phase 5)**
 - Add provenance logging, run baseline comparison, add focused tests
@@ -410,6 +415,8 @@ cov = 15×15 matrix  # [δp, δθ, δv, δb_g, δb_a] in tangent space
 ---
 
 ## 3) Medium-Term: Alternative Datasets & Algorithm Fixes
+
+**Current:** Kimera only. TB3, r2b, Newer College, etc. are future; launch/config additions when needed.
 
 ### A) SE(3) drift investigation
 
@@ -810,9 +817,9 @@ When enabling world/base map in future:
 
 ---
 
-### 4.12 Immediate Configuration (M3DGR Dataset)
+### 4.12 Immediate Configuration (Kimera / primary dataset)
 
-Starting parameters for M3DGR rosbag:
+Starting parameters for Kimera (or primary) rosbag:
 
 ```python
 # Camera intrinsics (fallback if no CameraInfo)
@@ -878,7 +885,7 @@ pi_outlier = 0.1       # outlier mixture weight
 
 **Validation criteria:**
 
-- Mean outlier mass < 0.2 on M3DGR sequences (indicates good intrinsics/depth_scale)
+- Mean outlier mass < 0.2 on primary (Kimera) sequences (indicates good intrinsics/depth_scale)
 - Active splat count ≈ 400-500 after 10 frames (indicates diversity maintained)
 - Residual heatmap shows spatially coherent errors (not salt-and-pepper noise)
 - Rendered image qualitatively matches observed image at sampled pixels

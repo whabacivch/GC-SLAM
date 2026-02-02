@@ -55,9 +55,6 @@ from fl_slam_poc.backend.operators.recompose import (
     RecomposeResult,
 )
 
-from fl_slam_poc.backend.operators.map_update import (
-    MapUpdateResult,
-)
 
 from fl_slam_poc.backend.operators.anchor_drift import (
     anchor_drift_update,
@@ -69,20 +66,6 @@ from fl_slam_poc.backend.operators.hypothesis import (
     HypothesisProjectionResult,
 )
 
-from fl_slam_poc.backend.operators.sinkhorn_ot import (
-    sinkhorn_ot_bev,
-    SinkhornOTResult,
-    SinkhornOTConfig,
-)
-
-from fl_slam_poc.backend.operators.ot_fusion import (
-    coupling_to_weights,
-    weighted_fusion_gaussian_bev,
-    weighted_fusion_vmf_bev,
-    wishart_regularize_2d,
-    temporal_smooth_lambda,
-    OTFusionConfig,
-)
 
 __all__ = [
     # Point budget
@@ -114,23 +97,10 @@ __all__ = [
     # Recompose
     "pose_update_frobenius_recompose",
     "RecomposeResult",
-    # Map update
-    "MapUpdateResult",
     # Anchor drift
     "anchor_drift_update",
     "AnchorDriftResult",
     # Hypothesis
     "hypothesis_barycenter_projection",
     "HypothesisProjectionResult",
-    # Sinkhorn OT (BEV splat association)
-    "sinkhorn_ot_bev",
-    "SinkhornOTResult",
-    "SinkhornOTConfig",
-    # OT fusion
-    "coupling_to_weights",
-    "weighted_fusion_gaussian_bev",
-    "weighted_fusion_vmf_bev",
-    "wishart_regularize_2d",
-    "temporal_smooth_lambda",
-    "OTFusionConfig",
 ]

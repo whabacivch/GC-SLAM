@@ -128,6 +128,7 @@ def splat_prep_fused(
                 meta=meta_fused,
                 mu_app=feat.mu_app.copy() if feat.mu_app is not None else None,
                 kappa_app=feat.kappa_app,
+                color=feat.color.copy() if getattr(feat, "color", None) is not None else None,
             )
         )
     return fused

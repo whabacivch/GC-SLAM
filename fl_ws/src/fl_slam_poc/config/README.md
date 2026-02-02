@@ -1,8 +1,10 @@
 # Geometric Compositional SLAM v2 configuration
 
-**Use `gc_unified.yaml` only** for deployments. Launch loads `gc_backend.ros__parameters` from this file.
+**Single source of truth: `gc_unified.yaml`**
 
-- **gc_unified.yaml** — Canonical config (hub + backend). Use this.
-- **gc_backend.yaml** — Deprecated. Kept for backward compatibility; prefer gc_unified.yaml.
-- **gc_kimera.yaml** — Kimera bag profile (overlay on gc_unified).
+Launch loads `gc_backend.ros__parameters` from this file. No overrides in launch file or run scripts.
+
+- **gc_unified.yaml** — Canonical config (hub + backend). Contains extrinsics from Kimera calibration.
+- **calibration/** — Reference extrinsics from Kimera_Data/calibration (6D format).
+- **gc_backend.yaml** — Deprecated. Prefer gc_unified.yaml.
 - **gc_dead_end_audit.yaml** — Audit node config.

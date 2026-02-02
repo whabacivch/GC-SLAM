@@ -6,7 +6,6 @@ diagnostic data needed for the debugging dashboard.
 
 Stage-0 Schema (no map atoms):
 - Pose estimates (position + orientation)
-- 48-bin reducer outputs (N, S, kappa)
 - Evidence matrices (L_total 22x22, h_total 22)
 - Excitation scalars (s_dt, s_ex)
 - PSD projection diagnostics
@@ -37,11 +36,6 @@ class ScanDiagnostics:
     # Pose (in world frame)
     p_W: np.ndarray  # (3,) position
     R_WL: np.ndarray  # (3,3) rotation matrix (world <- lidar)
-
-    # 48-bin statistics
-    N_bins: np.ndarray  # (48,) mass per bin
-    S_bins: np.ndarray  # (48, 3) direction resultant vectors
-    kappa_bins: np.ndarray  # (48,) concentration per bin
 
     # Evidence matrices
     L_total: np.ndarray  # (22, 22) total information matrix
@@ -74,24 +68,6 @@ class ScanDiagnostics:
     trace_Sigma_lidar_mode: float = 0.0  # trace of LiDAR measurement noise
     trace_Sigma_g_mode: float = 0.0  # trace of gyro measurement noise
     trace_Sigma_a_mode: float = 0.0  # trace of accel measurement noise
-
-    # Wahba and translation diagnostics
-    wahba_cost: float = 0.0
-    translation_residual_norm: float = 0.0
-
-    # Matrix Fisher rotation evidence diagnostics
-    # Singular values of the (weighted) scatter matrix used by the MF rotation evidence.
-    # These are the "MF health" sentinels: s3 -> 0 indicates a near-degenerate rotation subspace.
-    mf_svd: np.ndarray = field(default_factory=lambda: np.zeros((3,), dtype=np.float64))
-
-    # Directional scatter diagnostics (per bin)
-    # Eigenvalues (ascending) of directional scatter tensors for scan and map.
-    # Used by the dashboard to compute anisotropy/planarity observability proxies.
-    scan_scatter_eigs: np.ndarray = field(default_factory=lambda: np.zeros((48, 3), dtype=np.float64))
-    map_scatter_eigs: np.ndarray = field(default_factory=lambda: np.zeros((48, 3), dtype=np.float64))
-
-    # Map kappa per bin (for top-K bin comparisons; may differ from scan kappa)
-    kappa_map_bins: np.ndarray = field(default_factory=lambda: np.zeros((48,), dtype=np.float64))
 
     # Rotation binding diagnostics (degrees)
     rot_err_lidar_deg_pred: float = 0.0
@@ -140,7 +116,16 @@ class ScanDiagnostics:
     # Invariant test: yaw increments from different sources (degrees)
     dyaw_gyro: float = 0.0   # Gyro-integrated yaw change
     dyaw_odom: float = 0.0   # Odom yaw change
-    dyaw_wahba: float = 0.0  # Wahba (LiDAR) yaw change
+
+    # Twist-derived validation scalars
+    distance_pose: float = 0.0      # ||t_curr - t_prev|| from belief pose delta (m)
+    distance_twist: float = 0.0     # ||v_body|| * dt_sec from odom twist (m)
+    speed_odom: float = 0.0         # ||v_body|| scalar speed from odom twist (m/s)
+    speed_pose: float = 0.0         # distance_pose / dt_sec (m/s)
+
+    # IMU jerk diagnostics (m/s³)
+    imu_jerk_norm_mean: float = 0.0  # mean ||a_{i+1} - a_i|| / dt_i over scan window
+    imu_jerk_norm_max: float = 0.0   # max jerk norm in scan window
 
     # Timing diagnostics (milliseconds)
     t_total_ms: float = 0.0
@@ -148,12 +133,6 @@ class ScanDiagnostics:
     t_imu_preint_scan_ms: float = 0.0
     t_imu_preint_int_ms: float = 0.0
     t_deskew_ms: float = 0.0
-    t_bin_assign_ms: float = 0.0
-    t_bin_moment_ms: float = 0.0
-    t_matrix_fisher_ms: float = 0.0
-    t_planar_translation_ms: float = 0.0
-    t_lidar_bucket_iw_ms: float = 0.0
-    t_map_update_ms: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -165,9 +144,6 @@ class ScanDiagnostics:
             "n_points_budget": self.n_points_budget,
             "p_W": self.p_W.tolist(),
             "R_WL": self.R_WL.tolist(),
-            "N_bins": self.N_bins.tolist(),
-            "S_bins": self.S_bins.tolist(),
-            "kappa_bins": self.kappa_bins.tolist(),
             "L_total": self.L_total.tolist(),
             "h_total": self.h_total.tolist(),
             "L_lidar": self.L_lidar.tolist() if self.L_lidar is not None else None,
@@ -188,12 +164,6 @@ class ScanDiagnostics:
             "trace_Sigma_lidar_mode": self.trace_Sigma_lidar_mode,
             "trace_Sigma_g_mode": self.trace_Sigma_g_mode,
             "trace_Sigma_a_mode": self.trace_Sigma_a_mode,
-            "wahba_cost": self.wahba_cost,
-            "translation_residual_norm": self.translation_residual_norm,
-            "mf_svd": self.mf_svd.tolist(),
-            "scan_scatter_eigs": self.scan_scatter_eigs.tolist(),
-            "map_scatter_eigs": self.map_scatter_eigs.tolist(),
-            "kappa_map_bins": self.kappa_map_bins.tolist(),
             "rot_err_lidar_deg_pred": self.rot_err_lidar_deg_pred,
             "rot_err_lidar_deg_post": self.rot_err_lidar_deg_post,
             "rot_err_odom_deg_pred": self.rot_err_odom_deg_pred,
@@ -224,18 +194,17 @@ class ScanDiagnostics:
             "preint_r_pos": self.preint_r_pos.tolist(),
             "dyaw_gyro": self.dyaw_gyro,
             "dyaw_odom": self.dyaw_odom,
-            "dyaw_wahba": self.dyaw_wahba,
+            "distance_pose": self.distance_pose,
+            "distance_twist": self.distance_twist,
+            "speed_odom": self.speed_odom,
+            "speed_pose": self.speed_pose,
+            "imu_jerk_norm_mean": self.imu_jerk_norm_mean,
+            "imu_jerk_norm_max": self.imu_jerk_norm_max,
             "t_total_ms": self.t_total_ms,
             "t_point_budget_ms": self.t_point_budget_ms,
             "t_imu_preint_scan_ms": self.t_imu_preint_scan_ms,
             "t_imu_preint_int_ms": self.t_imu_preint_int_ms,
             "t_deskew_ms": self.t_deskew_ms,
-            "t_bin_assign_ms": self.t_bin_assign_ms,
-            "t_bin_moment_ms": self.t_bin_moment_ms,
-            "t_matrix_fisher_ms": self.t_matrix_fisher_ms,
-            "t_planar_translation_ms": self.t_planar_translation_ms,
-            "t_lidar_bucket_iw_ms": self.t_lidar_bucket_iw_ms,
-            "t_map_update_ms": self.t_map_update_ms,
         }
 
     @classmethod
@@ -249,9 +218,6 @@ class ScanDiagnostics:
             n_points_budget=d["n_points_budget"],
             p_W=np.array(d["p_W"]),
             R_WL=np.array(d["R_WL"]),
-            N_bins=np.array(d["N_bins"]),
-            S_bins=np.array(d["S_bins"]),
-            kappa_bins=np.array(d["kappa_bins"]),
             L_total=np.array(d["L_total"]),
             h_total=np.array(d["h_total"]),
             L_lidar=np.array(d["L_lidar"]) if d.get("L_lidar") is not None else None,
@@ -272,12 +238,6 @@ class ScanDiagnostics:
             trace_Sigma_lidar_mode=d.get("trace_Sigma_lidar_mode", 0.0),
             trace_Sigma_g_mode=d.get("trace_Sigma_g_mode", 0.0),
             trace_Sigma_a_mode=d.get("trace_Sigma_a_mode", 0.0),
-            wahba_cost=d.get("wahba_cost", 0.0),
-            translation_residual_norm=d.get("translation_residual_norm", 0.0),
-            mf_svd=np.array(d.get("mf_svd", [0.0, 0.0, 0.0]), dtype=np.float64),
-            scan_scatter_eigs=np.array(d.get("scan_scatter_eigs", np.zeros((48, 3))), dtype=np.float64),
-            map_scatter_eigs=np.array(d.get("map_scatter_eigs", np.zeros((48, 3))), dtype=np.float64),
-            kappa_map_bins=np.array(d.get("kappa_map_bins", np.zeros((48,))), dtype=np.float64),
             rot_err_lidar_deg_pred=d.get("rot_err_lidar_deg_pred", 0.0),
             rot_err_lidar_deg_post=d.get("rot_err_lidar_deg_post", 0.0),
             rot_err_odom_deg_pred=d.get("rot_err_odom_deg_pred", 0.0),
@@ -308,18 +268,17 @@ class ScanDiagnostics:
             preint_r_pos=np.array(d.get("preint_r_pos", [0.0, 0.0, 0.0])),
             dyaw_gyro=float(d.get("dyaw_gyro", 0.0)),
             dyaw_odom=float(d.get("dyaw_odom", 0.0)),
-            dyaw_wahba=float(d.get("dyaw_wahba", 0.0)),
+            distance_pose=float(d.get("distance_pose", 0.0)),
+            distance_twist=float(d.get("distance_twist", 0.0)),
+            speed_odom=float(d.get("speed_odom", 0.0)),
+            speed_pose=float(d.get("speed_pose", 0.0)),
+            imu_jerk_norm_mean=float(d.get("imu_jerk_norm_mean", 0.0)),
+            imu_jerk_norm_max=float(d.get("imu_jerk_norm_max", 0.0)),
             t_total_ms=float(d.get("t_total_ms", 0.0)),
             t_point_budget_ms=float(d.get("t_point_budget_ms", 0.0)),
             t_imu_preint_scan_ms=float(d.get("t_imu_preint_scan_ms", 0.0)),
             t_imu_preint_int_ms=float(d.get("t_imu_preint_int_ms", 0.0)),
             t_deskew_ms=float(d.get("t_deskew_ms", 0.0)),
-            t_bin_assign_ms=float(d.get("t_bin_assign_ms", 0.0)),
-            t_bin_moment_ms=float(d.get("t_bin_moment_ms", 0.0)),
-            t_matrix_fisher_ms=float(d.get("t_matrix_fisher_ms", 0.0)),
-            t_planar_translation_ms=float(d.get("t_planar_translation_ms", 0.0)),
-            t_lidar_bucket_iw_ms=float(d.get("t_lidar_bucket_iw_ms", 0.0)),
-            t_map_update_ms=float(d.get("t_map_update_ms", 0.0)),
         )
 
 
@@ -344,8 +303,6 @@ class MinimalScanTape:
     t_total_ms: float = 0.0
     t_point_budget_ms: float = 0.0
     t_deskew_ms: float = 0.0
-    t_bin_moment_ms: float = 0.0
-    t_map_update_ms: float = 0.0
 
 
 @dataclass
@@ -442,8 +399,6 @@ class DiagnosticsLog:
             "t_total_ms": np.array([t.t_total_ms for t in self.tape]),
             "t_point_budget_ms": np.array([t.t_point_budget_ms for t in self.tape]),
             "t_deskew_ms": np.array([t.t_deskew_ms for t in self.tape]),
-            "t_bin_moment_ms": np.array([t.t_bin_moment_ms for t in self.tape]),
-            "t_map_update_ms": np.array([t.t_map_update_ms for t in self.tape]),
         }
         np.savez_compressed(path, **data)
 
@@ -463,10 +418,6 @@ class DiagnosticsLog:
             "n_points_budget": np.array([s.n_points_budget for s in self.scans]),
             "p_W": np.stack([s.p_W for s in self.scans]),  # (n, 3)
             "R_WL": np.stack([s.R_WL for s in self.scans]),  # (n, 3, 3)
-            "N_bins": np.stack([s.N_bins for s in self.scans]),  # (n, 48)
-            "S_bins": np.stack([s.S_bins for s in self.scans]),  # (n, 48, 3)
-            "kappa_bins": np.stack([s.kappa_bins for s in self.scans]),  # (n, 48)
-            "kappa_map_bins": np.stack([s.kappa_map_bins for s in self.scans]),  # (n, 48)
             "L_total": np.stack([s.L_total for s in self.scans]),  # (n, 22, 22)
             "h_total": np.stack([s.h_total for s in self.scans]),  # (n, 22)
             # Scalar diagnostics
@@ -483,11 +434,6 @@ class DiagnosticsLog:
             "trace_Sigma_lidar_mode": np.array([s.trace_Sigma_lidar_mode for s in self.scans]),
             "trace_Sigma_g_mode": np.array([s.trace_Sigma_g_mode for s in self.scans]),
             "trace_Sigma_a_mode": np.array([s.trace_Sigma_a_mode for s in self.scans]),
-            "wahba_cost": np.array([s.wahba_cost for s in self.scans]),
-            "mf_svd": np.stack([s.mf_svd for s in self.scans]),  # (n, 3)
-            "scan_scatter_eigs": np.stack([s.scan_scatter_eigs for s in self.scans]),  # (n, 48, 3)
-            "map_scatter_eigs": np.stack([s.map_scatter_eigs for s in self.scans]),  # (n, 48, 3)
-            "translation_residual_norm": np.array([s.translation_residual_norm for s in self.scans]),
             "rot_err_lidar_deg_pred": np.array([s.rot_err_lidar_deg_pred for s in self.scans]),
             "rot_err_lidar_deg_post": np.array([s.rot_err_lidar_deg_post for s in self.scans]),
             "rot_err_odom_deg_pred": np.array([s.rot_err_odom_deg_pred for s in self.scans]),
@@ -513,18 +459,17 @@ class DiagnosticsLog:
             "imu_dt_weighted_sum": np.array([s.imu_dt_weighted_sum for s in self.scans]),
             "dyaw_gyro": np.array([s.dyaw_gyro for s in self.scans]),
             "dyaw_odom": np.array([s.dyaw_odom for s in self.scans]),
-            "dyaw_wahba": np.array([s.dyaw_wahba for s in self.scans]),
+            "distance_pose": np.array([s.distance_pose for s in self.scans]),
+            "distance_twist": np.array([s.distance_twist for s in self.scans]),
+            "speed_odom": np.array([s.speed_odom for s in self.scans]),
+            "speed_pose": np.array([s.speed_pose for s in self.scans]),
+            "imu_jerk_norm_mean": np.array([s.imu_jerk_norm_mean for s in self.scans]),
+            "imu_jerk_norm_max": np.array([s.imu_jerk_norm_max for s in self.scans]),
             "t_total_ms": np.array([s.t_total_ms for s in self.scans]),
             "t_point_budget_ms": np.array([s.t_point_budget_ms for s in self.scans]),
             "t_imu_preint_scan_ms": np.array([s.t_imu_preint_scan_ms for s in self.scans]),
             "t_imu_preint_int_ms": np.array([s.t_imu_preint_int_ms for s in self.scans]),
             "t_deskew_ms": np.array([s.t_deskew_ms for s in self.scans]),
-            "t_bin_assign_ms": np.array([s.t_bin_assign_ms for s in self.scans]),
-            "t_bin_moment_ms": np.array([s.t_bin_moment_ms for s in self.scans]),
-            "t_matrix_fisher_ms": np.array([s.t_matrix_fisher_ms for s in self.scans]),
-            "t_planar_translation_ms": np.array([s.t_planar_translation_ms for s in self.scans]),
-            "t_lidar_bucket_iw_ms": np.array([s.t_lidar_bucket_iw_ms for s in self.scans]),
-            "t_map_update_ms": np.array([s.t_map_update_ms for s in self.scans]),
         }
 
         # Optional individual evidence components
@@ -564,10 +509,6 @@ class DiagnosticsLog:
                 n_points_budget=int(data["n_points_budget"][i]),
                 p_W=data["p_W"][i],
                 R_WL=data["R_WL"][i],
-                N_bins=data["N_bins"][i],
-                S_bins=data["S_bins"][i],
-                kappa_bins=data["kappa_bins"][i],
-                kappa_map_bins=data["kappa_map_bins"][i] if "kappa_map_bins" in data else np.zeros((48,), dtype=np.float64),
                 L_total=data["L_total"][i],
                 h_total=data["h_total"][i],
                 L_lidar=data["L_lidar"][i] if "L_lidar" in data else None,
@@ -587,11 +528,6 @@ class DiagnosticsLog:
                 trace_Sigma_lidar_mode=float(data["trace_Sigma_lidar_mode"][i]),
                 trace_Sigma_g_mode=float(data["trace_Sigma_g_mode"][i]),
                 trace_Sigma_a_mode=float(data["trace_Sigma_a_mode"][i]),
-                wahba_cost=float(data["wahba_cost"][i]),
-                translation_residual_norm=float(data["translation_residual_norm"][i]),
-                mf_svd=data["mf_svd"][i] if "mf_svd" in data else np.zeros((3,), dtype=np.float64),
-                scan_scatter_eigs=data["scan_scatter_eigs"][i] if "scan_scatter_eigs" in data else np.zeros((48, 3), dtype=np.float64),
-                map_scatter_eigs=data["map_scatter_eigs"][i] if "map_scatter_eigs" in data else np.zeros((48, 3), dtype=np.float64),
                 rot_err_lidar_deg_pred=float(data["rot_err_lidar_deg_pred"][i]) if "rot_err_lidar_deg_pred" in data else 0.0,
                 rot_err_lidar_deg_post=float(data["rot_err_lidar_deg_post"][i]) if "rot_err_lidar_deg_post" in data else 0.0,
                 rot_err_odom_deg_pred=float(data["rot_err_odom_deg_pred"][i]) if "rot_err_odom_deg_pred" in data else 0.0,
@@ -617,18 +553,17 @@ class DiagnosticsLog:
                 imu_dt_weighted_sum=float(data["imu_dt_weighted_sum"][i]) if "imu_dt_weighted_sum" in data else 0.0,
                 dyaw_gyro=float(data["dyaw_gyro"][i]) if "dyaw_gyro" in data else 0.0,
                 dyaw_odom=float(data["dyaw_odom"][i]) if "dyaw_odom" in data else 0.0,
-                dyaw_wahba=float(data["dyaw_wahba"][i]) if "dyaw_wahba" in data else 0.0,
+                distance_pose=float(data["distance_pose"][i]) if "distance_pose" in data else 0.0,
+                distance_twist=float(data["distance_twist"][i]) if "distance_twist" in data else 0.0,
+                speed_odom=float(data["speed_odom"][i]) if "speed_odom" in data else 0.0,
+                speed_pose=float(data["speed_pose"][i]) if "speed_pose" in data else 0.0,
+                imu_jerk_norm_mean=float(data["imu_jerk_norm_mean"][i]) if "imu_jerk_norm_mean" in data else 0.0,
+                imu_jerk_norm_max=float(data["imu_jerk_norm_max"][i]) if "imu_jerk_norm_max" in data else 0.0,
                 t_total_ms=float(data["t_total_ms"][i]) if "t_total_ms" in data else 0.0,
                 t_point_budget_ms=float(data["t_point_budget_ms"][i]) if "t_point_budget_ms" in data else 0.0,
                 t_imu_preint_scan_ms=float(data["t_imu_preint_scan_ms"][i]) if "t_imu_preint_scan_ms" in data else 0.0,
                 t_imu_preint_int_ms=float(data["t_imu_preint_int_ms"][i]) if "t_imu_preint_int_ms" in data else 0.0,
                 t_deskew_ms=float(data["t_deskew_ms"][i]) if "t_deskew_ms" in data else 0.0,
-                t_bin_assign_ms=float(data["t_bin_assign_ms"][i]) if "t_bin_assign_ms" in data else 0.0,
-                t_bin_moment_ms=float(data["t_bin_moment_ms"][i]) if "t_bin_moment_ms" in data else 0.0,
-                t_matrix_fisher_ms=float(data["t_matrix_fisher_ms"][i]) if "t_matrix_fisher_ms" in data else 0.0,
-                t_planar_translation_ms=float(data["t_planar_translation_ms"][i]) if "t_planar_translation_ms" in data else 0.0,
-                t_lidar_bucket_iw_ms=float(data["t_lidar_bucket_iw_ms"][i]) if "t_lidar_bucket_iw_ms" in data else 0.0,
-                t_map_update_ms=float(data["t_map_update_ms"][i]) if "t_map_update_ms" in data else 0.0,
             )
             log.scans.append(diag)
 

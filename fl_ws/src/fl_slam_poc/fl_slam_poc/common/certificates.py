@@ -39,7 +39,7 @@ class ConditioningCert:
 class SupportCert:
     """Support/coverage information."""
     ess_total: float = 0.0  # Effective sample size
-    support_frac: float = 1.0  # Fraction of bins/points with support
+    support_frac: float = 1.0  # Fraction of points/primitives with support
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -85,6 +85,7 @@ class InfluenceCert:
     dt_scale: float = 1.0  # Time scaling factor
     extrinsic_scale: float = 1.0  # Extrinsic coupling factor
     trust_alpha: float = 1.0  # Fusion trust factor
+    power_beta: float = 1.0  # Tempered posterior / power EP scaling of evidence in (0,1]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -96,6 +97,35 @@ class InfluenceCert:
             "dt_scale": self.dt_scale,
             "extrinsic_scale": self.extrinsic_scale,
             "trust_alpha": self.trust_alpha,
+            "power_beta": self.power_beta,
+        }
+
+
+@dataclass
+class OverconfidenceCert:
+    """
+    Continuous sentinels for detecting overconfidence risk from dependent evidence.
+
+    These fields are diagnostic-only; they must not trigger gating. Downstream logic may
+    respond only by continuous conservatism (e.g., scaling information / trust).
+
+    Convention:
+    - 0.0 means "not computed / not available" for that field.
+    """
+
+    excitation_total: float = 0.0  # dt_effect + extrinsic_effect (or other agreed excitation proxy)
+    ess_to_excitation: float = 0.0  # ess_total / (excitation_total + eps)
+    cond_to_support: float = 0.0  # conditioning proxy divided by support proxy (higher => riskier)
+    dt_asymmetry: float = 0.0  # |dt_vel - dt_pose| / (dt_vel + dt_pose + eps) in [0,1] when computed
+    z_to_xy_ratio: float = 0.0  # L_zz / mean(L_xx, L_yy) (or analogous) when computed
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "excitation_total": self.excitation_total,
+            "ess_to_excitation": self.ess_to_excitation,
+            "cond_to_support": self.cond_to_support,
+            "dt_asymmetry": self.dt_asymmetry,
+            "z_to_xy_ratio": self.z_to_xy_ratio,
         }
 
 
@@ -121,6 +151,7 @@ class CertBundle:
     mismatch: MismatchCert = field(default_factory=MismatchCert)
     excitation: ExcitationCert = field(default_factory=ExcitationCert)
     influence: InfluenceCert = field(default_factory=InfluenceCert)
+    overconfidence: OverconfidenceCert = field(default_factory=OverconfidenceCert)
 
     @classmethod
     def create_exact(
@@ -132,6 +163,7 @@ class CertBundle:
         mismatch: Optional[MismatchCert] = None,
         excitation: Optional[ExcitationCert] = None,
         influence: Optional[InfluenceCert] = None,
+        overconfidence: Optional[OverconfidenceCert] = None,
     ) -> "CertBundle":
         """Create certificate for exact (ExactOp) operation."""
         return cls(
@@ -145,6 +177,7 @@ class CertBundle:
             mismatch=mismatch or MismatchCert(),
             excitation=excitation or ExcitationCert(),
             influence=influence or InfluenceCert(),
+            overconfidence=overconfidence or OverconfidenceCert(),
         )
 
     @classmethod
@@ -159,6 +192,7 @@ class CertBundle:
         mismatch: Optional[MismatchCert] = None,
         excitation: Optional[ExcitationCert] = None,
         influence: Optional[InfluenceCert] = None,
+        overconfidence: Optional[OverconfidenceCert] = None,
     ) -> "CertBundle":
         """Create certificate for approximate (ApproxOp) operation."""
         return cls(
@@ -172,6 +206,7 @@ class CertBundle:
             mismatch=mismatch or MismatchCert(),
             excitation=excitation or ExcitationCert(),
             influence=influence or InfluenceCert(),
+            overconfidence=overconfidence or OverconfidenceCert(),
         )
 
     def total_trigger_magnitude(self) -> float:
@@ -189,6 +224,7 @@ class CertBundle:
             + abs(1.0 - self.influence.dt_scale)
             + abs(1.0 - self.influence.extrinsic_scale)
             + abs(1.0 - self.influence.trust_alpha)
+            + abs(1.0 - self.influence.power_beta)
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -204,6 +240,7 @@ class CertBundle:
             "mismatch": self.mismatch.to_dict(),
             "excitation": self.excitation.to_dict(),
             "influence": self.influence.to_dict(),
+            "overconfidence": self.overconfidence.to_dict(),
             "total_trigger_magnitude": self.total_trigger_magnitude(),
         }
 
@@ -305,6 +342,16 @@ def aggregate_certificates(certs: List[CertBundle]) -> CertBundle:
         dt_scale=min(c.influence.dt_scale for c in certs),
         extrinsic_scale=min(c.influence.extrinsic_scale for c in certs),
         trust_alpha=min(c.influence.trust_alpha for c in certs),
+        power_beta=min(c.influence.power_beta for c in certs),
+    )
+
+    # Aggregate overconfidence (max / worst-case)
+    agg_overconfidence = OverconfidenceCert(
+        excitation_total=max(c.overconfidence.excitation_total for c in certs),
+        ess_to_excitation=max(c.overconfidence.ess_to_excitation for c in certs),
+        cond_to_support=max(c.overconfidence.cond_to_support for c in certs),
+        dt_asymmetry=max(c.overconfidence.dt_asymmetry for c in certs),
+        z_to_xy_ratio=max(c.overconfidence.z_to_xy_ratio for c in certs),
     )
     
     return CertBundle(
@@ -318,4 +365,5 @@ def aggregate_certificates(certs: List[CertBundle]) -> CertBundle:
         mismatch=agg_mismatch,
         excitation=agg_excitation,
         influence=agg_influence,
+        overconfidence=agg_overconfidence,
     )

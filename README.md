@@ -66,7 +66,7 @@ source install/setup.bash
 bash tools/run_and_evaluate_gc.sh
 ```
 
-Uses the Kimera rosbag; artifacts go to `results/gc_YYYYMMDD_HHMMSS/` (trajectory, metrics, diagnostics, wiring summary, dashboard).
+Uses the single canonical Kimera bag (`rosbags/Kimera_Data/ros2/10_14_acl_jackal-005`); all testing goes through this script and this bag. Artifacts go to `results/gc_YYYYMMDD_HHMMSS/` (trajectory, metrics, diagnostics, wiring summary, dashboard).
 
 ### Viewing (Rerun, Wayland-friendly)
 

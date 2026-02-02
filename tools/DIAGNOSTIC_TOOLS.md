@@ -2,11 +2,14 @@
 
 This document lists all available tools to diagnose coordinate frame issues.
 
+**Canonical bag:** All examples use the same bag as `tools/run_and_evaluate_gc.sh`: `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005`. See docs/BAG_TOPICS_AND_USAGE.md.
+
 ## Quick Start
 
 Run the comprehensive diagnostic:
 ```bash
 # Use venv Python directly (recommended)
+# Canonical bag (same as run_and_evaluate_gc.sh): rosbags/Kimera_Data/ros2/10_14_acl_jackal-005
 .venv/bin/python tools/diagnose_coordinate_frames.py rosbags/Kimera_Data/ros2/10_14_acl_jackal-005
 
 # Or activate venv first, then python3 will use venv Python

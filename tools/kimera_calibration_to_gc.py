@@ -11,7 +11,7 @@ and optionally keep bag-estimated rotation for IMU (see --imu-rotation).
 
 Usage:
   python tools/kimera_calibration_to_gc.py rosbags/Kimera_Data/calibration/robots/acl_jackal/extrinsics.yaml
-  python tools/kimera_calibration_to_gc.py ... --apply --config fl_ws/src/fl_slam_poc/config/gc_kimera.yaml
+  python tools/kimera_calibration_to_gc.py ... --apply --config fl_ws/src/fl_slam_poc/config/gc_unified.yaml
   python tools/kimera_calibration_to_gc.py ... --imu-rotation -1.602693 0.002604 0  # use bag-estimated IMU rotation
 """
 
@@ -58,12 +58,12 @@ def main() -> int:
     ap.add_argument(
         "--apply",
         action="store_true",
-        help="Update gc_kimera.yaml with T_base_lidar and T_base_imu (line replace).",
+        help="Update gc_unified.yaml with T_base_lidar and T_base_imu (line replace).",
     )
     ap.add_argument(
         "--config",
         default=None,
-        help="Path to gc_kimera.yaml (default: fl_ws/src/fl_slam_poc/config/gc_kimera.yaml)",
+        help="Path to gc_unified.yaml (default: fl_ws/src/fl_slam_poc/config/gc_unified.yaml)",
     )
     ap.add_argument(
         "--imu-rotation",
@@ -105,7 +105,7 @@ def main() -> int:
     if not args.apply:
         return 0
 
-    config_path = Path(args.config) if args.config else (_PROJECT_ROOT / "fl_ws" / "src" / "fl_slam_poc" / "config" / "gc_kimera.yaml")
+    config_path = Path(args.config) if args.config else (_PROJECT_ROOT / "fl_ws" / "src" / "fl_slam_poc" / "config" / "gc_unified.yaml")
     if not config_path.is_file():
         print(f"ERROR: Config not found: {config_path}", file=sys.stderr)
         return 1

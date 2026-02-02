@@ -17,6 +17,10 @@ Temporal smoothing requires stable feature IDs (e.g. map primitives); if applied
 on per-frame features without re-association, it blurs unrelated covariances.
 """
 
+# FUTURE/EXPERIMENTAL:
+# This module is intentionally not wired into the runtime pipeline. It is preserved
+# as a future BEV15 view-layer fusion scaffold. Do not import from core ops.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

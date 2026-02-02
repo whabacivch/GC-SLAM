@@ -11,7 +11,7 @@ This project uses the **Kimera** dataset for evaluation. Other datasets are arch
 - **Config:** `fl_ws/src/fl_slam_poc/config/gc_kimera.yaml`
 - **Frame mapping:** [KIMERA_FRAME_MAPPING.md](../KIMERA_FRAME_MAPPING.md), [KIMERA_CALIBRATION_AND_FRAME.md](../KIMERA_CALIBRATION_AND_FRAME.md)
 
-### Recommended sequence (acl_jackal)
+### Canonical bag (only one we use; same as run_and_evaluate_gc.sh)
 
 - **Bag:** `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005`
 - **Ground truth:** `rosbags/Kimera_Data/ground_truth/1014/acl_jackal_gt.tum`

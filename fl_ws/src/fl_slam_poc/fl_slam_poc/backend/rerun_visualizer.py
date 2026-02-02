@@ -99,6 +99,46 @@ class RerunVisualizer:
         else:
             rr.log("gc/map/points", rr.Points3D(positions=pos_f, radii=radii))
 
+    def log_rgbd(
+        self,
+        rgb: Optional[np.ndarray],
+        depth: Optional[np.ndarray],
+        time_sec: float,
+    ) -> None:
+        """
+        Log RGB + depth images to Rerun.
+
+        rgb: (H, W, 3) uint8 or float; depth: (H, W) float meters.
+        """
+        if self._rr is None:
+            return
+        rr = self._rr
+        _set_rerun_time(rr, time_sec)
+        if rgb is not None:
+            rgb_u8 = np.asarray(rgb)
+            if rgb_u8.dtype != np.uint8:
+                rgb_u8 = np.clip(rgb_u8, 0, 255).astype(np.uint8)
+            rr.log("gc/camera/rgb", rr.Image(rgb_u8))
+        if depth is not None:
+            depth_f = np.asarray(depth, dtype=np.float32)
+            if hasattr(rr, "DepthImage"):
+                rr.log("gc/camera/depth", rr.DepthImage(depth_f))
+            else:
+                rr.log("gc/camera/depth", rr.Image(depth_f))
+
+    def log_lidar(self, points: np.ndarray, time_sec: float) -> None:
+        """
+        Log LiDAR points as Points3D.
+
+        points: (N, 3) in base/world frame.
+        """
+        if self._rr is None:
+            return
+        rr = self._rr
+        _set_rerun_time(rr, time_sec)
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        rr.log("gc/lidar/points", rr.Points3D(positions=pts))
+
     def log_trajectory(self, positions_xyz: np.ndarray, time_sec: float) -> None:
         """
         Log trajectory as LineStrips3D (single strip).

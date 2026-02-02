@@ -19,6 +19,7 @@ from fl_slam_poc.common.certificates import (
     ExpectedEffect,
     ConditioningCert,
     InfluenceCert,
+    OverconfidenceCert,
 )
 from fl_slam_poc.common.primitives import (
     domain_projection_psd,
@@ -77,15 +78,34 @@ def fusion_scale_from_certificates(
     # Extract quality metrics from certificates
     cond_evidence = cert_evidence.conditioning.cond
     ess_evidence = cert_evidence.support.ess_total
+    support_frac = cert_evidence.support.support_frac
+    excitation_total = cert_evidence.excitation.dt_effect + cert_evidence.excitation.extrinsic_effect
+    dt_asymmetry = cert_evidence.overconfidence.dt_asymmetry
+    z_to_xy_ratio = cert_evidence.overconfidence.z_to_xy_ratio
+    power_beta = cert_evidence.influence.power_beta
+    nll_per_ess = cert_evidence.mismatch.nll_per_ess
     
     # Conditioning quality: lower condition number is better
     cond_quality = c0_cond / (cond_evidence + c0_cond)
     
     # Support quality: higher ESS is better (normalize by expected max)
     support_quality = ess_evidence / (ess_evidence + 1.0)
-    
-    # Combined quality (geometric mean for smoothness)
-    quality = jnp.sqrt(cond_quality * support_quality)
+
+    # Mismatch quality: smaller nll_per_ess => closer to 1.0. Default nll_per_ess=0 => no penalty.
+    mismatch_quality = jnp.exp(-jnp.asarray(nll_per_ess, dtype=jnp.float64))
+
+    # Observability qualities (bounded in [0,1] when present):
+    dt_quality = jnp.clip(jnp.asarray(dt_asymmetry, dtype=jnp.float64), 0.0, 1.0)
+    # z_to_xy_ratio is unbounded; map to [0,1] via saturation.
+    z_quality = jnp.asarray(z_to_xy_ratio, dtype=jnp.float64) / (jnp.asarray(z_to_xy_ratio, dtype=jnp.float64) + 1.0)
+    z_quality = jnp.clip(z_quality, 0.0, 1.0)
+    # Excitation proxy: more excitation_total => safer. Map to [0,1) via saturation.
+    exc_quality = jnp.asarray(excitation_total, dtype=jnp.float64) / (jnp.asarray(excitation_total, dtype=jnp.float64) + 1.0)
+    exc_quality = jnp.clip(exc_quality, 0.0, 1.0)
+
+    # Combined quality (geometric mean for smoothness; multiplicative so it is monotone in each risk proxy)
+    base = jnp.sqrt(cond_quality * support_quality)
+    quality = base * mismatch_quality * dt_quality * z_quality * exc_quality * jnp.clip(jnp.asarray(power_beta, dtype=jnp.float64), 0.0, 1.0)
     
     # Map to alpha range (continuous)
     alpha_raw = alpha_min + (alpha_max - alpha_min) * quality
@@ -101,6 +121,13 @@ def fusion_scale_from_certificates(
     cert = CertBundle.create_exact(
         chart_id=chart_id,
         anchor_id=anchor_id,
+        overconfidence=OverconfidenceCert(
+            excitation_total=float(excitation_total),
+            ess_to_excitation=float(ess_evidence) / (float(excitation_total) + float(constants.GC_EPS_MASS)),
+            cond_to_support=float(cond_evidence) / (float(support_frac) + float(constants.GC_EPS_MASS)),
+            dt_asymmetry=float(dt_asymmetry),
+            z_to_xy_ratio=float(z_to_xy_ratio),
+        ),
         influence=InfluenceCert(
             lift_strength=0.0,
             psd_projection_delta=0.0,

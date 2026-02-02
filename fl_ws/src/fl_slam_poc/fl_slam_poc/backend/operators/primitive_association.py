@@ -26,12 +26,7 @@ from fl_slam_poc.common.certificates import CertBundle, ExpectedEffect, Influenc
 from fl_slam_poc.common.ma_hex_web import MAHexWebConfig, generate_candidates_ma_hex_web
 from fl_slam_poc.backend.structures.measurement_batch import MeasurementBatch
 from fl_slam_poc.backend.structures.primitive_map import PrimitiveMapView
-from fl_slam_poc.backend.operators.sinkhorn_ot import (
-    SinkhornOTConfig,
-    sinkhorn_unbalanced_fixed_k,
-    w2_sq_2d,
-    _hellinger2_vmf,
-)
+
 
 
 # =============================================================================
@@ -65,6 +60,40 @@ class PrimitiveAssociationResult:
 # =============================================================================
 # Cost Computation
 # =============================================================================
+
+
+def _sinkhorn_unbalanced_fixed_k(
+    C: np.ndarray,
+    a: np.ndarray,
+    b: np.ndarray,
+    epsilon: float,
+    tau_a: float,
+    tau_b: float,
+    K: int,
+) -> np.ndarray:
+    """
+    Unbalanced Sinkhorn: fixed K iterations. KL relaxation on marginals (continuous; no threshold).
+    min_π <π,C> + ε KL(π|a⊗b) + τ_a KL(π1|a) + τ_b KL(πᵀ1|b).
+    Updates: u = (a / (K v))^(1/(1+τ_a/ε)), v = (b / (Kᵀ u))^(1/(1+τ_b/ε)).
+    τ_a=τ_b=0 recovers balanced. Returns coupling π (N,M).
+    """
+    C = np.asarray(C, dtype=np.float64)
+    a = np.asarray(a, dtype=np.float64).ravel()
+    b = np.asarray(b, dtype=np.float64).ravel()
+    N, M = C.shape
+    eps = max(float(epsilon), 1e-12)
+    K_mat = np.exp(-C / eps)
+    u = np.ones(N, dtype=np.float64)
+    v = np.ones(M, dtype=np.float64)
+    ua = 1.0 / (1.0 + float(tau_a) / eps)
+    vb = 1.0 / (1.0 + float(tau_b) / eps)
+    for _ in range(int(K)):
+        Kv = K_mat @ v
+        u = (a / (Kv + 1e-12)) ** ua
+        KTu = K_mat.T @ u
+        v = (b / (KTu + 1e-12)) ** vb
+    pi = u.reshape(-1, 1) * K_mat * v.reshape(1, -1)
+    return pi
 
 
 def _compute_sparse_cost_matrix(
@@ -292,7 +321,7 @@ def associate_primitives_ot(
     b = np.ones(config.k_assoc, dtype=np.float64) / config.k_assoc
 
     # Run Sinkhorn (unbalanced only; no balanced path)
-    pi = sinkhorn_unbalanced_fixed_k(
+    pi = _sinkhorn_unbalanced_fixed_k(
         C=cost_matrix,
         a=a,
         b=b,
@@ -356,7 +385,7 @@ def flatten_associations_for_fuse(
     n_valid: int,
     responsibility_threshold: float = 0.0,
 ) -> Tuple[
-    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
 ]:
     """
     Flatten associations to fixed-size flat arrays for primitive_map_fuse.
@@ -370,10 +399,11 @@ def flatten_associations_for_fuse(
         target_indices: (N_total * K_assoc,) map primitive indices
         Lambdas_meas: (N_total * K_assoc, 3, 3)
         thetas_meas: (N_total * K_assoc, 3)
-        etas_meas: (N_total * K_assoc, 3)
+        etas_meas: (N_total * K_assoc, B, 3)
         weights_meas: (N_total * K_assoc,)
         responsibilities: (N_total * K_assoc,)
         valid_flat: (N_total * K_assoc,) bool — True where row < n_valid
+        colors_meas: (N_total * K_assoc, 3) measurement RGB per flat row (for fuse color blend)
     """
     N_total, K_assoc = result.responsibilities.shape
     flat_size = N_total * K_assoc
@@ -396,6 +426,7 @@ def flatten_associations_for_fuse(
     thetas_flat = measurement_batch.thetas[row]
     etas_flat = measurement_batch.etas[row]
     weights_flat = measurement_batch.weights[row]
+    colors_flat = measurement_batch.colors[row]  # (flat_size, 3) for fuse color blend
 
     # Valid mask: only rows with row < n_valid correspond to real measurements
     valid_flat = row < n_valid
@@ -408,4 +439,5 @@ def flatten_associations_for_fuse(
         weights_flat,
         resp_flat,
         valid_flat,
+        colors_flat,
     )

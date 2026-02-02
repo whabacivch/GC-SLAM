@@ -10,13 +10,13 @@ All sensor outputs become measurement primitives packed to fixed sizes:
 
 Each primitive has:
 - 3D Gaussian info form (Lambda, theta)
-- Optional vMF params (eta)
+- vMF params (multi-lobe; mandatory)
 - Reliability weight
 - Source metadata (camera_idx, lidar_ring, etc.)
 
 Natural-parameter discipline:
 - 3D Gaussian: store (Lambda, theta) as primary; invert only at boundaries
-- vMF: store eta = kappa * mu
+- vMF: store etas[b] = kappa_b * mu_b for B fixed lobes; resultant eta = Σ_b etas[b]
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ class MeasurementPrimitive:
         Lambda: (3, 3) precision matrix
         theta: (3,) information vector (= Lambda @ position_mean)
 
-    Orientation (vMF):
-        eta: (3,) natural parameter (= kappa * direction_mean)
+    Orientation/appearance (multi-lobe vMF, B=GC_VMF_N_LOBES):
+        etas: (B, 3) natural parameters (= kappa_b * mu_b). Resultant eta is sum over lobes.
 
     Metadata:
         weight: Reliability/confidence weight
@@ -54,7 +54,7 @@ class MeasurementPrimitive:
     """
     Lambda: jnp.ndarray  # (3, 3) precision
     theta: jnp.ndarray   # (3,) info vector
-    eta: jnp.ndarray     # (3,) vMF natural param
+    etas: jnp.ndarray    # (B, 3) vMF natural params (B lobes)
     weight: float        # Reliability weight
     source: int          # 0=camera, 1=lidar
     source_idx: int      # Index within source
@@ -79,13 +79,13 @@ class MeasurementBatch:
     Attributes:
         Lambdas: (N_total, 3, 3) precision matrices
         thetas: (N_total, 3) information vectors
-        etas: (N_total, 3) vMF natural parameters
+        etas: (N_total, B, 3) vMF natural parameters (B lobes; mandatory)
         weights: (N_total,) reliability weights
         sources: (N_total,) source identifiers (0=camera, 1=lidar)
         source_indices: (N_total,) indices within source
         valid_mask: (N_total,) bool mask for valid entries
         timestamps: (N_total,) measurement timestamps
-        colors: (N_total, 3) optional RGB colors (camera only)
+        colors: (N_total, 3) RGB colors; camera slice from camera splats, LiDAR slice from colors_lidar or default from normals (never black)
 
         # Fixed budgets (compile-time constants)
         n_feat: int = N_FEAT budget
@@ -97,8 +97,9 @@ class MeasurementBatch:
     Lambdas: jnp.ndarray      # (N_total, 3, 3)
     thetas: jnp.ndarray       # (N_total, 3)
 
-    # Orientation (vMF)
-    etas: jnp.ndarray         # (N_total, 3)
+    # Orientation/appearance (multi-lobe vMF)
+    # etas: (N_total, B, 3) where B=GC_VMF_N_LOBES. Resultant eta = sum_b etas[:,b,:].
+    etas: jnp.ndarray         # (N_total, B, 3)
 
     # Metadata
     weights: jnp.ndarray      # (N_total,)
@@ -142,7 +143,7 @@ def create_empty_measurement_batch(
     return MeasurementBatch(
         Lambdas=jnp.zeros((n_total, 3, 3), dtype=jnp.float64),
         thetas=jnp.zeros((n_total, 3), dtype=jnp.float64),
-        etas=jnp.zeros((n_total, 3), dtype=jnp.float64),
+        etas=jnp.zeros((n_total, constants.GC_VMF_N_LOBES, 3), dtype=jnp.float64),
         weights=jnp.zeros((n_total,), dtype=jnp.float64),
         sources=jnp.zeros((n_total,), dtype=jnp.int32),
         source_indices=jnp.zeros((n_total,), dtype=jnp.int32),
@@ -203,8 +204,11 @@ def measurement_batch_from_camera_splats(
     Lambdas_cam = jax.vmap(jnp.linalg.inv)(Sigma_reg)
     thetas_cam = jax.vmap(lambda L, mu: L @ mu)(Lambdas_cam, positions[:n_valid])
 
-    # vMF natural params: eta = kappa * mu_dir
-    etas_cam = kappas[:n_valid, None] * directions[:n_valid]
+    # vMF natural params (B lobes): default is a single resultant lobe in slot 0.
+    # Contract: vMF is not optional; all primitives carry B lobes even if only one is populated.
+    B = int(constants.GC_VMF_N_LOBES)
+    etas_cam = jnp.zeros((n_valid, B, 3), dtype=jnp.float64)
+    etas_cam = etas_cam.at[:, 0, :].set(kappas[:n_valid, None] * directions[:n_valid])
 
     # Build full batch arrays
     Lambdas = jnp.zeros((n_total, 3, 3), dtype=jnp.float64)
@@ -213,7 +217,7 @@ def measurement_batch_from_camera_splats(
     thetas = jnp.zeros((n_total, 3), dtype=jnp.float64)
     thetas = thetas.at[:n_valid].set(thetas_cam)
 
-    etas = jnp.zeros((n_total, 3), dtype=jnp.float64)
+    etas = jnp.zeros((n_total, B, 3), dtype=jnp.float64)
     etas = etas.at[:n_valid].set(etas_cam)
 
     weights_full = jnp.zeros((n_total,), dtype=jnp.float64)
@@ -230,9 +234,13 @@ def measurement_batch_from_camera_splats(
     timestamps_full = jnp.zeros((n_total,), dtype=jnp.float64)
     timestamps_full = timestamps_full.at[:n_valid].set(timestamps[:n_valid])
 
+    # Colors: use provided camera colors, or default neutral gray (never black)
     colors_full = jnp.zeros((n_total, 3), dtype=jnp.float64)
     if colors is not None:
-        colors_full = colors_full.at[:n_valid].set(colors[:n_valid])
+        colors_full = colors_full.at[:n_valid].set(jnp.clip(colors[:n_valid], 0.0, 1.0))
+    else:
+        default_gray = jnp.array([0.5, 0.5, 0.5], dtype=jnp.float64)
+        colors_full = colors_full.at[:n_valid].set(default_gray)
 
     return MeasurementBatch(
         Lambdas=Lambdas,
@@ -251,6 +259,16 @@ def measurement_batch_from_camera_splats(
     )
 
 
+def _lidar_default_colors_from_normals(normals: jnp.ndarray) -> jnp.ndarray:
+    """
+    Default RGB for LiDAR surfels when no intensity: grayscale from normal.z.
+    normal.z in [-1, 1] -> gray in [0.25, 0.75]; RGB = (g, g, g). Visible, not black.
+    """
+    nz = jnp.clip(normals[:, 2:3], -1.0, 1.0)
+    g = 0.25 + 0.5 * (nz + 1.0) / 2.0  # (M, 1)
+    return jnp.broadcast_to(g, (normals.shape[0], 3))
+
+
 def measurement_batch_add_lidar_surfels(
     batch: MeasurementBatch,
     positions: jnp.ndarray,           # (M, 3) surfel centers
@@ -260,6 +278,8 @@ def measurement_batch_add_lidar_surfels(
     weights: jnp.ndarray,             # (M,) reliability weights
     timestamps: jnp.ndarray,          # (M,) timestamps
     ring_indices: Optional[jnp.ndarray] = None,  # (M,) LiDAR ring
+    colors_lidar: Optional[jnp.ndarray] = None,  # (M, 3) optional RGB; when None use default from normals
+    n_valid_override: Optional[int] = None,  # When set, treat only the first n_valid_override entries as valid.
     eps_lift: float = constants.GC_EPS_LIFT,
 ) -> MeasurementBatch:
     """
@@ -267,31 +287,29 @@ def measurement_batch_add_lidar_surfels(
 
     Converts covariance form to info form.
     Pads/truncates to fixed N_SURFEL budget.
-
-    Args:
-        batch: Existing batch (with camera features)
-        positions: Surfel center positions (M, 3)
-        covariances: Surfel covariances (M, 3, 3)
-        normals: Surface normal directions (M, 3)
-        kappas: Normal concentrations (M,)
-        weights: Reliability weights (M,)
-        timestamps: Measurement timestamps (M,)
-        ring_indices: Optional LiDAR ring indices (M,)
-        eps_lift: Regularization for matrix inversion
-
-    Returns:
-        MeasurementBatch with LiDAR surfels added
+    LiDAR slice colors: from colors_lidar if provided, else grayscale from normal.z (never black).
     """
-    M = positions.shape[0]
-    n_valid = min(M, batch.n_surfel)
+    M = int(positions.shape[0])
+    if n_valid_override is None:
+        n_valid = min(M, batch.n_surfel)
+    else:
+        n_valid = min(int(n_valid_override), M, batch.n_surfel)
 
     # Convert covariance to info form
     Sigma_reg = covariances[:n_valid] + eps_lift * jnp.eye(3, dtype=jnp.float64)[None, :, :]
     Lambdas_lidar = jax.vmap(jnp.linalg.inv)(Sigma_reg)
     thetas_lidar = jax.vmap(lambda L, mu: L @ mu)(Lambdas_lidar, positions[:n_valid])
 
-    # vMF natural params for normals
-    etas_lidar = kappas[:n_valid, None] * normals[:n_valid]
+    # vMF natural params (B lobes) for normals: default is a single resultant lobe in slot 0.
+    B = int(constants.GC_VMF_N_LOBES)
+    etas_lidar = jnp.zeros((n_valid, B, 3), dtype=jnp.float64)
+    etas_lidar = etas_lidar.at[:, 0, :].set(kappas[:n_valid, None] * normals[:n_valid])
+
+    # LiDAR slice colors: explicit or default from normals (no black default)
+    if colors_lidar is not None and colors_lidar.shape[0] >= n_valid:
+        rgb_lidar = jnp.clip(colors_lidar[:n_valid], 0.0, 1.0)
+    else:
+        rgb_lidar = _lidar_default_colors_from_normals(normals[:n_valid])
 
     # Update LiDAR slice [n_feat, n_feat + n_surfel)
     start = batch.n_feat
@@ -310,6 +328,7 @@ def measurement_batch_add_lidar_surfels(
 
     valid_mask = batch.valid_mask.at[start:end].set(True)
     timestamps_full = batch.timestamps.at[start:end].set(timestamps[:n_valid])
+    colors = batch.colors.at[start:end].set(rgb_lidar)
 
     return MeasurementBatch(
         Lambdas=Lambdas,
@@ -320,7 +339,7 @@ def measurement_batch_add_lidar_surfels(
         source_indices=source_indices,
         valid_mask=valid_mask,
         timestamps=timestamps_full,
-        colors=batch.colors,
+        colors=colors,
         n_feat=batch.n_feat,
         n_surfel=batch.n_surfel,
         n_camera_valid=batch.n_camera_valid,
@@ -336,29 +355,15 @@ def measurement_batch_from_lidar_only(
     weights: jnp.ndarray,             # (M,) reliability weights
     timestamps: jnp.ndarray,          # (M,) timestamps
     ring_indices: Optional[jnp.ndarray] = None,
+    colors_lidar: Optional[jnp.ndarray] = None,  # (M, 3) optional; when None use default from normals
+    n_valid_override: Optional[int] = None,
     n_feat: int = constants.GC_N_FEAT,
     n_surfel: int = constants.GC_N_SURFEL,
     eps_lift: float = constants.GC_EPS_LIFT,
 ) -> MeasurementBatch:
     """
     Build MeasurementBatch from LiDAR surfels only (no camera).
-
-    Useful for Stage 1 where camera is not yet wired.
-
-    Args:
-        positions: Surfel center positions (M, 3)
-        covariances: Surfel covariances (M, 3, 3)
-        normals: Surface normal directions (M, 3)
-        kappas: Normal concentrations (M,)
-        weights: Reliability weights (M,)
-        timestamps: Measurement timestamps (M,)
-        ring_indices: Optional LiDAR ring indices (M,)
-        n_feat: Camera feature budget (for sizing)
-        n_surfel: LiDAR surfel budget
-        eps_lift: Regularization
-
-    Returns:
-        MeasurementBatch with LiDAR surfels only
+    LiDAR colors: from colors_lidar if provided, else grayscale from normal.z (never black).
     """
     batch = create_empty_measurement_batch(n_feat=n_feat, n_surfel=n_surfel)
     return measurement_batch_add_lidar_surfels(
@@ -370,6 +375,8 @@ def measurement_batch_from_lidar_only(
         weights=weights,
         timestamps=timestamps,
         ring_indices=ring_indices,
+        colors_lidar=colors_lidar,
+        n_valid_override=n_valid_override,
         eps_lift=eps_lift,
     )
 
@@ -392,11 +399,30 @@ def measurement_batch_mean_directions(
     batch: MeasurementBatch,
     eps_mass: float = constants.GC_EPS_MASS,
 ) -> jnp.ndarray:
-    """Extract mean directions from vMF: mu_dir = eta / ||eta||."""
-    norms = jnp.linalg.norm(batch.etas, axis=1, keepdims=True)
-    return batch.etas / (norms + eps_mass)
+    """Extract mean directions from multi-lobe vMF resultant: mu = eta_sum / ||eta_sum||."""
+    eta_sum = jnp.sum(batch.etas, axis=1)  # (N_total, 3)
+    norms = jnp.linalg.norm(eta_sum, axis=1, keepdims=True)
+    return eta_sum / (norms + eps_mass)
 
 
 def measurement_batch_kappas(batch: MeasurementBatch) -> jnp.ndarray:
-    """Extract vMF concentrations: kappa = ||eta||."""
-    return jnp.linalg.norm(batch.etas, axis=1)
+    """Extract vMF concentrations from resultant: kappa = ||eta_sum||."""
+    eta_sum = jnp.sum(batch.etas, axis=1)  # (N_total, 3)
+    return jnp.linalg.norm(eta_sum, axis=1)
+
+
+def measurement_batch_lobe_directions(
+    batch: MeasurementBatch,
+    lobe: int,
+    eps_mass: float = constants.GC_EPS_MASS,
+) -> jnp.ndarray:
+    """Extract lobe mean directions (N_total,3): mu_b = eta_b / ||eta_b||."""
+    eta_b = batch.etas[:, int(lobe), :]
+    norms = jnp.linalg.norm(eta_b, axis=1, keepdims=True)
+    return eta_b / (norms + eps_mass)
+
+
+def measurement_batch_lobe_kappas(batch: MeasurementBatch, lobe: int) -> jnp.ndarray:
+    """Extract lobe kappas (N_total,): kappa_b = ||eta_b||."""
+    eta_b = batch.etas[:, int(lobe), :]
+    return jnp.linalg.norm(eta_b, axis=1)

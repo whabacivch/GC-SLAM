@@ -48,7 +48,6 @@ GC_D_DESKEW = 22  # Deskew tangent dimension (same as D_Z)
 # Fixed-cost budgets (compile-time constants)
 GC_K_HYP = 4  # Number of hypotheses, always present
 GC_HYP_WEIGHT_FLOOR = 0.0025  # 0.01 / K_HYP, minimum hypothesis weight
-GC_B_BINS = 48  # Atlas bins (fixed)
 GC_N_POINTS_CAP = 8192  # Max LiDAR points per scan per hypothesis (fixed)
 # IMU preintegration: slice to integration window and pad to this length (JIT fixed size).
 # At 200 Hz, 512 samples ≈ 2.5 s; covers typical scan-to-scan + deskew window.
@@ -115,8 +114,6 @@ GC_SLICE_TIME_OFFSET_END = 16
 GC_SLICE_EXTRINSIC_START = 16
 GC_SLICE_EXTRINSIC_END = 22
 
-# Soft assign temperature (for BinSoftAssign)
-GC_TAU_SOFT_ASSIGN = 0.1  # Default temperature (configurable)
 
 # Time-warp / membership kernel width as a fraction of scan duration.
 # Used to avoid hard [t0,t1] boundaries in deskew and time association.
@@ -273,6 +270,12 @@ GC_IW_RHO_MEAS_LIDAR = 0.99
 # World Z of the base origin should be ~0 (ground contact). See docs/FRAME_AND_QUATERNION_CONVENTIONS.md.
 GC_PLANAR_Z_REF = 0.0
 
+# Odom z variance prior (m^2): minimum variance for odom pose z component.
+# Caps trust in odom z so planar robots with bad/unobserved z don't pollute state.
+# Large value (1e6 = sigma_z >= 1000m) effectively means "don't trust odom z".
+# Smaller values allow using actual odom z with appropriate uncertainty.
+GC_ODOM_Z_VARIANCE_PRIOR = 1e6
+
 # Soft z constraint std dev (meters)
 # Smaller = stronger constraint pulling z toward z_ref
 # 0.1m allows some flexibility for uneven terrain
@@ -339,10 +342,8 @@ GC_RINGBUF_LEN = 5  # Number of camera frames to buffer
 # Single-path enforcement: exactly one pose evidence path active at runtime.
 # Selection is explicit via config (no fallback, no silent coexistence).
 #
-# Valid values:
-#   "bins"       - Legacy bin-based LiDAR evidence (Matrix Fisher + planar)
+# Valid value:
 #   "primitives" - Primitive alignment pose evidence (visual + LiDAR)
-GC_POSE_EVIDENCE_BACKEND_BINS = "bins"
 GC_POSE_EVIDENCE_BACKEND_PRIMITIVES = "primitives"
 
 # =============================================================================
@@ -350,10 +351,8 @@ GC_POSE_EVIDENCE_BACKEND_PRIMITIVES = "primitives"
 # =============================================================================
 # Single-path enforcement: exactly one map representation at runtime.
 #
-# Valid values:
-#   "bins"           - Legacy MapBinStats (48 directional bins)
+# Valid value:
 #   "primitive_map"  - PrimitiveMap (Gaussian x vMF atlas with stable IDs)
-GC_MAP_BACKEND_BINS = "bins"
 GC_MAP_BACKEND_PRIMITIVE_MAP = "primitive_map"
 
 # =============================================================================
@@ -381,6 +380,12 @@ GC_PRIMITIVE_CULL_WEIGHT_THRESHOLD = 1e-4
 # vMF concentration clamp (prevents numerical issues)
 GC_PRIMITIVE_KAPPA_MIN = 1e-3
 GC_PRIMITIVE_KAPPA_MAX = 1e4
+
+# vMF appearance/orientation lobes (multi-lobe mixture, fixed budget)
+# Contract: vMF is not optional. Use B=3 lobes (default) for appearance/direction modeling.
+# When a producer cannot populate multiple lobes yet, it must still populate a meaningful
+# resultant (e.g., lobe 0), with remaining lobes set to 0.0 (never omitted).
+GC_VMF_N_LOBES = 3
 
 # =============================================================================
 # CAMERA INTRINSICS/EXTRINSICS (required when pose_evidence_backend="primitives")

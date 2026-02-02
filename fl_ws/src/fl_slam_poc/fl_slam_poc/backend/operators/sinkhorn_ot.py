@@ -6,6 +6,10 @@ Cost c_ij = d_pos² + β d_dir²; W2² between 2D Gaussians; Hellinger² vMF.
 Fixed number of Sinkhorn steps (no convergence check). Returns (π, CertBundle, ExpectedEffect).
 """
 
+# FUTURE/EXPERIMENTAL:
+# This module is intentionally not wired into the runtime pipeline. It is preserved
+# as a future BEV15 view-layer association scaffold. Do not import from core ops.
+
 from __future__ import annotations
 
 import math

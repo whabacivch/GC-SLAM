@@ -26,16 +26,26 @@ This document is the **single source of truth** for mapping Kimera dataset frame
 - **World/odom (`acl_jackal2/odom`):** Assumed Z-up, planar motion (odom sample has z=0, pose_cov marks z/roll/pitch with 1e6). Aligns with GC Z-up world.
 - **Base (`acl_jackal2/base`):** Child of odom; planar base. Same as GC base_footprint semantics.
 - **LiDAR (`acl_jackal2/velodyne_link`):** Velodyne VLP-16; see [VELODYNE_VLP16.md](VELODYNE_VLP16.md). Convention (Z-up vs Z-down) must be verified on a real bag with `tools/diagnose_coordinate_frames.py` (script supports PointCloud2; use `--lidar-topic /acl_jackal/lidar_points` for Kimera).
-- **IMU (`acl_jackal2/forward_imu_optical_frame`):** Forward camera/IMU optical frame; may be tilted. Verify gravity direction with diagnostics when running.
+- **IMU (`acl_jackal2/forward_imu_optical_frame`):** D435i IMU in optical frame. Stationary accelerometer reads -Y (gravity in +Y). T_base_imu uses Rx(-90°) = rotvec `[-1.57, 0, 0]` to map IMU -Y to base +Z (cancels gravity_W = [0,0,-9.81]).
 
 When a Kimera bag is available, run `tools/diagnose_coordinate_frames.py` and update this section with CONFIRMED/TO-CONFIRM per frame.
+
+### "All motion in Z" symptom
+
+If the exported trajectory shows **motion mainly along Z** while the robot actually moves in the XY plane, there is an axis or frame convention mismatch. Common causes:
+
+1. **IMU extrinsic rotation** — If T_base_imu rotation is wrong, gravity doesn't cancel properly during IMU preintegration, causing Z drift at ~10 m/s (gravity rate). The D435i IMU reads -Y when stationary (gravity in +Y in optical frame); Rx(-90°) = rotvec `[-1.57, 0, 0]` maps this to base +Z to cancel gravity_W. **Wrong sign causes ~20 m/s² net Z acceleration.**
+2. **Odom frame axis convention** — The bag's odom may express position in a frame where "forward" is Z. We now use actual `pos.x, pos.y, pos.z` with z-variance capped by `GC_ODOM_Z_VARIANCE_PRIOR` (default 1e6 m² = effectively don't trust odom z).
+3. **State/export swap** — Less likely if code follows [trans(0:3), rot(3:6)] consistently.
+
+**Diagnostic:** Run `tools/diagnose_trajectory_axes.py` on the bag and (optionally) the exported TUM file. It reports position ranges for X,Y,Z from the bag's odom and from the TUM file. If odom has motion in XY but TUM has motion in Z at ~10 m/s, suspect IMU extrinsic rotation. If TUM matches odom axes but is offset, suspect odom or visual evidence issues.
 
 ### Diagnostic results (run on Kimera bag)
 
 Run with Kimera topics and paste the script output here to lock in Z-up/Z-down and odom ordering:
 
 ```bash
-python tools/diagnose_coordinate_frames.py /path/to/Kimera_Data/ros2/<seq>_ros2 \
+python tools/diagnose_coordinate_frames.py rosbags/Kimera_Data/ros2/10_14_acl_jackal-005 \
   --lidar-topic /acl_jackal/lidar_points \
   --imu-topic /acl_jackal/forward/imu \
   --odom-topic /acl_jackal/jackal_velocity_controller/odom \
@@ -69,6 +79,8 @@ Sensor hub input topics (Kimera):
 - LiDAR: `/acl_jackal/lidar_points`
 - IMU: `/acl_jackal/forward/imu`
 
+**Canonical bag:** We use only the bag in `run_and_evaluate_gc.sh`: **10_14_acl_jackal-005**. Topics are under `/acl_jackal/`; frame IDs in messages are `acl_jackal2/*`; extrinsics from `calibration/robots/acl_jackal/extrinsics.yaml`.
+
 ---
 
 ## Discovery (what the dataset provides)
@@ -96,7 +108,7 @@ Sensor hub input topics (Kimera):
 
 ## Extrinsics (loading from file)
 
-- **Current Kimera config:** Extrinsics in `gc_kimera.yaml` are **from Kimera_Data/calibration** (dataset-provided). Use `tools/kimera_calibration_to_gc.py rosbags/Kimera_Data/calibration/robots/acl_jackal/extrinsics.yaml --imu-rotation -1.602693 0.002604 0 --apply` to refresh: T_base_lidar from **T_baselink_lidar** (full 6D); T_base_imu from **T_cameralink_gyro** (translation) + bag-estimated rotation (forward_imu_optical_frame differs from gyro orientation). Convention: calibration uses T_a_b = “frame b into frame a” → same as GC T_base_sensor. See [rosbags/Kimera_Data/calibration/README.md](../rosbags/Kimera_Data/calibration/README.md).
+- **Current Kimera config:** Extrinsics in `gc_unified.yaml` (single source of truth). T_base_lidar from **T_baselink_lidar** (full 6D); T_base_imu from **T_cameralink_gyro** (translation) + Rx(-90°) rotation to map D435i optical frame (gravity +Y) to base frame (gravity -Z). See [rosbags/Kimera_Data/calibration/README.md](../rosbags/Kimera_Data/calibration/README.md). Convention: calibration uses T_a_b = "frame b into frame a" → same as GC T_base_sensor.
 - **Config:** `extrinsics_source: inline | file`. When `file`: `T_base_lidar_file`, `T_base_imu_file` (paths to YAML; fail-fast if missing). Backend loads at startup. Run `python tools/check_extrinsics.py <config_path>` to print loaded T_base_lidar, T_base_imu and frame names.
 - **GC format:** T_base_sensor: `[x, y, z, rx, ry, rz]` (translation m, rotvec rad). If dataset uses quat or T_sensor_base, add a conversion script to produce GC-format YAML.
 

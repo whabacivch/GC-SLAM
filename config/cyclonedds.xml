@@ -3,10 +3,11 @@
   <Domain id="any">
     <General>
       <AllowMulticast>false</AllowMulticast>
-      <NetworkInterfaceAddress>lo</NetworkInterfaceAddress>
+      <!-- Interfaces: use General/Interfaces/NetworkInterface in newer CycloneDDS if needed -->
     </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>
       <Peers>
         <Peer address="127.0.0.1"/>
       </Peers>

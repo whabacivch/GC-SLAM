@@ -8,7 +8,7 @@ Architecture:
     Rosbag → gc_sensor_hub (pointcloud_passthrough, odom_normalizer, imu_normalizer, dead_end_audit)
            → /gc/sensors/* → gc_backend_node → /gc/state, /gc/trajectory, etc.
 
-Camera (always enabled): image_decompress_cpp, depth_passthrough → /gc/sensors/camera_*.
+Camera (always enabled): camera_rgbd_node → /gc/sensors/camera_rgbd (single RGBD topic).
 """
 
 import os
@@ -16,8 +16,7 @@ import yaml
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
-from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from ament_index_python.packages import get_package_share_directory
@@ -153,15 +152,18 @@ def generate_launch_description():
         default_value="vlp16",
         description="PointCloud2 layout: vlp16 (Kimera VLP-16). See docs/POINTCLOUD2_LAYOUTS.md.",
     )
+    # Extrinsics: loaded from config yaml (single source of truth).
+    # Launch args available for override but should not be used - config yaml is authoritative.
     extrinsics_source_arg = DeclareLaunchArgument(
         "extrinsics_source",
         default_value="inline",
-        description="Extrinsics source: inline (from params) | file (from T_base_lidar_file, T_base_imu_file).",
+        description="Extrinsics source: inline (from config yaml) | file (from *_file params).",
     )
     T_base_lidar_file_arg = DeclareLaunchArgument("T_base_lidar_file", default_value="")
     T_base_imu_file_arg = DeclareLaunchArgument("T_base_imu_file", default_value="")
-    T_base_lidar_arg = DeclareLaunchArgument("T_base_lidar", default_value="[-0.039685, -0.067961, 0.147155, -0.006787, -0.097694, 0.001931]")
-    T_base_imu_arg = DeclareLaunchArgument("T_base_imu", default_value="[-0.016020, -0.030220, 0.007400, -1.602693, 0.002604, 0.0]")
+    # No inline defaults - extrinsics come from config yaml only
+    T_base_lidar_arg = DeclareLaunchArgument("T_base_lidar", default_value="")
+    T_base_imu_arg = DeclareLaunchArgument("T_base_imu", default_value="")
     lidar_sigma_meas_arg = DeclareLaunchArgument(
         "lidar_sigma_meas",
         default_value="0.001",
@@ -174,65 +176,38 @@ def generate_launch_description():
         default_value="/acl_jackal/forward/color/image_raw/compressed",
         description="Compressed RGB topic (e.g. Kimera: /acl_jackal/forward/color/image_raw/compressed).",
     )
-    camera_rgb_output_arg = DeclareLaunchArgument(
-        "camera_rgb_output_topic",
-        default_value="/gc/sensors/camera_image",
-        description="Canonical RGB output (sensor_msgs/Image rgb8).",
-    )
-    camera_depth_compressed_arg = DeclareLaunchArgument(
-        "camera_depth_compressed_topic",
-        default_value="",
-        description="Compressed depth topic (empty for Kimera; bag has raw depth).",
-    )
-    camera_depth_output_arg = DeclareLaunchArgument(
-        "camera_depth_output_topic",
-        default_value="/gc/sensors/camera_depth",
-        description="Canonical depth output (sensor_msgs/Image 32FC1 m).",
-    )
     camera_depth_raw_arg = DeclareLaunchArgument(
         "camera_depth_raw_topic",
         default_value="/acl_jackal/forward/depth/image_rect_raw",
-        description="Raw depth topic for passthrough (e.g. Kimera: .../depth/image_rect_raw). Empty = no passthrough.",
+        description="Raw depth topic (e.g. Kimera: .../depth/image_rect_raw).",
+    )
+    camera_rgbd_output_arg = DeclareLaunchArgument(
+        "camera_rgbd_output_topic",
+        default_value="/gc/sensors/camera_rgbd",
+        description="Canonical RGBD output (fl_slam_poc/RGBDImage).",
+    )
+    camera_pair_max_dt_arg = DeclareLaunchArgument(
+        "camera_pair_max_dt_sec",
+        default_value="0.05",
+        description="Max |t_rgb - t_depth| (sec) for pairing into one RGBD frame.",
     )
 
     # =========================================================================
-    # Image decompression (C++): compressed RGB -> canonical; optional compressed depth
+    # Single-path camera RGBD (C++): compressed RGB + raw depth -> RGBDImage
     # =========================================================================
-    image_decompress_cpp = Node(
+    camera_rgbd_node = Node(
         package="fl_slam_poc",
-        executable="image_decompress_cpp",
-        name="image_decompress_cpp",
+        executable="camera_rgbd_node",
+        name="camera_rgbd_node",
         output="screen",
         parameters=[
             {
                 "rgb_compressed_topic": LaunchConfiguration("camera_rgb_compressed_topic"),
-                "rgb_output_topic": LaunchConfiguration("camera_rgb_output_topic"),
-                "depth_compressed_topic": LaunchConfiguration("camera_depth_compressed_topic"),
-                "depth_output_topic": LaunchConfiguration("camera_depth_output_topic"),
-                "depth_scale_mm_to_m": True,
-                "qos_reliability": "best_effort",
-            }
-        ],
-    )
-
-    # Depth passthrough: raw depth (e.g. Kimera 16UC1) -> canonical 32FC1 m
-    # Depth passthrough runs only when raw depth topic is set (node errors if empty)
-    depth_passthrough = Node(
-        package="fl_slam_poc",
-        executable="depth_passthrough",
-        name="depth_passthrough",
-        output="screen",
-        condition=IfCondition(
-            PythonExpression(
-                ["'", LaunchConfiguration("camera_depth_raw_topic", default=""), "' != ''"]
-            )
-        ),
-        parameters=[
-            {
                 "depth_raw_topic": LaunchConfiguration("camera_depth_raw_topic"),
-                "depth_output_topic": LaunchConfiguration("camera_depth_output_topic"),
-                "scale_mm_to_m": True,
-                "qos_depth": 10,
+                "output_topic": LaunchConfiguration("camera_rgbd_output_topic"),
+                "depth_scale_mm_to_m": True,
+                "pair_max_dt_sec": LaunchConfiguration("camera_pair_max_dt_sec"),
+                "qos_reliability": "best_effort",
             }
         ],
     )
@@ -374,13 +349,11 @@ def generate_launch_description():
         T_base_lidar_arg,
         T_base_imu_arg,
         camera_rgb_compressed_arg,
-        camera_rgb_output_arg,
-        camera_depth_compressed_arg,
-        camera_depth_output_arg,
         camera_depth_raw_arg,
-        # Camera: decompress RGB (C++); passthrough raw depth (Python) when camera_depth_raw_topic set
-        image_decompress_cpp,
-        depth_passthrough,
+        camera_rgbd_output_arg,
+        camera_pair_max_dt_arg,
+        # Camera: single-path RGBD (C++)
+        camera_rgbd_node,
         # Sensor Hub (single process)
         gc_sensor_hub,
         # Audit / observability

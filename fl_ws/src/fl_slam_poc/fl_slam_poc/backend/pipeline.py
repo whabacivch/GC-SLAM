@@ -24,7 +24,7 @@ from fl_slam_poc.common.certificates import (
     aggregate_certificates,
     InfluenceCert,
 )
-# Bins removed; map_update result shape kept for compatibility (zeros)
+# PrimitiveMap-only pipeline (no bin backend)
 
 # Import all operators
 from fl_slam_poc.backend.operators.point_budget import point_budget_resample
@@ -64,7 +64,6 @@ from fl_slam_poc.backend.operators.excitation import (
 )
 from fl_slam_poc.backend.operators.recompose import pose_update_frobenius_recompose
 from fl_slam_poc.backend.operators.inverse_wishart_jax import process_noise_iw_suffstats_from_info_jax
-from fl_slam_poc.backend.operators.map_update import MapUpdateResult
 from fl_slam_poc.backend.operators.anchor_drift import anchor_drift_update
 from fl_slam_poc.backend.operators.hypothesis import hypothesis_barycenter_projection
 from fl_slam_poc.backend.diagnostics import ScanDiagnostics, MinimalScanTape
@@ -114,7 +113,6 @@ class PipelineConfig:
     """Configuration for the Geometric Compositional pipeline."""
     # Budgets (hard constants)
     K_HYP: int = constants.GC_K_HYP
-    B_BINS: int = constants.GC_B_BINS
     N_POINTS_CAP: int = constants.GC_N_POINTS_CAP
     
     # Epsilon constants
@@ -127,6 +125,12 @@ class PipelineConfig:
     alpha_max: float = constants.GC_ALPHA_MAX
     kappa_scale: float = constants.GC_KAPPA_SCALE
     c0_cond: float = constants.GC_C0_COND
+
+    # Power tempering (generalized Bayes / power EP): L,h ← beta*(L,h)
+    # beta is computed continuously from certificate sentinels; fixed-budget; no iteration.
+    power_beta_min: float = 0.25
+    power_beta_exc_c: float = 50.0  # ess_to_excitation scale (larger => less tempering)
+    power_beta_z_c: float = 1.0     # z_to_xy_ratio scale for saturation (larger => more permissive)
     
     # Excitation coupling
     c_dt: float = constants.GC_C_DT
@@ -134,7 +138,6 @@ class PipelineConfig:
     c_frob: float = constants.GC_C_FROB
     
     # Soft assign
-    tau_soft_assign: float = constants.GC_TAU_SOFT_ASSIGN
     
     # Forgetting
     forgetting_factor: float = 0.99
@@ -178,17 +181,9 @@ class PipelineConfig:
     save_full_diagnostics: bool = False  # If True, build full ScanDiagnostics; else minimal tape only
 
     # =========================================================================
-    # STAGE 1: Map Backend Configuration
+    # Map + Pose Evidence (single-path, primitives only)
     # =========================================================================
-    # Map backend: "bins" (legacy MapBinStats) or "primitive_map" (PrimitiveMap)
-    # Stage 1: runs BOTH for comparison/transition (bins for pose evidence, primitive_map for map)
-    # Stage 2+: primitive_map only
-    map_backend: str = constants.GC_MAP_BACKEND_BINS
-
-    # Pose evidence backend: "bins" (legacy) or "primitives" (visual+LiDAR alignment)
-    # Stage 1: bins only
-    # Stage 2+: primitives only
-    pose_evidence_backend: str = constants.GC_POSE_EVIDENCE_BACKEND_BINS
+    # The canonical backend is PrimitiveMap + primitive alignment evidence.
 
     # PrimitiveMap budgets
     n_feat: int = constants.GC_N_FEAT
@@ -225,7 +220,6 @@ class PipelineConfig:
 class ScanPipelineResult:
     """Result of processing a single scan for one hypothesis."""
     belief_updated: BeliefGaussianInfo
-    map_increments: MapUpdateResult  # Increments to map statistics (bins)
     # Process-noise IW sufficient statistics proposal (commutative; aggregated once per scan).
     iw_process_dPsi: jnp.ndarray  # (7, 6, 6) padded
     iw_process_dnu: jnp.ndarray   # (7,)
@@ -240,7 +234,7 @@ class ScanPipelineResult:
     # Per-scan diagnostics for dashboard (Stage-0 schema)
     diagnostics: Optional[ScanDiagnostics] = None
     diagnostics_tape: Optional[MinimalScanTape] = None  # When save_full_diagnostics is False
-    # Stage 1: PrimitiveMap update results (optional; None if map_backend="bins")
+    # PrimitiveMap update results
     primitive_map_updated: Optional[PrimitiveMap] = None
     measurement_batch: Optional[MeasurementBatch] = None
     n_primitives_inserted: int = 0
@@ -337,17 +331,19 @@ def process_scan_single_hypothesis(
     Follows the fixed-cost scan pipeline:
     1. PointBudgetResample
     2. PredictDiffusion
-    3. DeskewConstantTwist
-    4. BinSoftAssign
-    5. ScanBinMomentMatch
-    6. KappaFromResultant (map and scan)
-    7. Matrix Fisher rotation + planar translation
-    8. OdomEvidence + ImuEvidence + LidarEvidence (closed-form/Laplace; no moment-matching)
-    9. FusionScaleFromCertificates
-    10. InfoFusionAdditive
-    11. PoseUpdateFrobeniusRecompose
-    12. PoseCovInflationPushforward
-    13. AnchorDriftUpdate
+    3. IMU membership weights (soft window)
+    4. IMU preintegration (deskew + scan-to-scan)
+    5. DeskewConstantTwist
+    6. IMU + Odom evidence; compute z_lin
+    7. Surfel extraction + OT association
+    8. Visual pose evidence (Laplace at z_lin)
+    9. Tempered evidence (power EP; closed form)
+    10. FusionScaleFromCertificates
+    11. InfoFusionAdditive
+    12. PoseUpdateFrobeniusRecompose
+    13. IW sufficient-stat updates (process + measurement)
+    14. PrimitiveMap update (fuse/insert/cull/forget)
+    15. AnchorDriftUpdate
     
     All steps run every time. No gates.
     
@@ -612,7 +608,7 @@ def process_scan_single_hypothesis(
     # Point covariances are not used by the new deskew. Keep zeros (deterministic).
     deskewed_covs = jnp.zeros((deskewed_points.shape[0], 3, 3), dtype=jnp.float64)
 
-    # Compute point directions for binning from the LiDAR origin (not base origin).
+    # Compute point directions from the LiDAR origin (not base origin).
     # points are in base frame; subtract sensor origin to recover true ray directions.
     rays = deskewed_points - config.lidar_origin_base[None, :]
     norms = jnp.linalg.norm(rays, axis=1, keepdims=True)
@@ -853,17 +849,19 @@ def process_scan_single_hypothesis(
     iw_meas_dPsi = iw_meas_gyro_dPsi + iw_meas_accel_dPsi
     iw_meas_dnu = iw_meas_gyro_dnu + iw_meas_accel_dnu
 
-    # LiDAR bucket IW stats are removed (no bins)
+    # LiDAR bucket IW stats are removed
     # Fixed-cost: primitive precisions handle measurement noise
     iw_lidar_bucket_dPsi = jnp.zeros((64, 3, 3), dtype=jnp.float64)  # Placeholder shape
     iw_lidar_bucket_dnu = jnp.zeros((64,), dtype=jnp.float64)
     
     # =========================================================================
-    # Step 9: Evidence = IMU+odom (z_lin block) + visual pose (L_lidar, h_lidar)
+    # Step 9: Evidence (raw) = IMU+odom + visual pose
     # =========================================================================
     # No duplicate odom/IMU block; L_imu_odom, h_imu_odom already built for z_lin.
-    L_evidence = L_imu_odom + L_lidar
-    h_evidence = h_imu_odom + h_lidar
+    # We first construct the raw evidence, then optionally apply a single-pass tempered-posterior
+    # scaling (power EP / generalized Bayes) as continuous conservatism (no gating, no iteration).
+    L_evidence_raw = L_imu_odom + L_lidar
+    h_evidence_raw = h_imu_odom + h_lidar
 
     # Diagnostic: check which evidence component has NaN
     for name, L in [("L_lidar", L_lidar), ("L_odom", odom_result.L_odom),
@@ -873,6 +871,69 @@ def process_scan_single_hypothesis(
         if not np.all(np.isfinite(L_np)):
             nan_pos = np.argwhere(~np.isfinite(L_np))[:5]
             raise ValueError(f"{name} contains NaN at positions {nan_pos.tolist()}")
+
+    # -------------------------------------------------------------------------
+    # Power tempering (closed form, fixed budget):
+    # L_evidence = beta * L_evidence_raw, h_evidence = beta * h_evidence_raw
+    #
+    # beta is computed from certificate-level sentinels to reduce overconfidence under dependence
+    # and partial observability. This is a single, declared scaling (no hidden heuristics).
+    # -------------------------------------------------------------------------
+    # Build evidence cert from available LiDAR-related certificates (deskew always; surfel/assoc/visual when primitive path ran)
+    lidar_certs = [deskew_cert]
+    if surfel_cert is not None:
+        lidar_certs.append(surfel_cert)
+    if assoc_cert is not None:
+        lidar_certs.append(assoc_cert)
+    if visual_cert is not None:
+        lidar_certs.append(visual_cert)
+    evidence_cert = aggregate_certificates(lidar_certs)
+    combined_evidence_cert = aggregate_certificates([evidence_cert, odom_cert, imu_cert, gyro_cert])
+
+    # Observability sentinels are computed from the *raw* evidence to avoid fixed-point iteration.
+    eps = float(config.eps_mass)
+    dt_pose_raw = jnp.linalg.norm(L_evidence_raw[15, 0:6]) + jnp.linalg.norm(L_evidence_raw[0:6, 15])
+    dt_vel_raw = jnp.linalg.norm(L_evidence_raw[15, 6:9]) + jnp.linalg.norm(L_evidence_raw[6:9, 15])
+    dt_asym_raw = jnp.abs(dt_vel_raw - dt_pose_raw) / (dt_vel_raw + dt_pose_raw + eps)
+    dt_asym_raw = jnp.clip(dt_asym_raw, 0.0, 1.0)
+    L_xx_raw = jnp.abs(L_evidence_raw[0, 0])
+    L_yy_raw = jnp.abs(L_evidence_raw[1, 1])
+    L_zz_raw = jnp.abs(L_evidence_raw[2, 2])
+    z_to_xy_raw = L_zz_raw / (0.5 * (L_xx_raw + L_yy_raw) + eps)
+
+    combined_evidence_cert.overconfidence.dt_asymmetry = float(dt_asym_raw)
+    combined_evidence_cert.overconfidence.z_to_xy_ratio = float(z_to_xy_raw)
+
+    # Closed-form tempering beta from sentinels (continuous; bounded).
+    # This mapping is a declared control law; tune parameters in PipelineConfig.
+    exc_total = combined_evidence_cert.excitation.dt_effect + combined_evidence_cert.excitation.extrinsic_effect
+    ess_total = combined_evidence_cert.support.ess_total
+    ess_to_exc = float(ess_total) / (float(exc_total) + float(config.eps_mass))
+
+    s_dt = dt_asym_raw
+    s_z = float(z_to_xy_raw) / (float(z_to_xy_raw) + float(config.power_beta_z_c))
+    s_exc = 1.0 / (1.0 + (ess_to_exc / float(config.power_beta_exc_c)))
+    s = jnp.clip(jnp.asarray(s_dt * s_z * s_exc, dtype=jnp.float64), 0.0, 1.0)
+    beta = float(config.power_beta_min + (1.0 - config.power_beta_min) * float(s))
+    beta = float(jnp.clip(jnp.asarray(beta, dtype=jnp.float64), config.power_beta_min, 1.0))
+
+    # Apply tempering to evidence (power posterior)
+    L_evidence = beta * L_evidence_raw
+    h_evidence = beta * h_evidence_raw
+    combined_evidence_cert.influence.power_beta = beta
+    temper_cert = CertBundle.create_approx(
+        chart_id=belief_pred.chart_id,
+        anchor_id=belief_pred.anchor_id,
+        triggers=["PowerTempering"],
+        frobenius_applied=abs(1.0 - beta) > 0.0,
+        influence=InfluenceCert(
+            dt_scale=1.0,
+            extrinsic_scale=1.0,
+            trust_alpha=1.0,
+            power_beta=beta,
+        ),
+    )
+    all_certs.append(temper_cert)
 
     # Fisher-derived excitation scaling (Contract 1): scale dt/ex prior strength by (1 - s)
     s_dt, s_ex = compute_excitation_scales_jax(L_evidence=L_evidence, L_prior=belief_pred.L)
@@ -914,16 +975,6 @@ def process_scan_single_hypothesis(
     # Step 10: FusionScaleFromCertificates
     # =========================================================================
     # Use a combined certificate for fusion scale (single-path, includes IMU+odom+lidar).
-    # Build evidence cert from available LiDAR-related certificates (deskew always; surfel/assoc/visual when primitive path ran)
-    lidar_certs = [deskew_cert]
-    if surfel_cert is not None:
-        lidar_certs.append(surfel_cert)
-    if assoc_cert is not None:
-        lidar_certs.append(assoc_cert)
-    if visual_cert is not None:
-        lidar_certs.append(visual_cert)
-    evidence_cert = aggregate_certificates(lidar_certs)
-    combined_evidence_cert = aggregate_certificates([evidence_cert, odom_cert, imu_cert, gyro_cert])
 
     # Effective conditioning for trust alpha: evaluated on pose block (6x6) in JAX; no host round-trip.
     # Full 22x22 would be dominated by physically-null directions (yaw under gravity, weak bias/extrinsic).
@@ -945,6 +996,8 @@ def process_scan_single_hypothesis(
         near_null_count=int(near_null_count),
     )
     combined_evidence_cert.approximation_triggers.append("FusionScaleConditioningPose6")  # pose6 block only
+
+    # Note: dt/z sentinels already computed from raw evidence and stored in combined_evidence_cert.overconfidence.
 
     fusion_scale_result, fusion_scale_cert, fusion_scale_effect = fusion_scale_from_certificates(
         cert_evidence=combined_evidence_cert,
@@ -1012,7 +1065,8 @@ def process_scan_single_hypothesis(
             mu_b = jnp.linalg.solve(Lambda_reg, theta_b)
             mu_w = R_t @ mu_b + t_t
             theta_w = Lambda_w @ mu_w
-            eta_w = R_t @ eta_b
+            # Multi-lobe vMF: eta_b is (B,3); rotate each lobe into world.
+            eta_w = (R_t @ eta_b.T).T
             return Lambda_w, theta_w, eta_w
 
         if map_view.count > 0 and measurement_batch.n_valid > 0:
@@ -1024,6 +1078,7 @@ def process_scan_single_hypothesis(
                 weights_meas,
                 responsibilities_fuse,
                 valid_flat,
+                colors_meas_flat,
             ) = flatten_associations_for_fuse(
                 result=assoc_result,
                 measurement_batch=measurement_batch,
@@ -1045,6 +1100,8 @@ def process_scan_single_hypothesis(
                     responsibilities=responsibilities_fuse,
                     timestamp=scan_end_time,
                     valid_mask=valid_flat,
+                    colors_meas=colors_meas_flat,
+                    eps_mass=config.eps_mass,
                 )
                 primitive_map = fuse_result.prim_map
                 all_certs.append(fuse_cert)
@@ -1059,6 +1116,7 @@ def process_scan_single_hypothesis(
                 thetas_valid = measurement_batch.thetas[valid_indices]
                 etas_valid = measurement_batch.etas[valid_indices]
                 weights_valid = measurement_batch.weights[valid_indices]
+                colors_valid = measurement_batch.colors[valid_indices]
                 mean_timestamp = float(jnp.mean(measurement_batch.timestamps[valid_indices]))
                 Lambdas_world, thetas_world, etas_world = jax.vmap(transform_gaussian_to_world)(
                     Lambdas_valid, thetas_valid, etas_valid
@@ -1070,6 +1128,7 @@ def process_scan_single_hypothesis(
                     etas_new=etas_world,
                     weights_new=weights_valid,
                     timestamp=mean_timestamp,
+                    colors_new=colors_valid,
                 )
                 primitive_map = result_insert.prim_map
                 all_certs.append(insert_cert)
@@ -1093,37 +1152,7 @@ def process_scan_single_hypothesis(
         primitive_map_updated = primitive_map
     
     # =========================================================================
-    # Step 13: Map Update (Primitive-based)
-    # =========================================================================
-    # PrimitiveMap was updated in Step 12b with z_t (fuse/insert/cull/forget).
-    # Bins (MapBinStats, B_BINS) are DERIVED / LEGACY only:
-    # - Not used for pose evidence (pose evidence is primitive alignment only).
-    # - MapUpdateResult with B_BINS shape is kept for backward compatibility with
-    #   backend_node map_stats aggregation and diagnostics; all deltas are zero.
-    # - Canonical map is PrimitiveMap. See .cursor/plans/visual_lidar_*.plan.md Stage 3.
-    t0 = time.perf_counter() if config.enable_timing else None
-
-    # Dummy map update result (bin-shaped for backend_node aggregation; deltas zero)
-    B_BINS = config.B_BINS
-    map_update_result = MapUpdateResult(
-        delta_S_dir=jnp.zeros((B_BINS, 3), dtype=jnp.float64),
-        delta_S_dir_scatter=jnp.zeros((B_BINS, 3, 3), dtype=jnp.float64),
-        delta_N_dir=jnp.zeros((B_BINS,), dtype=jnp.float64),
-        delta_N_pos=jnp.zeros((B_BINS,), dtype=jnp.float64),
-        delta_sum_p=jnp.zeros((B_BINS, 3), dtype=jnp.float64),
-        delta_sum_ppT=jnp.zeros((B_BINS, 3, 3), dtype=jnp.float64),
-        inflation_magnitude=0.0,
-    )
-    map_update_cert = CertBundle.create_exact(
-        chart_id=belief_pred.chart_id,
-        anchor_id="primitive_map_update",
-    )
-    if config.enable_timing:
-        _record_timing("map_update_ms", t0, map_update_result.delta_S_dir)
-    all_certs.append(map_update_cert)
-    
-    # =========================================================================
-    # Step 14: AnchorDriftUpdate
+    # Step 13: AnchorDriftUpdate
     # =========================================================================
     drift_result, belief_final, drift_cert, drift_effect = anchor_drift_update(
         belief=belief_recomposed,
@@ -1244,15 +1273,31 @@ def process_scan_single_hypothesis(
         if aggregated_cert.conditioning is not None:
             psd_min_eig_before = aggregated_cert.conditioning.eig_min
 
-        # Primitive-based diagnostics (Matrix Fisher and bins no longer used)
-        # Use placeholder values for backward compatibility with ScanDiagnostics schema
-        B_BINS = config.B_BINS
-        mf_svd_np = np.zeros(3, dtype=np.float64)  # No Matrix Fisher SVD with primitives
-        scan_scatter_eigs = np.zeros((B_BINS, 3), dtype=np.float64)  # No bin scatter with primitives
-        map_scatter_eigs = np.zeros((B_BINS, 3), dtype=np.float64)  # No bin scatter with primitives
+        # Primitive-based diagnostics (no bin or Matrix Fisher paths)
 
         if config.enable_timing:
             timing_ms["total_ms"] = (time.perf_counter() - t_total_start) * 1000.0
+
+        # Twist-derived validation scalars
+        pose0_np = np.array(pose0, dtype=np.float64)
+        pose_pred_np = np.array(pose_pred, dtype=np.float64)
+        odom_twist_np = np.array(odom_twist, dtype=np.float64)
+        distance_pose_val = float(np.linalg.norm(pose_pred_np[:3] - pose0_np[:3]))
+        speed_odom_val = float(np.linalg.norm(odom_twist_np[:3]))  # ||v_body||
+        distance_twist_val = speed_odom_val * dt_sec
+        speed_pose_val = distance_pose_val / dt_sec if dt_sec > 1e-6 else 0.0
+
+        # IMU jerk diagnostics: ||a_{i+1} - a_i|| / dt_i for consecutive samples
+        imu_accel_np = np.array(imu_accel, dtype=np.float64)
+        imu_stamps_np = np.array(imu_stamps, dtype=np.float64)
+        jerk_norms = []
+        for i in range(len(imu_accel_np) - 1):
+            dt_i = imu_stamps_np[i + 1] - imu_stamps_np[i]
+            if dt_i > 1e-6:
+                da = imu_accel_np[i + 1] - imu_accel_np[i]
+                jerk_norms.append(float(np.linalg.norm(da) / dt_i))
+        imu_jerk_norm_mean_val = float(np.mean(jerk_norms)) if jerk_norms else 0.0
+        imu_jerk_norm_max_val = float(np.max(jerk_norms)) if jerk_norms else 0.0
 
         diagnostics = ScanDiagnostics(
             scan_number=0,  # Will be set by backend_node
@@ -1271,11 +1316,6 @@ def process_scan_single_hypothesis(
             n_points_budget=int(points.shape[0]),
             p_W=trans_final,
             R_WL=R_final,
-            # Bin-based diagnostics replaced with placeholders (primitives don't use bins)
-            N_bins=np.zeros(B_BINS, dtype=np.float64),
-            S_bins=np.zeros((B_BINS, 3), dtype=np.float64),
-            kappa_bins=np.zeros(B_BINS, dtype=np.float64),
-            kappa_map_bins=np.zeros(B_BINS, dtype=np.float64),
             L_total=L_total_np,
             h_total=h_total_np,
             L_lidar=np.array(L_lidar),
@@ -1292,13 +1332,6 @@ def process_scan_single_hypothesis(
             psd_delta_fro=psd_delta,
             psd_min_eig_before=psd_min_eig_before,
             psd_min_eig_after=psd_min_eig_after,
-            # Visual pose evidence replaces Matrix Fisher (no SVD cost available)
-            wahba_cost=0.0,  # No Matrix Fisher with primitives
-            mf_svd=mf_svd_np,
-            scan_scatter_eigs=scan_scatter_eigs,
-            map_scatter_eigs=map_scatter_eigs,
-            # Visual pose evidence doesn't have separate translation residual
-            translation_residual_norm=0.0,  # No planar translation with primitives
             rot_err_lidar_deg_pred=rot_err_lidar_deg_pred,
             rot_err_lidar_deg_post=rot_err_lidar_deg_post,
             rot_err_odom_deg_pred=rot_err_odom_deg_pred,
@@ -1326,18 +1359,17 @@ def process_scan_single_hypothesis(
             preint_r_pos=np.array(preint_result.r_pos),
             dyaw_gyro=float(dyaw_gyro),
             dyaw_odom=float(dyaw_odom),
-            dyaw_wahba=0.0,  # No Matrix Fisher with primitives (visual_pose_evidence used instead)
+            distance_pose=distance_pose_val,
+            distance_twist=distance_twist_val,
+            speed_odom=speed_odom_val,
+            speed_pose=speed_pose_val,
+            imu_jerk_norm_mean=imu_jerk_norm_mean_val,
+            imu_jerk_norm_max=imu_jerk_norm_max_val,
             t_total_ms=timing_ms.get("total_ms", 0.0) if timing_ms is not None else 0.0,
             t_point_budget_ms=timing_ms.get("point_budget_ms", 0.0) if timing_ms is not None else 0.0,
             t_imu_preint_scan_ms=timing_ms.get("imu_preint_scan_ms", 0.0) if timing_ms is not None else 0.0,
             t_imu_preint_int_ms=timing_ms.get("imu_preint_int_ms", 0.0) if timing_ms is not None else 0.0,
             t_deskew_ms=timing_ms.get("deskew_ms", 0.0) if timing_ms is not None else 0.0,
-            t_bin_assign_ms=timing_ms.get("bin_assign_ms", 0.0) if timing_ms is not None else 0.0,
-            t_bin_moment_ms=timing_ms.get("bin_moment_ms", 0.0) if timing_ms is not None else 0.0,
-            t_matrix_fisher_ms=timing_ms.get("matrix_fisher_ms", 0.0) if timing_ms is not None else 0.0,
-            t_planar_translation_ms=timing_ms.get("planar_translation_ms", 0.0) if timing_ms is not None else 0.0,
-            t_lidar_bucket_iw_ms=timing_ms.get("lidar_bucket_iw_ms", 0.0) if timing_ms is not None else 0.0,
-            t_map_update_ms=timing_ms.get("map_update_ms", 0.0) if timing_ms is not None else 0.0,
         )
     else:
         # Minimal tape only (crash-tolerant, low overhead)
@@ -1357,13 +1389,10 @@ def process_scan_single_hypothesis(
             t_total_ms=timing_ms.get("total_ms", 0.0) if timing_ms is not None else 0.0,
             t_point_budget_ms=timing_ms.get("point_budget_ms", 0.0) if timing_ms is not None else 0.0,
             t_deskew_ms=timing_ms.get("deskew_ms", 0.0) if timing_ms is not None else 0.0,
-            t_bin_moment_ms=timing_ms.get("bin_moment_ms", 0.0) if timing_ms is not None else 0.0,
-            t_map_update_ms=timing_ms.get("map_update_ms", 0.0) if timing_ms is not None else 0.0,
         )
 
     return ScanPipelineResult(
         belief_updated=belief_final,
-        map_increments=map_update_result,
         iw_process_dPsi=iw_process_dPsi,
         iw_process_dnu=iw_process_dnu,
         iw_meas_dPsi=iw_meas_dPsi,
@@ -1431,10 +1460,7 @@ class RuntimeManifest:
     D_DESKEW: int = constants.GC_D_DESKEW
     K_HYP: int = constants.GC_K_HYP
     HYP_WEIGHT_FLOOR: float = constants.GC_HYP_WEIGHT_FLOOR
-    B_BINS: int = constants.GC_B_BINS
     N_POINTS_CAP: int = constants.GC_N_POINTS_CAP
-    
-    tau_soft_assign: float = constants.GC_TAU_SOFT_ASSIGN
     
     eps_psd: float = constants.GC_EPS_PSD
     eps_lift: float = constants.GC_EPS_LIFT
@@ -1451,15 +1477,22 @@ class RuntimeManifest:
     c_ex: float = constants.GC_C_EX
     c_frob: float = constants.GC_C_FROB
     imu_gravity_scale: float = 1.0
+    deskew_rotation_only: bool = False
+    power_beta_min: float = 0.25
+    power_beta_exc_c: float = 50.0
+    power_beta_z_c: float = 1.0
 
     # Explicit backend/operator selections (single-path; no fallback).
     # Required for auditability of the "no multipaths" invariant.
     # pose_evidence_backend and map_backend are the single source of truth for pose/map path.
-    pose_evidence_backend: str = constants.GC_POSE_EVIDENCE_BACKEND_BINS
-    map_backend: str = constants.GC_MAP_BACKEND_BINS
+    pose_evidence_backend: str = constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES
+    map_backend: str = constants.GC_MAP_BACKEND_PRIMITIVE_MAP
     backends: Dict[str, str] = None
+    topics: Dict[str, str] = None
 
     def __post_init__(self):
+        if self.topics is None:
+            self.topics = {}
         if self.backends is None:
             # Keep this list intentionally small and explicit: only things that
             # materially affect runtime behavior and could otherwise drift.
@@ -1476,17 +1509,12 @@ class RuntimeManifest:
                 "imu_preintegration": "fl_slam_poc.backend.operators.imu_preintegration",
                 "imu_evidence": "fl_slam_poc.backend.operators.imu_evidence (Laplace over intrinsic ops)",
                 "odom_evidence": "fl_slam_poc.backend.operators.odom_evidence (Gaussian SE(3) pose factor)",
-                "lidar_evidence": "fl_slam_poc.backend.operators.matrix_fisher_evidence (Matrix Fisher + planar translation)",
+                "lidar_evidence": "fl_slam_poc.backend.operators.visual_pose_evidence (primitive alignment; Laplace at z_lin)",
                 "hypothesis_barycenter": "fl_slam_poc.backend.operators.hypothesis (vectorized over hypotheses)",
-                "map_update": "fl_slam_poc.backend.operators.map_update (vectorized over bins)",
+                "map_update": "fl_slam_poc.backend.structures.primitive_map (Fuse/Insert/Cull/Forget)",
                 "lidar_converter": "fl_slam_poc.frontend.sensors.pointcloud_passthrough",
                 "pointcloud_parser": "fl_slam_poc.backend.backend_node.parse_pointcloud2",
             }
-        # Override lidar_evidence and map_update to match pose_evidence_backend / map_backend (single path).
-        if self.pose_evidence_backend == constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES:
-            self.backends["lidar_evidence"] = "fl_slam_poc.backend.operators.visual_pose_evidence (primitive alignment; Laplace at z_lin)"
-        if self.map_backend == constants.GC_MAP_BACKEND_PRIMITIVE_MAP:
-            self.backends["map_update"] = "fl_slam_poc.backend.structures.primitive_map (Fuse/Insert/Cull/Forget; bins derived only)"
         # Single OT path: unbalanced Sinkhorn only (no balanced path).
         self.backends["sinkhorn_backend"] = "unbalanced_fixed_k"
     
@@ -1496,13 +1524,12 @@ class RuntimeManifest:
             "chart_id": self.chart_id,
             "pose_evidence_backend": self.pose_evidence_backend,
             "map_backend": self.map_backend,
+            "topics": dict(self.topics),
             "D_Z": self.D_Z,
             "D_DESKEW": self.D_DESKEW,
             "K_HYP": self.K_HYP,
             "HYP_WEIGHT_FLOOR": self.HYP_WEIGHT_FLOOR,
-            "B_BINS": self.B_BINS,
             "N_POINTS_CAP": self.N_POINTS_CAP,
-            "tau_soft_assign": self.tau_soft_assign,
             "eps_psd": self.eps_psd,
             "eps_lift": self.eps_lift,
             "eps_mass": self.eps_mass,
@@ -1516,5 +1543,9 @@ class RuntimeManifest:
             "c_ex": self.c_ex,
             "c_frob": self.c_frob,
             "imu_gravity_scale": self.imu_gravity_scale,
+            "deskew_rotation_only": self.deskew_rotation_only,
+            "power_beta_min": self.power_beta_min,
+            "power_beta_exc_c": self.power_beta_exc_c,
+            "power_beta_z_c": self.power_beta_z_c,
             "backends": dict(self.backends),
         }

@@ -6,6 +6,10 @@ and avoids dynamic shapes (recompiles / slow paths). JIT-friendly when used
 with fixed N_max, M_max, K_max. Even without JIT, this prevents future rewrites.
 """
 
+# FUTURE/EXPERIMENTAL:
+# This module is intentionally not wired into the runtime pipeline. It is preserved
+# as a future BEV15 view-layer packing scaffold.
+
 from __future__ import annotations
 
 from dataclasses import dataclass

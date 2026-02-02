@@ -13,6 +13,8 @@ from typing import List, Tuple
 
 import numpy as np
 
+from fl_slam_poc.common.jax_init import jnp
+
 # Hex basis (plan): a1=(1,0), a2=(1/2, √3/2), a3 = a2 - a1
 _A1 = np.array([1.0, 0.0], dtype=np.float64)
 _A2 = np.array([0.5, 0.5 * np.sqrt(3.0)], dtype=np.float64)
@@ -340,3 +342,132 @@ def generate_candidates_ma_hex_web(
                 candidate_indices[i, k_fill:] = arr[0] if arr.size > 0 else 0
 
     return candidate_indices
+
+
+# -----------------------------------------------------------------------------
+# MA HEX 3D (JAX): fixed bucket for LiDAR surfel extraction
+# -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MAHex3DConfig:
+    """
+    3D MA hex binning configuration (JAX-friendly).
+
+    Note: This is used for *per-scan* LiDAR surfel extraction. The grid is a fixed-size hash grid
+    (via modulo wrapping) to keep compute bounded; collisions are an explicit approximation.
+    """
+
+    num_cells_1: int = 32
+    num_cells_2: int = 32
+    num_cells_z: int = 8
+    max_occupants: int = 32
+    voxel_size: float = 0.1
+
+    @property
+    def n_cells(self) -> int:
+        return int(self.num_cells_1 * self.num_cells_2 * self.num_cells_z)
+
+
+@dataclass
+class MAHex3DBucket:
+    """
+    Fixed bucket:
+      - bucket: (n_cells, max_occupants) point indices, -1 = empty
+      - count:  (n_cells,) occupancy (clipped to max_occupants for fixed gather)
+    """
+
+    bucket: jnp.ndarray
+    count: jnp.ndarray
+
+    @staticmethod
+    def create(config: MAHex3DConfig) -> "MAHex3DBucket":
+        return MAHex3DBucket(
+            bucket=jnp.full((config.n_cells, config.max_occupants), -1, dtype=jnp.int32),
+            count=jnp.zeros((config.n_cells,), dtype=jnp.int32),
+        )
+
+
+def hex_cell_3d_batch(points: jnp.ndarray, h: float) -> jnp.ndarray:
+    """
+    Vectorized 3D cell assignment.
+
+    Hex for x,y:
+      s1 = x
+      s2 = 0.5 x + (sqrt(3)/2) y
+      cell_k = floor(s_k / h)
+    Linear for z:
+      cell_z = floor(z / h)
+    """
+    points = jnp.asarray(points, dtype=jnp.float64).reshape(-1, 3)
+    h = jnp.maximum(jnp.asarray(h, dtype=jnp.float64), 1e-12)
+    s1 = points[:, 0]
+    s2 = points[:, 0] * 0.5 + points[:, 1] * (jnp.sqrt(jnp.asarray(3.0, dtype=jnp.float64)) * 0.5)
+    sz = points[:, 2]
+    cell_1 = jnp.floor(s1 / h).astype(jnp.int32)
+    cell_2 = jnp.floor(s2 / h).astype(jnp.int32)
+    cell_z = jnp.floor(sz / h).astype(jnp.int32)
+    return jnp.stack([cell_1, cell_2, cell_z], axis=1)
+
+
+def bin_points_3d(
+    points: jnp.ndarray,
+    point_mask: jnp.ndarray,
+    config: MAHex3DConfig,
+) -> MAHex3DBucket:
+    """
+    Bin N points into a fixed 3D MA-hex grid. Fully vectorized, fixed output sizes.
+
+    Args:
+        points: (N, 3) point positions (any frame; typically base frame).
+        point_mask: (N,) bool/int mask; points with mask=0 are ignored.
+        config: MAHex3DConfig
+    """
+    points = jnp.asarray(points, dtype=jnp.float64).reshape(-1, 3)
+    point_mask = jnp.asarray(point_mask).reshape(-1)
+    N = int(points.shape[0])
+    n_cells = int(config.n_cells)
+    max_occ = int(config.max_occupants)
+
+    cells = hex_cell_3d_batch(points, config.voxel_size)
+    wrap = jnp.asarray([config.num_cells_1, config.num_cells_2, config.num_cells_z], dtype=jnp.int32)
+    cells = jnp.mod(cells, wrap[None, :])
+
+    linear = (
+        cells[:, 0] * (config.num_cells_2 * config.num_cells_z)
+        + cells[:, 1] * config.num_cells_z
+        + cells[:, 2]
+    ).astype(jnp.int32)
+
+    mask_i32 = point_mask.astype(jnp.int32)
+    linear = jnp.where(mask_i32 > 0, linear, jnp.int32(0))
+
+    # Sort by (is_masked, linear) so masked points are last (do not affect ranks for real cells).
+    key = linear + (jnp.int32(1) - mask_i32) * jnp.int32(n_cells)
+    order = jnp.argsort(key)
+    linear_s = linear[order]
+    mask_s = mask_i32[order]
+    idx_s = jnp.arange(N, dtype=jnp.int32)[order]
+    pos = jnp.arange(N, dtype=jnp.int32)
+
+    # Count per cell (includes all points; clipped later for fixed gathers).
+    count = jnp.zeros((n_cells,), dtype=jnp.int32).at[linear_s].add(mask_s)
+
+    # Start position per cell in the sorted list.
+    start = jnp.full((n_cells,), N, dtype=jnp.int32).at[linear_s].min(pos)
+    start = jnp.where(count > 0, start, jnp.int32(0))
+
+    rank = pos - start[linear_s]
+    keep = (mask_s == 1) & (rank < max_occ)
+
+    # Scatter all points into an extended bucket; dropped points go to a dummy cell/slot.
+    cell_t = jnp.where(keep, linear_s, jnp.int32(n_cells))
+    rank_t = jnp.where(keep, rank, jnp.int32(max_occ))
+    idx_t = jnp.where(keep, idx_s, jnp.int32(-1))
+
+    bucket_ext = jnp.full((n_cells + 1, max_occ + 1), -1, dtype=jnp.int32)
+    bucket_ext = bucket_ext.at[cell_t, rank_t].set(idx_t)
+
+    bucket = bucket_ext[:n_cells, :max_occ]
+    count_clipped = jnp.minimum(count, jnp.int32(max_occ))
+    return MAHex3DBucket(bucket=bucket, count=count_clipped)
