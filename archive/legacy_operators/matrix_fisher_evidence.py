@@ -15,7 +15,7 @@ gives the ML rotation R* = U V^T.
 The information matrix (Fisher info) for rotation perturbations δθ is derived
 from the second-order expansion of tr(F^T exp([δθ]_×) R*).
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.9 (replacement)
+Reference: docs/GC_SLAM.md Section 5.9 (replacement)
 """
 
 from __future__ import annotations

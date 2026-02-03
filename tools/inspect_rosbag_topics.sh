@@ -114,7 +114,7 @@ if [[ -n "$SUGGESTED_PC" || -n "$SUGGESTED_ODOM" ]]; then
     echo ""
     echo "With ros2 launch:"
     echo ""
-    echo "  ros2 launch fl_slam_poc poc_m3dgr_rosbag.launch.py \\"
+    echo "  ros2 launch fl_slam_poc gc_rosbag.launch.py \\"
     echo "    bag:=$BAG_PATH \\"
     echo "    play_bag:=true \\"
     if [[ -n "$SUGGESTED_PC" ]]; then

@@ -13,6 +13,7 @@ import numpy as np
 
 from fl_slam_poc.common.jax_init import jnp
 from fl_slam_poc.common import constants
+from fl_slam_poc.common.runtime_counters import record_host_to_device
 from fl_slam_poc.backend.structures.measurement_batch import (
     measurement_batch_from_camera_splats,
 )
@@ -62,6 +63,14 @@ def feature_list_to_camera_batch(
             d = np.asarray(f.xyz, dtype=np.float64)
         norm_d = np.linalg.norm(d)
         directions[i] = d / (norm_d + 1e-12)
+
+    record_host_to_device(positions)
+    record_host_to_device(covariances)
+    record_host_to_device(directions)
+    record_host_to_device(kappas)
+    record_host_to_device(weights)
+    record_host_to_device(timestamps)
+    record_host_to_device(colors)
 
     return measurement_batch_from_camera_splats(
         positions=jnp.array(positions),

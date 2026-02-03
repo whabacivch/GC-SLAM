@@ -152,7 +152,7 @@ def main() -> int:
     parser.add_argument(
         "bag_path",
         nargs="?",
-        default=os.environ.get("BAG_PATH", "rosbags/m3dgr/Dynamic01_ros2"),
+        default=os.environ.get("BAG_PATH", "rosbags/Kimera_Data/ros2/10_14_acl_jackal-005"),
         help="Bag directory containing *.db3 (or a direct path to a *.db3 file).",
     )
     parser.add_argument("--samples", type=int, default=25, help="Number of samples per topic (includes fixed indices).")
@@ -191,7 +191,7 @@ def main() -> int:
             print(f"- {name} [{ttype}]")
         print()
 
-    # Key topics for M3DGR Dynamic01 (override bag path via argv/env)
+    # Key topics for Kimera (override bag path via argv/env)
     print("=== Key Topic Summaries ===\n")
 
     _summarize_topic(

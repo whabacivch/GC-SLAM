@@ -245,6 +245,13 @@ def build_rrd(
     weights = np.asarray(data["weights"], dtype=np.float64)[:n]
     directions = np.asarray(data["directions"], dtype=np.float64)[:n]
     kappas = np.asarray(data["kappas"], dtype=np.float64)[:n]
+    # Prefer creation timestamps for "splats appear when first observed".
+    timestamps = None
+    if "created_timestamps" in data:
+        timestamps = np.asarray(data["created_timestamps"], dtype=np.float64)[:n]
+    elif "timestamps" in data:
+        timestamps = np.asarray(data["timestamps"], dtype=np.float64)[:n]
+    primitive_ids = np.asarray(data["primitive_ids"], dtype=np.int64)[:n] if "primitive_ids" in data else None
 
     if n == 0:
         print("WARN: No primitives in splat export; writing empty Rerun.", file=sys.stderr)
@@ -277,25 +284,45 @@ def build_rrd(
     rr.init("fl_slam_poc", default_enabled=True, spawn=False)
     rr.save(output_rrd)
 
-    rr.set_time("time", timestamp= 0.0)
-    if n > 0:
-        rr.log(
-            "gc/map/ellipsoids",
-            rr.Ellipsoids3D(
-                centers=positions.astype(np.float32),
-                half_sizes=half_sizes.astype(np.float32),
-                quaternions=quats.astype(np.float32),
-                colors=colors_uint8,
-            ),
-        )
+    # If timestamps available, log per-primitive so playback matches acquisition rate.
+    if timestamps is not None and timestamps.shape[0] == n:
+        ids = primitive_ids if primitive_ids is not None and primitive_ids.shape[0] == n else np.arange(n)
+        order = np.argsort(timestamps)
+        for i in order:
+            rr.set_time("time", timestamp=float(timestamps[i]))
+            rr.log(
+                f"gc/map/ellipsoids/{int(ids[i])}",
+                rr.Ellipsoids3D(
+                    centers=positions[i : i + 1].astype(np.float32),
+                    half_sizes=half_sizes[i : i + 1].astype(np.float32),
+                    quaternions=quats[i : i + 1].astype(np.float32),
+                    colors=colors_uint8[i : i + 1],
+                ),
+            )
     else:
-        rr.log(
-            "gc/map/ellipsoids",
-            rr.Ellipsoids3D(centers=np.zeros((0, 3)), half_sizes=np.zeros((0, 3))),
-        )
+        rr.set_time("time", timestamp=0.0)
+        if n > 0:
+            rr.log(
+                "gc/map/ellipsoids",
+                rr.Ellipsoids3D(
+                    centers=positions.astype(np.float32),
+                    half_sizes=half_sizes.astype(np.float32),
+                    quaternions=quats.astype(np.float32),
+                    colors=colors_uint8,
+                ),
+            )
+        else:
+            rr.log(
+                "gc/map/ellipsoids",
+                rr.Ellipsoids3D(centers=np.zeros((0, 3)), half_sizes=np.zeros((0, 3))),
+            )
 
     if path_xyz.shape[0] > 0:
-        rr.log("gc/trajectory", rr.LineStrips3D([path_xyz.astype(np.float32)]))
+        # Replay trajectory over time (prefix line strip), so the recording is useful for debugging.
+        for i in range(path_xyz.shape[0]):
+            t_sec = float(stamps[i]) if i < stamps.shape[0] else float(i)
+            rr.set_time("time", timestamp=t_sec)
+            rr.log("gc/trajectory", rr.LineStrips3D([path_xyz[: i + 1].astype(np.float32)]))
         _log_trajectory_transforms(rr, path_xyz, stamps, path_quat)
 
     try:

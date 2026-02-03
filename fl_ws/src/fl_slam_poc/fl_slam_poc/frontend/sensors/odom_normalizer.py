@@ -22,7 +22,7 @@ Future Development (TODO):
 Topic Flow:
     /odom (raw from bag) → [this node] → /gc/sensors/odom (canonical)
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
+Reference: docs/GC_SLAM.md
 """
 
 from __future__ import annotations

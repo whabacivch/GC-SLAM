@@ -2,7 +2,7 @@
 MA hex web: hex cell keys, fixed bucket, stencil K=64, PoE denoise, candidate generation.
 
 Hex: a1=(1,0), a2=(1/2,√3/2); s_k = a_k·y, cell = floor(s/h), h = hex_scale_factor × median(√λ_max(Σ_bev)).
-Fixed [num_cells, max_occupants]; stencil K=64. generate_candidates_ma_hex_web replaces kNN for OT association.
+Fixed [num_cells, max_occupants]; stencil K=64. generate_candidates_ma_hex_web_jax replaces kNN for OT association.
 PoE denoise and convexity_weight available for optional per-cell denoise.
 """
 
@@ -13,7 +13,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from fl_slam_poc.common.jax_init import jnp
+from fl_slam_poc.common.jax_init import jax, jnp
 
 # Hex basis (plan): a1=(1,0), a2=(1/2, √3/2), a3 = a2 - a1
 _A1 = np.array([1.0, 0.0], dtype=np.float64)
@@ -75,6 +75,17 @@ def hex_cell_key_batch(Y: np.ndarray, h: float) -> np.ndarray:
     return np.column_stack([cell_1, cell_2])
 
 
+def hex_cell_key_batch_jax(Y: jnp.ndarray, h: jnp.ndarray) -> jnp.ndarray:
+    """JAX: (N, 2) BEV points -> (N, 2) cell keys (cell_1, cell_2)."""
+    Y = jnp.asarray(Y, dtype=jnp.float64).reshape(-1, 2)
+    h = jnp.maximum(jnp.asarray(h, dtype=jnp.float64), 1e-12)
+    s1 = Y @ jnp.asarray(_A1, dtype=jnp.float64)
+    s2 = Y @ jnp.asarray(_A2, dtype=jnp.float64)
+    cell_1 = jnp.floor(s1 / h).astype(jnp.int32)
+    cell_2 = jnp.floor(s2 / h).astype(jnp.int32)
+    return jnp.stack([cell_1, cell_2], axis=1)
+
+
 # -----------------------------------------------------------------------------
 # Scale h from BEV covariances: h = scale_factor * median(√λ_max(Σ))
 # -----------------------------------------------------------------------------
@@ -104,6 +115,23 @@ def compute_hex_scale_h(
     return max(scale_factor * med, 1e-6)
 
 
+def compute_hex_scale_h_jax(
+    Sigma_bev: jnp.ndarray,
+    scale_factor: float = 2.5,
+) -> jnp.ndarray:
+    """
+    JAX version: h = scale_factor * median(sqrt(lambda_max(Sigma_bev))).
+    Sigma_bev: (N, 2, 2) or (2, 2)
+    """
+    Sigma_bev = jnp.asarray(Sigma_bev, dtype=jnp.float64)
+    Sigma_bev = jnp.reshape(Sigma_bev, (-1, 2, 2))
+    eigvals = jax.vmap(jnp.linalg.eigvalsh)(Sigma_bev)
+    eigvals = jnp.maximum(eigvals, 1e-12)
+    sqrt_lam_max = jnp.sqrt(jnp.max(eigvals, axis=1))
+    med = jnp.median(sqrt_lam_max)
+    return jnp.maximum(scale_factor * med, 1e-6)
+
+
 # -----------------------------------------------------------------------------
 # Fixed bucket: [num_cells, max_occupants]; cell index from (cell_1, cell_2)
 # -----------------------------------------------------------------------------
@@ -118,6 +146,13 @@ def cell_key_to_linear(cell_1: int, cell_2: int, n1: int, n2: int) -> int:
     if i2 < 0:
         i2 += n2
     return int(i1 * n2 + i2)
+
+
+def cell_key_to_linear_jax(cell_1: jnp.ndarray, cell_2: jnp.ndarray, n1: int, n2: int) -> jnp.ndarray:
+    """JAX: map (cell_1, cell_2) to linear index in [0, n1*n2) with modulo wrapping."""
+    i1 = jnp.mod(cell_1, n1)
+    i2 = jnp.mod(cell_2, n2)
+    return i1 * n2 + i2
 
 
 def stencil_linear_indices(
@@ -205,144 +240,101 @@ def convexity_weight(
     return 1.0 / (1.0 + tau * d2)
 
 
-# -----------------------------------------------------------------------------
-# Fixed bucket structure (for assignment and stencil lookup)
-# -----------------------------------------------------------------------------
-
-
-@dataclass
-class MAHexBucket:
-    """
-    Fixed bucket [num_cells, max_occupants]. Each slot holds a splat index (int >= 0) or -1 for empty.
-    No edits to existing binning; this is a standalone structure for BEV splat organization.
-    """
-
-    n1: int
-    n2: int
-    max_occupants: int
-    # bucket[i, j] = splat index (>=0) or -1 if empty. Shape (n1*n2, max_occupants).
-    bucket: np.ndarray
-    # Count per cell (for fast lookup). Shape (n1*n2,).
-    count: np.ndarray
-
-    def __init__(self, n1: int, n2: int, max_occupants: int):
-        self.n1 = n1
-        self.n2 = n2
-        self.max_occupants = max_occupants
-        n_cells = n1 * n2
-        self.bucket = np.full((n_cells, max_occupants), -1, dtype=np.int64)
-        self.count = np.zeros(n_cells, dtype=np.int64)
-
-    def clear(self) -> None:
-        """Reset bucket and count."""
-        self.bucket.fill(-1)
-        self.count.fill(0)
-
-    def add(self, cell_1: int, cell_2: int, splat_index: int) -> bool:
-        """
-        Add splat_index to cell (cell_1, cell_2). Returns True if added, False if cell full.
-        When full, overwrite oldest (first slot); no hidden iteration.
-        """
-        idx = cell_key_to_linear(cell_1, cell_2, self.n1, self.n2)
-        c = self.count[idx]
-        if c < self.max_occupants:
-            self.bucket[idx, c] = splat_index
-            self.count[idx] = c + 1
-            return True
-        # Full: drop oldest (first slot), add new at end
-        self.bucket[idx, 0:-1] = self.bucket[idx, 1:]
-        self.bucket[idx, -1] = splat_index
-        return True
-
-    def get_occupants(self, cell_linear: int) -> np.ndarray:
-        """Return array of splat indices in cell (length count[cell_linear]); no -1 padding."""
-        c = int(self.count[cell_linear])
-        return self.bucket[cell_linear, :c].copy()
+#
+# Candidate generation is JAX-only in this project to avoid host transfers and to
+# enforce a single runtime implementation.
 
 
 # -----------------------------------------------------------------------------
-# Candidate generation: fixed K_ASSOC per measurement from hex stencil (replaces kNN)
+# JAX Candidate Generation
 # -----------------------------------------------------------------------------
 
 
-def generate_candidates_ma_hex_web(
-    meas_positions: np.ndarray,
-    map_positions: np.ndarray,
-    map_covariances: np.ndarray,
+def generate_candidates_ma_hex_web_jax(
+    meas_positions: jnp.ndarray,
+    map_positions: jnp.ndarray,
+    map_covariances: jnp.ndarray,
     k_assoc: int,
     config: MAHexWebConfig,
-) -> np.ndarray:
+) -> jnp.ndarray:
     """
-    Generate K_ASSOC candidates per measurement via MA hex web (fixed topology).
-
-    BEV (x, y) for hex cells; h = hex_scale_factor * median(sqrt(λ_max(Σ_bev))).
-    Map primitives are binned by hex cell; per measurement we take the stencil of
-    neighbor cells, collect all map indices in those cells, then take nearest
-    k_assoc by squared distance (fixed-cost: sort capped at stencil_cells * max_occupants).
-
-    Args:
-        meas_positions: (N_meas, 3) measurement positions
-        map_positions: (M_map, 3) map primitive positions
-        map_covariances: (M_map, 3, 3) map covariances (BEV = top-left 2x2)
-        k_assoc: number of candidates per measurement
-        config: MAHexWebConfig (num_cells, max_occupants, stencil, scale)
+    JAX candidate generation via MA hex web (fixed budgets, no branches).
 
     Returns:
         candidate_indices: (N_meas, k_assoc) indices into map
     """
+    meas_positions = jnp.asarray(meas_positions, dtype=jnp.float64).reshape(-1, 3)
+    map_positions = jnp.asarray(map_positions, dtype=jnp.float64).reshape(-1, 3)
+    map_covariances = jnp.asarray(map_covariances, dtype=jnp.float64).reshape(-1, 3, 3)
     N_meas = meas_positions.shape[0]
     M_map = map_positions.shape[0]
-    meas_positions = np.asarray(meas_positions, dtype=np.float64).reshape(-1, 3)
-    map_positions = np.asarray(map_positions, dtype=np.float64).reshape(-1, 3)
-    map_covariances = np.asarray(map_covariances, dtype=np.float64).reshape(-1, 3, 3)
 
     if M_map == 0 or N_meas == 0:
-        return np.zeros((N_meas, k_assoc), dtype=np.int64)
+        return jnp.zeros((N_meas, k_assoc), dtype=jnp.int32)
 
     meas_bev = meas_positions[:, :2]
     map_bev = map_positions[:, :2]
     Sigma_bev = map_covariances[:, :2, :2]
-    h = compute_hex_scale_h(Sigma_bev, config.hex_scale_factor)
-    h = max(float(h), 1e-12)
+    h = compute_hex_scale_h_jax(Sigma_bev, config.hex_scale_factor)
+    h = jnp.maximum(h, 1e-12)
 
-    n1, n2 = config.num_cells_1, config.num_cells_2
-    bucket = MAHexBucket(n1, n2, config.max_occupants)
+    n1, n2 = int(config.num_cells_1), int(config.num_cells_2)
+    max_occ = int(config.max_occupants)
 
-    map_cells = hex_cell_key_batch(map_bev, h)
-    for j in range(M_map):
-        c1, c2 = int(map_cells[j, 0]), int(map_cells[j, 1])
-        bucket.add(c1, c2, j)
+    # Bucket: fixed [n_cells, max_occupants]
+    n_cells = n1 * n2
+    bucket = jnp.full((n_cells, max_occ), -1, dtype=jnp.int32)
+    count = jnp.zeros((n_cells,), dtype=jnp.int32)
 
-    max_candidates = config.K_STENCIL * config.max_occupants
-    candidate_indices = np.zeros((N_meas, k_assoc), dtype=np.int64)
+    map_cells = hex_cell_key_batch_jax(map_bev, h)
+    map_linear = cell_key_to_linear_jax(map_cells[:, 0], map_cells[:, 1], n1, n2).astype(jnp.int32)
 
-    for i in range(N_meas):
-        cell_i = hex_cell_key_batch(meas_bev[i : i + 1], h)[0]
-        cell_linear = cell_key_to_linear(int(cell_i[0]), int(cell_i[1]), n1, n2)
-        stencil = stencil_linear_indices(
-            cell_linear, n1, n2, config.stencil_radius, max_size=config.K_STENCIL
-        )
-        collected: List[int] = []
-        for idx in stencil:
-            occ = bucket.get_occupants(int(idx))
-            collected.extend(occ.tolist())
-        arr = np.array(collected, dtype=np.int64)
-        if arr.size == 0:
-            candidate_indices[i, :] = 0
-            continue
-        if arr.size > k_assoc:
-            diff = map_positions[arr] - meas_positions[i]
-            dists_sq = np.sum(diff * diff, axis=1)
-            order = np.argsort(dists_sq)[:k_assoc]
-            candidate_indices[i, :] = arr[order]
-        else:
-            k_fill = min(k_assoc, arr.size)
-            candidate_indices[i, :k_fill] = arr[:k_fill]
-            if k_fill < k_assoc:
-                candidate_indices[i, k_fill:] = arr[0] if arr.size > 0 else 0
+    def add_one(j, state):
+        bucket_i, count_i = state
+        cell = map_linear[j]
+        c = count_i[cell]
+        can_add = c < max_occ
+        pos = jnp.minimum(c, max_occ - 1)
+        cell_bucket = bucket_i[cell]
+        added = cell_bucket.at[pos].set(j)
+        shifted = jnp.concatenate([cell_bucket[1:], jnp.array([j], dtype=jnp.int32)], axis=0)
+        new_cell = jnp.where(can_add, added, shifted)
+        bucket_i = bucket_i.at[cell].set(new_cell)
+        count_i = count_i.at[cell].set(jnp.minimum(c + 1, max_occ))
+        return bucket_i, count_i
 
+    bucket, count = jax.lax.fori_loop(0, M_map, add_one, (bucket, count))
+
+    # Stencil offsets
+    radius = int(config.stencil_radius)
+    grid = jnp.arange(-radius, radius, dtype=jnp.int32)
+    di, dj = jnp.meshgrid(grid, grid, indexing="ij")
+    di = di.reshape(-1)
+    dj = dj.reshape(-1)
+    if di.shape[0] > int(config.K_STENCIL):
+        di = di[: int(config.K_STENCIL)]
+        dj = dj[: int(config.K_STENCIL)]
+
+    def candidates_for_meas(y):
+        cell = hex_cell_key_batch_jax(y[None, :2], h)[0]
+        cell_lin = cell_key_to_linear_jax(cell[0], cell[1], n1, n2)
+        i1 = cell_lin // n2
+        i2 = cell_lin % n2
+        ni1 = jnp.mod(i1 + di, n1)
+        ni2 = jnp.mod(i2 + dj, n2)
+        stencil_lin = ni1 * n2 + ni2
+        cand = bucket[stencil_lin]  # (K_STENCIL, max_occ)
+        cand_flat = cand.reshape(-1)
+        valid = cand_flat >= 0
+        idx_safe = jnp.where(valid, cand_flat, 0)
+        diff = map_positions[idx_safe] - y[None, :]
+        dists = jnp.sum(diff * diff, axis=1)
+        dists = jnp.where(valid, dists, 1e12)
+        order = jnp.argsort(dists)[:k_assoc]
+        return idx_safe[order].astype(jnp.int32)
+
+    candidate_indices = jax.vmap(candidates_for_meas)(meas_positions)
     return candidate_indices
-
 
 # -----------------------------------------------------------------------------
 # MA HEX 3D (JAX): fixed bucket for LiDAR surfel extraction

@@ -207,7 +207,7 @@ class BeliefGaussianInfo:
     All operations use the declared solve:
         δz* = (L + eps_lift * I)^{-1} h
         
-    Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 2.1
+    Reference: docs/GC_SLAM.md Section 2.1
     
     Attributes:
         chart_id: Must be "GC-RIGHT-01"

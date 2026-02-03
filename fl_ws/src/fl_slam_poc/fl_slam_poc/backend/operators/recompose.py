@@ -3,7 +3,7 @@ PoseUpdateFrobeniusRecompose operator for Geometric Compositional SLAM v2.
 
 Recompose pose with continuous Frobenius strength-blended BCH3 correction.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.12
+Reference: docs/GC_SLAM.md Section 5.12
 """
 
 from __future__ import annotations

@@ -45,7 +45,7 @@ but would require Newton-Raphson iteration which adds complexity.
 Reference: Mardia & Jupp (2000) "Directional Statistics" Ch. 10
 Reference: Sra (2012) "A short note on parameter approximation for vMF"
 
-Spec Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.6
+Spec Reference: docs/GC_SLAM.md Section 5.6
 """
 
 from __future__ import annotations

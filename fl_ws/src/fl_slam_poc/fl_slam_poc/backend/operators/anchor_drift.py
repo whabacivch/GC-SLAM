@@ -4,7 +4,7 @@ AnchorDriftUpdate operator for Geometric Compositional SLAM v2.
 Continuous local chart maintenance using smooth rho function.
 Replaces threshold-based anchor promotion with continuous blending.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.14
+Reference: docs/GC_SLAM.md Section 5.14
 """
 
 from __future__ import annotations

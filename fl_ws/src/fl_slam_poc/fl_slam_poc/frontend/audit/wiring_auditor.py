@@ -15,7 +15,7 @@ Outputs:
     - Formatted summary to stdout at shutdown
     - JSON file to configured path (for evaluation script integration)
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
+Reference: docs/GC_SLAM.md
 """
 
 from __future__ import annotations

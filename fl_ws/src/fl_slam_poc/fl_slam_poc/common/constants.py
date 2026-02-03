@@ -34,7 +34,7 @@ EXTRINSICS:
 
 # =============================================================================
 # GEOMETRIC COMPOSITIONAL MANIFEST CONSTANTS (RuntimeManifest)
-# Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 6
+# Reference: docs/GC_SLAM.md Section 6
 # These are HARD CONSTANTS - do not modify without spec change
 # =============================================================================
 
@@ -386,6 +386,20 @@ GC_PRIMITIVE_KAPPA_MAX = 1e4
 # When a producer cannot populate multiple lobes yet, it must still populate a meaningful
 # resultant (e.g., lobe 0), with remaining lobes set to 0.0 (never omitted).
 GC_VMF_N_LOBES = 3
+
+# =============================================================================
+# PRIMITIVE MAP FUSE (STREAMING REDUCTION)
+# =============================================================================
+# Chunk size for streaming scatter-add in primitive_map_fuse. Fixed-cost (compile-time constant).
+# Smaller chunks reduce peak memory; larger chunks improve throughput.
+GC_FUSE_CHUNK_SIZE = 1024
+
+# Block size for association -> fuse streaming (measurements per block).
+GC_ASSOC_BLOCK_SIZE = 256
+
+# Fixed insertion budget per scan (global PrimitiveMap). Atlas tiling will replace this later.
+GC_K_INSERT = 64
+GC_K_INSERT_TILE = GC_K_INSERT
 
 # =============================================================================
 # CAMERA INTRINSICS/EXTRINSICS (required when pose_evidence_backend="primitives")

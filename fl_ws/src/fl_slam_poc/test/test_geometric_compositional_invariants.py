@@ -7,7 +7,7 @@ Verifies that the implementation follows the spec invariants:
 - Budget enforcement
 - No branching/gating
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
+Reference: docs/GC_SLAM.md
 """
 
 import os

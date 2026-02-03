@@ -8,7 +8,7 @@ These rules apply only to this project. Other projects have their own rules.
 
 ## Target Endstate (GC v2 Full Implementation)
 
-The current pipeline is LiDAR-only with fixed noise parameters. The target endstate implements the full spec from `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md` including:
+The current pipeline is LiDAR-only with fixed noise parameters. The target endstate implements the full spec from `docs/GC_SLAM.md` including:
 
 ### Adaptive Noise (Inverse-Wishart)
 - **Process noise Q**: Per-block Inverse-Wishart states (rot, trans, vel, biases, dt, extrinsic) with conjugate updates from innovation residuals.
@@ -36,7 +36,7 @@ The current pipeline is LiDAR-only with fixed noise parameters. The target endst
 - Branch-free: IW updates happen every scan regardless of "convergence".
 
 ## Canonical References (Do Not Drift)
-- Geometric Compositional strict interface/spec anchor: `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`
+- Geometric Compositional strict interface/spec anchor: `docs/GC_SLAM.md`
 - Self-adaptive constraints: `docs/Self-Adaptive Systems Guide.md`
 - Math reference: `docs/Comprehensive Information Geometry.md`
 - **Build-by-construction anchors** (conventions and pipeline written first; implementation and tracing must align):
@@ -52,6 +52,11 @@ Conventions and pipeline docs are written **before** or alongside code so behavi
 - Build: `cd fl_ws && source /opt/ros/jazzy/setup.bash && colcon build --packages-select fl_slam_poc && source install/setup.bash`
 - GC eval (primary): `bash tools/run_and_evaluate_gc.sh` (artifacts under `results/`)
 - Legacy eval (if needed): `bash tools/run_and_evaluate.sh` (artifacts under `results/`)
+
+## Python / Venv (Required)
+- For any Python execution (tests, one-off scripts, linting, evaluation helpers), use the project's venv (`./.venv`) only.
+- Prefer sourcing `tools/common_venv.sh` and then using `$PYTHON` for all Python invocations; this matches the eval scripts.
+- Do not use system Python, Conda, or `~/.venv` for this repo (even if present).
 
 ## Non-Negotiable Invariants (GC v2)
 - Closed-form-first: prefer analytic operators; only use solvers when no closed-form exists.
@@ -92,7 +97,7 @@ The root failure mode to prevent is: *multiple math paths silently coexist*, mak
 - `fl_slam_poc/backend/`: inference + fusion + kernels; outputs (trajectory, state, rendering) live in backend (e.g. `backend/rendering.py`).
 
 ## Operator Reporting (Required)
-- Every operator returns `(result, CertBundle, ExpectedEffect)` per `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`.
+- Every operator returns `(result, CertBundle, ExpectedEffect)` per `docs/GC_SLAM.md`.
 - `CertBundle` must report: `exact`, `approximation_triggers`, `family_in/out` (where applicable), `closed_form`, `solver_used`, `frobenius_applied`.
 - Enforcement rule: `approximation_triggers != ∅` ⇒ `frobenius_applied == True` (no exceptions).
 

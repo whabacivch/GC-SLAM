@@ -1,6 +1,6 @@
 # Fusion Issues (GC v2) — Code/Spec Consistency Notes
 
-This doc is a **code-level sanity check** of whether GC v2 currently fuses **LiDAR + IMU + odom**, and where it diverges from the intent in `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`.
+This doc is a **code-level sanity check** of whether GC v2 currently fuses **LiDAR + IMU + odom**, and where it diverges from the intent in `docs/GC_SLAM.md`.
 
 ## TL;DR (current working tree)
 
@@ -174,7 +174,7 @@ The per-scan pipeline is the fixed 15-step sequence described in:
 
 The spec allocates IMU-related state (velocity, biases, time offset, LiDAR–IMU extrinsics) and includes the statement:
 
-- `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md:754` (“IMU uncertainty enters deskew UT … and therefore the quadratic evidence.”)
+- `docs/GC_SLAM.md:754` (“IMU uncertainty enters deskew UT … and therefore the quadratic evidence.”)
 
 **Clarification:** the spec statement is about **mathematical influence**, not “must subscribe to a ROS IMU topic”. In the current implementation:
 

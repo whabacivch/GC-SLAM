@@ -4,7 +4,7 @@ Geometric Compositional SLAM v2 Pipeline.
 Main per-scan execution following spec Section 7.
 All steps run every time; influence may go to ~0 smoothly. No gates.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 7
+Reference: docs/GC_SLAM.md Section 7
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Tuple, List, Optional, Dict
 import time
 from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
+from fl_slam_poc.common.runtime_counters import record_host_sync
 from fl_slam_poc.common.geometry import se3_jax
 from fl_slam_poc.common.belief import BeliefGaussianInfo
 from fl_slam_poc.common.certificates import (
@@ -23,79 +24,59 @@ from fl_slam_poc.common.certificates import (
     ConditioningCert,
     aggregate_certificates,
     InfluenceCert,
+    MapUpdateCert,
 )
 # PrimitiveMap-only pipeline (no bin backend)
 
 # Import all operators
-from fl_slam_poc.backend.operators.point_budget import point_budget_resample
-from fl_slam_poc.backend.operators.predict import (
+from fl_slam_poc.backend.operators import (
+    point_budget_resample,
     predict_diffusion,
-)
-from fl_slam_poc.backend.operators.imu_preintegration import (
     smooth_window_weights,
     preintegrate_imu_relative_pose_jax,
-)
-from fl_slam_poc.backend.operators.deskew_constant_twist import deskew_constant_twist
-# IMU measurement IW stats (kept for gyro/accel - LiDAR portion now from primitives)
-from fl_slam_poc.backend.operators.measurement_noise_iw_jax import (
+    deskew_constant_twist,
     imu_gyro_meas_iw_suffstats_from_avg_rate_jax,
     imu_accel_meas_iw_suffstats_from_gravity_dir_jax,
-)
-from fl_slam_poc.backend.operators.odom_evidence import odom_quadratic_evidence
-from fl_slam_poc.backend.operators.odom_twist_evidence import (
+    odom_quadratic_evidence,
     odom_velocity_evidence,
     odom_yawrate_evidence,
     pose_twist_kinematic_consistency,
-)
-from fl_slam_poc.backend.operators.imu_evidence import imu_vmf_gravity_evidence_time_resolved
-from fl_slam_poc.backend.operators.planar_prior import (
+    imu_vmf_gravity_evidence_time_resolved,
     planar_z_prior,
     velocity_z_prior,
-)
-from fl_slam_poc.backend.operators.imu_gyro_evidence import imu_gyro_rotation_evidence
-from fl_slam_poc.backend.operators.imu_preintegration_factor import imu_preintegration_factor
-from fl_slam_poc.backend.operators.fusion import (
+    imu_gyro_rotation_evidence,
+    imu_preintegration_factor,
     fusion_scale_from_certificates,
     info_fusion_additive,
-)
-from fl_slam_poc.backend.operators.excitation import (
     compute_excitation_scales_jax,
     apply_excitation_prior_scaling_jax,
+    pose_update_frobenius_recompose,
+    process_noise_iw_suffstats_from_info_jax,
+    anchor_drift_update,
+    hypothesis_barycenter_projection,
+    extract_lidar_surfels,
+    SurfelExtractionConfig,
+    associate_primitives_ot,
+    AssociationConfig,
+    block_associations_for_fuse,
+    visual_pose_evidence,
+    build_visual_pose_evidence_22d,
 )
-from fl_slam_poc.backend.operators.recompose import pose_update_frobenius_recompose
-from fl_slam_poc.backend.operators.inverse_wishart_jax import process_noise_iw_suffstats_from_info_jax
-from fl_slam_poc.backend.operators.anchor_drift import anchor_drift_update
-from fl_slam_poc.backend.operators.hypothesis import hypothesis_barycenter_projection
 from fl_slam_poc.backend.diagnostics import ScanDiagnostics, MinimalScanTape
 
 # Stage 1: PrimitiveMap + OT imports
-from fl_slam_poc.backend.structures.primitive_map import (
-    PrimitiveMap,
+from fl_slam_poc.backend.structures import (
+    AtlasMap,
     PrimitiveMapView,
-    create_empty_primitive_map,
+    create_empty_atlas_map,
     extract_primitive_map_view,
     primitive_map_fuse,
     primitive_map_insert,
     primitive_map_cull,
     primitive_map_forget,
     primitive_map_merge_reduce,
-)
-from fl_slam_poc.backend.structures.measurement_batch import (
     MeasurementBatch,
     create_empty_measurement_batch,
-)
-from fl_slam_poc.backend.operators.lidar_surfel_extraction import (
-    extract_lidar_surfels,
-    SurfelExtractionConfig,
-)
-from fl_slam_poc.backend.operators.primitive_association import (
-    associate_primitives_ot,
-    AssociationConfig,
-    flatten_associations_for_fuse,
-)
-from fl_slam_poc.backend.operators.visual_pose_evidence import (
-    visual_pose_evidence,
-    build_visual_pose_evidence_22d,
 )
 from fl_slam_poc.common.primitives import (
     domain_projection_psd,
@@ -114,6 +95,9 @@ class PipelineConfig:
     # Budgets (hard constants)
     K_HYP: int = constants.GC_K_HYP
     N_POINTS_CAP: int = constants.GC_N_POINTS_CAP
+    N_FEAT: int = constants.GC_N_FEAT
+    N_SURFEL: int = constants.GC_N_SURFEL
+    K_SINKHORN: int = constants.GC_K_SINKHORN
     
     # Epsilon constants
     eps_psd: float = constants.GC_EPS_PSD
@@ -190,10 +174,15 @@ class PipelineConfig:
     n_surfel: int = constants.GC_N_SURFEL
     k_assoc: int = constants.GC_K_ASSOC
     k_sinkhorn: int = constants.GC_K_SINKHORN
+    ot_epsilon: float = 0.1
+    ot_tau_a: float = 0.5
+    ot_tau_b: float = 0.5
     primitive_map_max_size: int = constants.GC_PRIMITIVE_MAP_MAX_SIZE
     primitive_forgetting_factor: float = constants.GC_PRIMITIVE_FORGETTING_FACTOR
     primitive_merge_threshold: float = constants.GC_PRIMITIVE_MERGE_THRESHOLD
     primitive_cull_weight_threshold: float = constants.GC_PRIMITIVE_CULL_WEIGHT_THRESHOLD
+    # Fixed-budget insertion each scan (per-tile)
+    k_insert_tile: int = constants.GC_K_INSERT_TILE
 
     # Surfel extraction config
     surfel_voxel_size_m: float = 0.1
@@ -235,7 +224,7 @@ class ScanPipelineResult:
     diagnostics: Optional[ScanDiagnostics] = None
     diagnostics_tape: Optional[MinimalScanTape] = None  # When save_full_diagnostics is False
     # PrimitiveMap update results
-    primitive_map_updated: Optional[PrimitiveMap] = None
+    primitive_map_updated: Optional[AtlasMap] = None
     measurement_batch: Optional[MeasurementBatch] = None
     n_primitives_inserted: int = 0
     n_primitives_fused: int = 0
@@ -323,7 +312,7 @@ def process_scan_single_hypothesis(
     odom_twist: jnp.ndarray,  # (6,) [vx,vy,vz,wx,wy,wz] in body frame (never None)
     odom_twist_cov: jnp.ndarray,  # (6,6) twist covariance (never None)
     camera_batch: MeasurementBatch,  # Camera splats from VisualFeatureExtractor + splat_prep (required)
-    primitive_map: Optional[PrimitiveMap] = None,  # PrimitiveMap is the canonical map
+    primitive_map: Optional[AtlasMap] = None,  # AtlasMap is the canonical map
 ) -> ScanPipelineResult:
     """
     Process a single scan for one hypothesis.
@@ -375,6 +364,7 @@ def process_scan_single_hypothesis(
                 lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
                 out,
             )
+            record_host_sync(syncs=1)
         except Exception:
             pass
         timing_ms[label] = (time.perf_counter() - start) * 1000.0
@@ -762,6 +752,13 @@ def process_scan_single_hypothesis(
     n_primitives_inserted = 0
     n_primitives_fused = 0
     n_primitives_culled = 0
+    fused_mass_total = 0.0
+    insert_mass_total = 0.0
+    insert_mass_p95 = 0.0
+    evicted_mass_total = 0.0
+    candidate_tiles_per_meas_mean = 0.0
+    candidate_primitives_per_meas_mean = 0.0
+    candidate_primitives_per_meas_p95 = 0.0
     assoc_result = None
     map_view = None
 
@@ -798,8 +795,16 @@ def process_scan_single_hypothesis(
         t_pred_for_map = pose_pred_for_map[:3]
 
         # Step 3.5c: Extract map view for association (M_{t-1}; do not mutate map yet)
+        if primitive_map is None:
+            primitive_map = create_empty_atlas_map(m_tile=config.primitive_map_max_size)
+        if primitive_map.n_tiles != 1:
+            raise ValueError(
+                f"process_scan_single_hypothesis: expected single-tile atlas, got {primitive_map.n_tiles}"
+            )
+        tile_id = primitive_map.tile_ids[0]
+        tile = primitive_map.tiles[tile_id]
         map_view = extract_primitive_map_view(
-            prim_map=primitive_map,
+            tile=tile,
             eps_lift=config.eps_lift,
             eps_mass=config.eps_mass,
         )
@@ -808,6 +813,10 @@ def process_scan_single_hypothesis(
         assoc_config = AssociationConfig(
             k_assoc=config.k_assoc,
             k_sinkhorn=config.k_sinkhorn,
+            epsilon=config.ot_epsilon,
+            tau_a=config.ot_tau_a,
+            tau_b=config.ot_tau_b,
+            eps_mass=config.eps_mass,
         )
         assoc_result, assoc_cert, assoc_effect = associate_primitives_ot(
             measurement_batch=measurement_batch,
@@ -817,6 +826,12 @@ def process_scan_single_hypothesis(
             anchor_id="primitive_ot",
         )
         all_certs.append(assoc_cert)
+        if measurement_batch is not None:
+            n_valid_meas = int(jnp.sum(measurement_batch.valid_mask))
+            if n_valid_meas > 0:
+                candidate_tiles_per_meas_mean = 1.0
+                candidate_primitives_per_meas_mean = float(config.k_assoc)
+                candidate_primitives_per_meas_p95 = float(config.k_assoc)
 
         # Step 3.5e: Visual pose evidence at z_lin (IMU+odom-informed), before any map update
         visual_result, visual_cert, visual_effect = visual_pose_evidence(
@@ -1069,30 +1084,56 @@ def process_scan_single_hypothesis(
             eta_w = (R_t @ eta_b.T).T
             return Lambda_w, theta_w, eta_w
 
-        if map_view.count > 0 and measurement_batch.n_valid > 0:
+        if measurement_batch.n_valid > 0:
             (
-                target_indices,
-                Lambdas_meas,
-                thetas_meas,
-                etas_meas,
-                weights_meas,
-                responsibilities_fuse,
-                valid_flat,
-                colors_meas_flat,
-            ) = flatten_associations_for_fuse(
+                meas_idx_blocks,
+                tile_blocks,
+                slot_blocks,
+                resp_blocks,
+                valid_rows,
+            ) = block_associations_for_fuse(
                 result=assoc_result,
-                measurement_batch=measurement_batch,
-                n_valid=measurement_batch.n_valid,
-                responsibility_threshold=0.0,
+                valid_mask=measurement_batch.valid_mask,
+                block_size=constants.GC_ASSOC_BLOCK_SIZE,
             )
-            n_flat = target_indices.shape[0]
-            if n_flat > 0:
+            n_blocks = meas_idx_blocks.shape[0]
+            k_assoc = slot_blocks.shape[2]
+            for b in range(n_blocks):
+                meas_idx = meas_idx_blocks[b]
+                tile_blk = tile_blocks[b]
+                slot_blk = slot_blocks[b]
+                resp_blk = resp_blocks[b]
+                valid_rows_blk = valid_rows[b]
+
+                Lambdas_blk = measurement_batch.Lambdas[meas_idx]
+                thetas_blk = measurement_batch.thetas[meas_idx]
+                etas_blk = measurement_batch.etas[meas_idx]
+                weights_blk = measurement_batch.weights[meas_idx]
+                colors_blk = measurement_batch.colors[meas_idx]
+
+                if int(jnp.max(jnp.abs(tile_blk - int(tile_id)))) != 0:
+                    raise ValueError(
+                        f"process_scan_single_hypothesis: candidate tile_id mismatch (expected {tile_id})"
+                    )
+                target_flat = slot_blk.reshape(-1)
+                responsibilities_fuse = resp_blk.reshape(-1)
+                valid_flat = jnp.repeat(valid_rows_blk, k_assoc)
+                Lambdas_meas = jnp.repeat(Lambdas_blk, k_assoc, axis=0)
+                thetas_meas = jnp.repeat(thetas_blk, k_assoc, axis=0)
+                etas_meas = jnp.repeat(etas_blk, k_assoc, axis=0)
+                weights_meas = jnp.repeat(weights_blk, k_assoc, axis=0)
+                colors_meas_flat = jnp.repeat(colors_blk, k_assoc, axis=0)
+                fused_mass_total += float(
+                    jnp.sum(weights_meas * responsibilities_fuse * valid_flat.astype(jnp.float64))
+                )
+
                 Lambdas_world, thetas_world, etas_world = jax.vmap(transform_gaussian_to_world)(
                     Lambdas_meas, thetas_meas, etas_meas
                 )
                 fuse_result, fuse_cert, fuse_effect = primitive_map_fuse(
-                    prim_map=primitive_map,
-                    target_indices=target_indices,
+                    atlas_map=primitive_map,
+                    tile_id=int(tile_id),
+                    target_slots=target_flat,
                     Lambdas_meas=Lambdas_world,
                     thetas_meas=thetas_world,
                     etas_meas=etas_world,
@@ -1103,51 +1144,89 @@ def process_scan_single_hypothesis(
                     colors_meas=colors_meas_flat,
                     eps_mass=config.eps_mass,
                 )
-                primitive_map = fuse_result.prim_map
+                primitive_map = fuse_result.atlas_map
                 all_certs.append(fuse_cert)
-                n_primitives_fused = fuse_result.n_fused
+                n_primitives_fused += fuse_result.n_fused
 
-        if map_view.count == 0 and measurement_batch.n_valid > 0:
-            valid_mask = measurement_batch.valid_mask
-            valid_indices = jnp.where(valid_mask)[0]
-            n_valid = measurement_batch.n_valid
-            if n_valid > 0:
-                Lambdas_valid = measurement_batch.Lambdas[valid_indices]
-                thetas_valid = measurement_batch.thetas[valid_indices]
-                etas_valid = measurement_batch.etas[valid_indices]
-                weights_valid = measurement_batch.weights[valid_indices]
-                colors_valid = measurement_batch.colors[valid_indices]
-                mean_timestamp = float(jnp.mean(measurement_batch.timestamps[valid_indices]))
-                Lambdas_world, thetas_world, etas_world = jax.vmap(transform_gaussian_to_world)(
-                    Lambdas_valid, thetas_valid, etas_valid
-                )
-                result_insert, insert_cert, insert_effect = primitive_map_insert(
-                    prim_map=primitive_map,
-                    Lambdas_new=Lambdas_world,
-                    thetas_new=thetas_world,
-                    etas_new=etas_world,
-                    weights_new=weights_valid,
-                    timestamp=mean_timestamp,
-                    colors_new=colors_valid,
-                )
-                primitive_map = result_insert.prim_map
-                all_certs.append(insert_cert)
-                n_primitives_inserted = result_insert.n_inserted
+        # Fixed-budget insertion every scan: novelty mass from unbalanced OT coupling.
+        # This replaces the legacy "insert only when map empty" behavior.
+        if measurement_batch.n_valid > 0 and assoc_result is not None:
+            a = measurement_batch.valid_mask.astype(jnp.float64)
+            a = a / jnp.maximum(jnp.sum(a), config.eps_mass)  # fixed total mass
+            row_mass = assoc_result.row_masses.astype(jnp.float64)
+            novelty = jnp.maximum(a - row_mass, 0.0)
+            # Prefer inserting genuinely novel evidence; never select padded invalid rows.
+            score = novelty * measurement_batch.weights.astype(jnp.float64)
+            score = score - (1.0 - measurement_batch.valid_mask.astype(jnp.float64)) * 1e6
+            k_ins = int(config.k_insert_tile)
+            ins_idx = jnp.argsort(-score)[:k_ins]
+
+            Lambdas_ins = measurement_batch.Lambdas[ins_idx]
+            thetas_ins = measurement_batch.thetas[ins_idx]
+            etas_ins = measurement_batch.etas[ins_idx]
+            weights_ins = (novelty[ins_idx] * measurement_batch.weights[ins_idx]).astype(jnp.float64)
+            colors_ins = measurement_batch.colors[ins_idx]
+            insert_mass_total = float(jnp.sum(weights_ins))
+            weights_sorted = jnp.sort(weights_ins)
+            if int(weights_sorted.shape[0]) > 0:
+                idx_p95 = int(0.95 * float(weights_sorted.shape[0]))
+                idx_p95 = min(idx_p95, int(weights_sorted.shape[0]) - 1)
+                insert_mass_p95 = float(weights_sorted[idx_p95])
+            # Use scan end time as insertion time (matches evidence timebase).
+            Lambdas_world, thetas_world, etas_world = jax.vmap(transform_gaussian_to_world)(
+                Lambdas_ins, thetas_ins, etas_ins
+            )
+            result_insert, insert_cert, insert_effect = primitive_map_insert(
+                atlas_map=primitive_map,
+                tile_id=int(tile_id),
+                Lambdas_new=Lambdas_world,
+                thetas_new=thetas_world,
+                etas_new=etas_world,
+                weights_new=weights_ins,
+                timestamp=scan_end_time,
+                colors_new=colors_ins,
+            )
+            primitive_map = result_insert.atlas_map
+            all_certs.append(insert_cert)
+            n_primitives_inserted = result_insert.n_inserted
 
         cull_result, cull_cert, cull_effect = primitive_map_cull(
-            prim_map=primitive_map,
+            atlas_map=primitive_map,
+            tile_id=int(tile_id),
             weight_threshold=config.primitive_cull_weight_threshold,
         )
-        primitive_map = cull_result.prim_map
+        primitive_map = cull_result.atlas_map
         all_certs.append(cull_cert)
         n_primitives_culled = cull_result.n_culled
+        evicted_mass_total = float(cull_result.mass_dropped)
 
         forget_result, forget_cert, forget_effect = primitive_map_forget(
-            prim_map=primitive_map,
+            atlas_map=primitive_map,
+            tile_id=int(tile_id),
             forgetting_factor=config.primitive_forgetting_factor,
         )
-        primitive_map = forget_result.prim_map
+        primitive_map = forget_result.atlas_map
         all_certs.append(forget_cert)
+
+        map_update_cert = CertBundle.create_exact(
+            chart_id=belief_pred.chart_id,
+            anchor_id="map_update",
+            map_update=MapUpdateCert(
+                n_active_tiles=1,
+                tile_ids_active=[int(tile_id)],
+                candidate_tiles_per_meas_mean=float(candidate_tiles_per_meas_mean),
+                candidate_primitives_per_meas_mean=float(candidate_primitives_per_meas_mean),
+                candidate_primitives_per_meas_p95=float(candidate_primitives_per_meas_p95),
+                insert_count_total=int(n_primitives_inserted),
+                insert_mass_total=float(insert_mass_total),
+                insert_mass_p95=float(insert_mass_p95),
+                evicted_count=int(n_primitives_culled),
+                evicted_mass_total=float(evicted_mass_total),
+                fused_count=int(n_primitives_fused),
+                fused_mass_total=float(fused_mass_total),
+            ),
+        )
+        all_certs.append(map_update_cert)
 
         primitive_map_updated = primitive_map
     
@@ -1461,6 +1540,9 @@ class RuntimeManifest:
     K_HYP: int = constants.GC_K_HYP
     HYP_WEIGHT_FLOOR: float = constants.GC_HYP_WEIGHT_FLOOR
     N_POINTS_CAP: int = constants.GC_N_POINTS_CAP
+    N_FEAT: int = constants.GC_N_FEAT
+    N_SURFEL: int = constants.GC_N_SURFEL
+    K_SINKHORN: int = constants.GC_K_SINKHORN
     
     eps_psd: float = constants.GC_EPS_PSD
     eps_lift: float = constants.GC_EPS_LIFT
@@ -1481,6 +1563,25 @@ class RuntimeManifest:
     power_beta_min: float = 0.25
     power_beta_exc_c: float = 50.0
     power_beta_z_c: float = 1.0
+
+    # OT association parameters (spec §5.7)
+    ot_epsilon: float = 0.1  # Entropic regularization
+    ot_tau_a: float = 0.5  # Unbalanced KL for measurement marginal
+    ot_tau_b: float = 0.5  # Unbalanced KL for map marginal
+    ot_iters: int = constants.GC_K_SINKHORN  # Fixed Sinkhorn iterations (k_sinkhorn)
+
+    # Fixed-cost budgets (compile-time constants, spec §6)
+    K_ASSOC: int = constants.GC_K_ASSOC  # Candidate neighborhood size
+    K_INSERT_TILE: int = constants.GC_K_INSERT_TILE  # Insertion budget per tile
+    M_TILE: int = constants.GC_PRIMITIVE_MAP_MAX_SIZE  # Max primitives per tile (single-tile for now)
+    ASSOC_BLOCK_SIZE: int = constants.GC_ASSOC_BLOCK_SIZE
+    FUSE_CHUNK_SIZE: int = constants.GC_FUSE_CHUNK_SIZE
+    MAX_IMU_PREINT_LEN: int = constants.GC_MAX_IMU_PREINT_LEN
+    VMF_N_LOBES: int = constants.GC_VMF_N_LOBES
+
+    # BEV (future view-layer) flags
+    bev_backend_enabled: bool = False
+    bev_views_n: int = 0
 
     # Explicit backend/operator selections (single-path; no fallback).
     # Required for auditability of the "no multipaths" invariant.
@@ -1530,6 +1631,9 @@ class RuntimeManifest:
             "K_HYP": self.K_HYP,
             "HYP_WEIGHT_FLOOR": self.HYP_WEIGHT_FLOOR,
             "N_POINTS_CAP": self.N_POINTS_CAP,
+            "N_FEAT": self.N_FEAT,
+            "N_SURFEL": self.N_SURFEL,
+            "K_SINKHORN": self.K_SINKHORN,
             "eps_psd": self.eps_psd,
             "eps_lift": self.eps_lift,
             "eps_mass": self.eps_mass,
@@ -1547,5 +1651,20 @@ class RuntimeManifest:
             "power_beta_min": self.power_beta_min,
             "power_beta_exc_c": self.power_beta_exc_c,
             "power_beta_z_c": self.power_beta_z_c,
+            # OT params (spec §5.7)
+            "ot_epsilon": self.ot_epsilon,
+            "ot_tau_a": self.ot_tau_a,
+            "ot_tau_b": self.ot_tau_b,
+            "ot_iters": self.ot_iters,
+            # Fixed-cost budgets (spec §6)
+            "K_ASSOC": self.K_ASSOC,
+            "K_INSERT_TILE": self.K_INSERT_TILE,
+            "M_TILE": self.M_TILE,
+            "ASSOC_BLOCK_SIZE": self.ASSOC_BLOCK_SIZE,
+            "FUSE_CHUNK_SIZE": self.FUSE_CHUNK_SIZE,
+            "MAX_IMU_PREINT_LEN": self.MAX_IMU_PREINT_LEN,
+            "VMF_N_LOBES": self.VMF_N_LOBES,
+            "bev_backend_enabled": self.bev_backend_enabled,
+            "bev_views_n": self.bev_views_n,
             "backends": dict(self.backends),
         }

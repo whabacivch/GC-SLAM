@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Inspect M3DGR /odom messages to determine if wheel-only or IMU-fused.
+Inspect Kimera /odom messages to determine if wheel-only or IMU-fused.
 """
 import rclpy
 from rclpy.serialization import deserialize_message
@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from rosbag_sqlite_utils import resolve_db3_path
 
 
-bag_path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BAG_PATH", "rosbags/m3dgr/Dynamic01_ros2")
+bag_path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BAG_PATH", "rosbags/Kimera_Data/ros2/10_14_acl_jackal-005")
 db_path = resolve_db3_path(bag_path)
 
 if not os.path.exists(db_path):

@@ -40,7 +40,7 @@ def main() -> int:
     ap.add_argument(
         "bag_path",
         nargs="?",
-        default=os.environ.get("BAG_PATH", "rosbags/m3dgr/Dynamic01_ros2"),
+        default=os.environ.get("BAG_PATH", "rosbags/Kimera_Data/ros2/10_14_acl_jackal-005"),
         help="Bag directory or .db3 path",
     )
     ap.add_argument("--odom-topic", default="/odom", help="Odom topic")

@@ -663,8 +663,9 @@ if [ -f "$RESULTS_DIR/diagnostics.npz" ]; then
     SPLAT_NPZ="$RESULTS_DIR/splat_export.npz"
     if [ -f "$SPLAT_NPZ" ]; then
         SPLAT_OUT="$RESULTS_DIR/splat_render.png"
-        if env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/view_splat_jaxsplat.py" \
-            "$SPLAT_NPZ" --output "$SPLAT_OUT" --open-image 2>/dev/null; then
+        # Run in a subshell so bash's own SIGSEGV diagnostic doesn't leak to stderr.
+        if ( env -u PYTHONPATH "$PYTHON" "$PROJECT_ROOT/tools/view_splat_jaxsplat.py" \
+            "$SPLAT_NPZ" --output "$SPLAT_OUT" --open-image ) 2>/dev/null; then
             print_ok "JAXsplat render saved: ${CYAN}$SPLAT_OUT${NC}"
         else
             print_warn "JAXsplat render skipped (install jaxsplat or check logs). Splat export: ${CYAN}$SPLAT_NPZ${NC}"

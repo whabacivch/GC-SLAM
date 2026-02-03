@@ -17,4 +17,4 @@ Single contract for depth in the Geometric Compositional visual–LiDAR pipeline
 ## Reference
 
 - Pipeline and data flow: `docs/IMU_BELIEF_MAP_AND_FUSION.md`
-- Geometric Compositional spec: `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`
+- Geometric Compositional spec: `docs/GC_SLAM.md`

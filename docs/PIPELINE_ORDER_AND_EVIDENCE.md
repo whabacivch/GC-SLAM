@@ -24,5 +24,5 @@ Corrected spine for Geometric Compositional SLAM v2 per-scan pipeline: evidence 
 ## References
 
 - Pipeline and data flow: `docs/IMU_BELIEF_MAP_AND_FUSION.md`
-- Geometric Compositional spec: `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`
+- Geometric Compositional spec: `docs/GC_SLAM.md`
 - Depth contract: `docs/PIPELINE_DEPTH_CONTRACT.md`

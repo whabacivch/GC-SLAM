@@ -15,7 +15,7 @@ Architecture:
         ▼
     /gc/sensors/* (canonical topics for backend)
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
+Reference: docs/GC_SLAM.md
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@ Verifies that operators follow spec contracts:
 - Are branch-free (total functions)
 - Apply domain projections correctly
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5
+Reference: docs/GC_SLAM.md Section 5
 """
 
 import pytest

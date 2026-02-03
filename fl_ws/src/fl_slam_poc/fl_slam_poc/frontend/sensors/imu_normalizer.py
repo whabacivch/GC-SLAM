@@ -24,7 +24,7 @@ Future Development (TODO):
 Topic Flow:
     /livox/mid360/imu (raw from bag) → [this node] → /gc/sensors/imu (canonical)
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
+Reference: docs/GC_SLAM.md
 """
 
 from __future__ import annotations

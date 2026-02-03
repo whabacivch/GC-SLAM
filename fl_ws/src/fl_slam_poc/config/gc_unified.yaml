@@ -8,7 +8,7 @@
 # Topic flow: raw bag → pointcloud_passthrough / odom_normalizer / imu_normalizer
 #             → /gc/sensors/* → gc_backend_node
 #
-# Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
+# Reference: docs/GC_SLAM.md
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -72,22 +72,71 @@ gc_backend:
 
     trajectory_export_path: /tmp/gc_slam_trajectory.tum
     status_check_period_sec: 5.0
-    forgetting_factor: 0.99
     init_window_odom_count: 10
     enable_timing: false
 
     map_backend: primitive_map
     pose_evidence_backend: primitives
 
+    # Numerical epsilons (domain stabilization)
+    eps_psd: 1e-12
+    eps_lift: 1e-9
+    eps_mass: 1e-12
+
+    # Fusion conditioning
+    alpha_min: 1.0
+    alpha_max: 1.0
+    kappa_scale: 1.0
+    c0_cond: 1e6
+
+    # Power tempering
+    power_beta_min: 0.25
+    power_beta_exc_c: 50.0
+    power_beta_z_c: 1.0
+
+    # Excitation coupling
+    c_dt: 1.0
+    c_ex: 1.0
+    c_frob: 1.0
+
+    # Planar prior (soft constraints)
+    planar_z_ref: 0.0
+    planar_z_sigma: 0.1
+    planar_vz_sigma: 0.01
+    enable_planar_prior: true
+
+    # Odom twist evidence
+    enable_odom_twist: true
+    odom_twist_vel_sigma: 0.1
+    odom_twist_wz_sigma: 0.01
+    odom_z_variance_prior: 1000000.0
+
+    # OT association params
+    ot_epsilon: 0.1
+    ot_tau_a: 0.5
+    ot_tau_b: 0.5
+
     # Reduced from 512/1024/8 to avoid OOM in primitive_map_fuse (flat_size = (n_feat+n_surfel)*k_assoc)
     n_feat: 256
     n_surfel: 512
     k_assoc: 8
     k_sinkhorn: 50
+    k_insert_tile: 64
     primitive_map_max_size: 50000
     primitive_forgetting_factor: 0.999
+    primitive_merge_threshold: 0.1
+    primitive_cull_weight_threshold: 1e-4
+
+    # Surfel extraction
+    surfel_voxel_size_m: 0.1
+    surfel_min_points_per_voxel: 3
+
+    # Diagnostics
+    save_full_diagnostics: false
 
     camera_rgbd_topic: /gc/sensors/camera_rgbd
     camera_K: [500.0, 500.0, 320.0, 240.0]
     T_base_camera: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     ringbuf_len: 5
+    bev_backend_enabled: false
+    bev_views_n: 0

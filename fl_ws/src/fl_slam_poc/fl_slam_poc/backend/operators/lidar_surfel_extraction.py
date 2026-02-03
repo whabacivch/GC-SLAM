@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Tuple, Optional, List
 
 from fl_slam_poc.common.jax_init import jax, jnp
+from fl_slam_poc.common.runtime_counters import record_device_to_host
 from fl_slam_poc.common import constants
 from fl_slam_poc.common.certificates import CertBundle, ExpectedEffect, InfluenceCert, SupportCert
 from fl_slam_poc.common.ma_hex_web import MAHex3DConfig, bin_points_3d
@@ -203,6 +204,7 @@ def _extract_surfels_mahex3d_jax(
     )
 
     n_valid = int(jax.device_get(n_valid_i32))
+    record_device_to_host(n_valid_i32, syncs=1)
     return (
         positions_sel,
         covs_sel,

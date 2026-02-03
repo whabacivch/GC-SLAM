@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # FL-SLAM full integration test (rosbag + basic health checks).
 #
-# Defaults to M3DGR Dynamic01 rosbag (Livox + RGB-D).
+# Defaults to a Kimera rosbag (override with BAG_PATH).
 #
 # Overrides:
 #   BAG_PATH=/path/to/bag ./tools/test-integration.sh
@@ -10,7 +10,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-BAG_PATH="${BAG_PATH:-${PROJECT_DIR}/rosbags/m3dgr/Dynamic01_ros2}"
+BAG_PATH="${BAG_PATH:-${PROJECT_DIR}/rosbags/Kimera_Data/ros2/10_14_acl_jackal-005}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
 STARTUP_SEC="${STARTUP_SEC:-25}"
 REQUIRE_LOOP="${REQUIRE_LOOP:-1}"
@@ -97,10 +97,8 @@ echo "Starting Integration Test"
 echo "=========================================="
 echo "Log: ${RUN_LOG}"
 echo ""
-# MVP integration test targets the M3DGR rosbag launch only.
-# NOTE: use_sim_time is now set in config/presets/m3dgr.yaml (true for rosbag playback).
-# All M3DGR-specific parameters are in the preset config; only bag path is needed.
-LAUNCH_FILE="poc_m3dgr_rosbag.launch.py"
+# MVP integration test targets the GC rosbag launch.
+LAUNCH_FILE="gc_rosbag.launch.py"
 setsid timeout "${TIMEOUT_SEC}" ros2 launch fl_slam_poc "${LAUNCH_FILE}" \
   play_bag:=true \
   bag:="${BAG_PATH}" \

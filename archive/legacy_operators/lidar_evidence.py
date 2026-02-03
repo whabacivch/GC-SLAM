@@ -3,7 +3,7 @@ LidarQuadraticEvidence operator for Geometric Compositional SLAM v2.
 
 Produces quadratic evidence on full 22D tangent at fixed cost.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.9
+Reference: docs/GC_SLAM.md Section 5.9
 """
 
 from __future__ import annotations

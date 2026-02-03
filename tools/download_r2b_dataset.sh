@@ -48,7 +48,7 @@ Dataset Contents:
   - /camera/color/camera_info    (Camera intrinsics)
 
 To use with FL-SLAM (note: may require additional configuration):
-  ros2 launch fl_slam_poc poc_m3dgr_rosbag.launch.py \
+  ros2 launch fl_slam_poc gc_rosbag.launch.py \
     bag:=${DEST_DIR}/r2b_storage \
     play_bag:=true \
     pointcloud_topic:=/camera/depth/points \
@@ -150,7 +150,7 @@ if [[ -d "${DEST_DIR}/${R2B_DIR_NAME}" ]]; then
   echo "  ros2 bag info ${DEST_DIR}/${R2B_DIR_NAME}"
   echo ""
   echo "To test with FL-SLAM (3D mode):"
-  echo "  ros2 launch fl_slam_poc poc_m3dgr_rosbag.launch.py \\"
+  echo "  ros2 launch fl_slam_poc gc_rosbag.launch.py \\"
   echo "    bag:=${DEST_DIR}/${R2B_DIR_NAME} \\"
   echo "    play_bag:=true \\"
   echo "    enable_livox_convert:=false"

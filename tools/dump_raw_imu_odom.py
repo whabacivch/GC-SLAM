@@ -99,7 +99,7 @@ def dump_odom(cur, topic: str, max_messages: int, out_path: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Dump raw IMU and odom from rosbag (first N messages).")
-    ap.add_argument("bag_path", nargs="?", default=os.environ.get("BAG_PATH", "rosbags/m3dgr/Dynamic01_ros2"), help="Bag directory or .db3 path")
+    ap.add_argument("bag_path", nargs="?", default=os.environ.get("BAG_PATH", "rosbags/Kimera_Data/ros2/10_14_acl_jackal-005"), help="Bag directory or .db3 path")
     ap.add_argument("--imu-topic", default="/livox/mid360/imu", help="IMU topic (raw bag topic)")
     ap.add_argument("--odom-topic", default="/odom", help="Odom topic")
     ap.add_argument("--max-imu", type=int, default=300, help="Max IMU messages to dump")

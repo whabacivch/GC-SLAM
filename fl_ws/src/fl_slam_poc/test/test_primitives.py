@@ -3,7 +3,7 @@ Tests for Geometric Compositional SLAM v2 primitives.
 
 Verifies that primitives are branch-free and always execute.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 3
+Reference: docs/GC_SLAM.md Section 3
 """
 
 import pytest

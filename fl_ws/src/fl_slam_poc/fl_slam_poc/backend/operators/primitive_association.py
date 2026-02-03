@@ -9,21 +9,57 @@ Operator: associate_primitives_ot(MeasurementBatch, PrimitiveMapView) -> (pi, Ce
 
 Key constraints:
 - Candidate generation is MA hex web (hex cells + stencil, nearest k_assoc); inside the operator
-- Output pi is always shape [N_meas, K_ASSOC] (sparse-by-design)
+- Output pi is always shape [N_total, K_ASSOC] (fixed-cost, sparse-by-design)
 - Fixed-cost: K_SINKHORN iterations, K_ASSOC candidates per measurement
 - Responsibilities are the only association mechanism (no nearest-neighbor, no "if residual small")
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional, Tuple
-import numpy as np
 
 from fl_slam_poc.common.jax_init import jax, jnp
 from fl_slam_poc.common import constants
-from fl_slam_poc.common.certificates import CertBundle, ExpectedEffect, InfluenceCert
-from fl_slam_poc.common.ma_hex_web import MAHexWebConfig, generate_candidates_ma_hex_web
+from fl_slam_poc.common.certificates import (
+    CertBundle,
+    ExpectedEffect,
+    InfluenceCert,
+    SupportCert,
+    ComputeCert,
+)
+
+
+# =============================================================================
+# Mass Policy Enums (explicit declaration of OT marginal semantics)
+# =============================================================================
+
+
+class MeasurementMassPolicy(Enum):
+    """
+    Policy for measurement-side marginal 'a' in OT.
+
+    Spec §5.7.2: Mass budgets are declared explicitly, not derived from data.
+    """
+    UNIFORM = "uniform"  # a[i] = 1/N_valid (uniform over valid measurements)
+    WEIGHT_PROPORTIONAL = "weight_proportional"  # a[i] ∝ measurement_batch.weights[i]
+    FEATURE_CONFIDENCE = "feature_confidence"  # a[i] ∝ feature detection confidence (future)
+
+
+class MapMassPolicy(Enum):
+    """
+    Policy for map-side marginal 'b' in OT.
+
+    Spec §5.7.2: Mass budgets are declared explicitly.
+    """
+    UNIFORM = "uniform"  # b[k] = 1/K_assoc (uniform over candidates)
+    PRIMITIVE_MASS = "primitive_mass"  # b[k] ∝ map primitive weight (accumulated ESS)
+    MASS_TEMPERED = "mass_tempered"  # b[k] ∝ primitive_weight^beta (future)
+from fl_slam_poc.common.ma_hex_web import (
+    MAHexWebConfig,
+    generate_candidates_ma_hex_web_jax,
+)
 from fl_slam_poc.backend.structures.measurement_batch import MeasurementBatch
 from fl_slam_poc.backend.structures.primitive_map import PrimitiveMapView
 
@@ -37,19 +73,21 @@ from fl_slam_poc.backend.structures.primitive_map import PrimitiveMapView
 @dataclass
 class PrimitiveAssociationResult:
     """Result of primitive association via OT."""
-    # Sparse responsibilities: (N_meas, K_ASSOC)
+    # Sparse responsibilities: (N_total, K_ASSOC)
     # pi[i, k] = responsibility of measurement i to candidate k
-    responsibilities: jnp.ndarray  # (N_meas, K_ASSOC)
+    responsibilities: jnp.ndarray  # (N_total, K_ASSOC)
 
-    # Candidate indices: (N_meas, K_ASSOC)
-    # candidate_indices[i, k] = map primitive index for measurement i, candidate k
-    candidate_indices: jnp.ndarray  # (N_meas, K_ASSOC) int
+    # Candidate addressing: (N_total, K_ASSOC)
+    # candidate_tile_ids[i, k] = tile ID for measurement i, candidate k
+    # candidate_slots[i, k] = slot index (tile-local) for measurement i, candidate k
+    candidate_tile_ids: jnp.ndarray  # (N_total, K_ASSOC) int
+    candidate_slots: jnp.ndarray  # (N_total, K_ASSOC) int
 
     # Per-measurement total mass (for diagnostics)
-    row_masses: jnp.ndarray  # (N_meas,)
+    row_masses: jnp.ndarray  # (N_total,)
 
     # Cost matrix for diagnostics
-    cost_matrix: jnp.ndarray  # (N_meas, K_ASSOC)
+    cost_matrix: jnp.ndarray  # (N_total, K_ASSOC)
 
 
 # =============================================================================
@@ -62,127 +100,99 @@ class PrimitiveAssociationResult:
 # =============================================================================
 
 
-def _sinkhorn_unbalanced_fixed_k(
-    C: np.ndarray,
-    a: np.ndarray,
-    b: np.ndarray,
+def _sinkhorn_unbalanced_fixed_k_jax(
+    C: jnp.ndarray,
+    a: jnp.ndarray,
+    b: jnp.ndarray,
     epsilon: float,
     tau_a: float,
     tau_b: float,
     K: int,
-) -> np.ndarray:
+) -> jnp.ndarray:
     """
-    Unbalanced Sinkhorn: fixed K iterations. KL relaxation on marginals (continuous; no threshold).
-    min_π <π,C> + ε KL(π|a⊗b) + τ_a KL(π1|a) + τ_b KL(πᵀ1|b).
-    Updates: u = (a / (K v))^(1/(1+τ_a/ε)), v = (b / (Kᵀ u))^(1/(1+τ_b/ε)).
-    τ_a=τ_b=0 recovers balanced. Returns coupling π (N,M).
+    Unbalanced Sinkhorn (JAX): fixed K iterations, no convergence check.
     """
-    C = np.asarray(C, dtype=np.float64)
-    a = np.asarray(a, dtype=np.float64).ravel()
-    b = np.asarray(b, dtype=np.float64).ravel()
+    C = jnp.asarray(C, dtype=jnp.float64)
+    a = jnp.asarray(a, dtype=jnp.float64).reshape(-1)
+    b = jnp.asarray(b, dtype=jnp.float64).reshape(-1)
     N, M = C.shape
-    eps = max(float(epsilon), 1e-12)
-    K_mat = np.exp(-C / eps)
-    u = np.ones(N, dtype=np.float64)
-    v = np.ones(M, dtype=np.float64)
-    ua = 1.0 / (1.0 + float(tau_a) / eps)
-    vb = 1.0 / (1.0 + float(tau_b) / eps)
-    for _ in range(int(K)):
+    eps = jnp.maximum(jnp.asarray(epsilon, dtype=jnp.float64), 1e-12)
+    K_mat = jnp.exp(-C / eps)
+    u0 = jnp.ones((N,), dtype=jnp.float64)
+    v0 = jnp.ones((M,), dtype=jnp.float64)
+    ua = 1.0 / (1.0 + jnp.asarray(tau_a, dtype=jnp.float64) / eps)
+    vb = 1.0 / (1.0 + jnp.asarray(tau_b, dtype=jnp.float64) / eps)
+
+    def one_iter(_, uv):
+        u, v = uv
         Kv = K_mat @ v
         u = (a / (Kv + 1e-12)) ** ua
         KTu = K_mat.T @ u
         v = (b / (KTu + 1e-12)) ** vb
+        return (u, v)
+
+    u, v = jax.lax.fori_loop(0, int(K), one_iter, (u0, v0))
     pi = u.reshape(-1, 1) * K_mat * v.reshape(1, -1)
     return pi
 
 
-def _compute_sparse_cost_matrix(
-    meas_positions: np.ndarray,      # (N_meas, 3)
-    meas_covariances: np.ndarray,    # (N_meas, 3, 3)
-    meas_directions: np.ndarray,     # (N_meas, 3)
-    meas_kappas: np.ndarray,         # (N_meas,)
-    map_positions: np.ndarray,       # (M_map, 3)
-    map_covariances: np.ndarray,     # (M_map, 3, 3)
-    map_directions: np.ndarray,      # (M_map, 3)
-    map_kappas: np.ndarray,          # (M_map,)
-    candidate_indices: np.ndarray,   # (N_meas, K_ASSOC)
+def _A_vmf_vec_jax(k: jnp.ndarray, eps: float = 1e-12) -> jnp.ndarray:
+    """A_vmf(k) = log(4*pi) + log(sinh(k)) - log(k), with stable log-sinh."""
+    k = jnp.maximum(jnp.asarray(k, dtype=jnp.float64), eps)
+    log_sinh_k = jnp.where(
+        k > 20.0,
+        k - jnp.log(2.0),
+        jnp.where(k >= 1e-2, jnp.log(jnp.sinh(k)), jnp.log(k + (k ** 3) / 6.0)),
+    )
+    return jnp.log(4.0 * jnp.pi) + log_sinh_k - jnp.log(k)
+
+
+def _compute_sparse_cost_matrix_jax(
+    meas_positions: jnp.ndarray,      # (N_total, 3)
+    meas_directions: jnp.ndarray,     # (N_total, 3)
+    meas_kappas: jnp.ndarray,         # (N_total,)
+    map_positions: jnp.ndarray,       # (M_map, 3)
+    map_directions: jnp.ndarray,      # (M_map, 3)
+    map_kappas: jnp.ndarray,          # (M_map,)
+    candidate_indices: jnp.ndarray,   # (N_total, K_ASSOC)
     beta: float = 0.5,
     eig_min: float = 1e-12,
-) -> np.ndarray:
+) -> jnp.ndarray:
     """
-    Compute sparse cost matrix for (measurement, candidate) pairs.
+    Sparse cost C[i,k] for candidate pairs, device-side.
 
-    Cost = W2^2(position) + beta * H^2_vMF(direction)
-
-    Fully vectorized (no Python loops).
-
-    Args:
-        meas_*: Measurement batch attributes
-        map_*: Map primitive attributes
-        candidate_indices: (N_meas, K_ASSOC) map indices per measurement
-        beta: Direction weight
-        eig_min: SPD clamp for W2^2
-
-    Returns:
-        cost_matrix: (N_meas, K_ASSOC) costs
+    Cost = ||x_i - x_j||^2 + beta * H^2_vMF(dir_i, dir_j).
     """
-    N_meas, K_assoc = candidate_indices.shape
+    meas_positions = jnp.asarray(meas_positions, dtype=jnp.float64)
+    meas_directions = jnp.asarray(meas_directions, dtype=jnp.float64)
+    meas_kappas = jnp.asarray(meas_kappas, dtype=jnp.float64)
+    map_positions = jnp.asarray(map_positions, dtype=jnp.float64)
+    map_directions = jnp.asarray(map_directions, dtype=jnp.float64)
+    map_kappas = jnp.asarray(map_kappas, dtype=jnp.float64)
+    candidate_indices = jnp.asarray(candidate_indices, dtype=jnp.int32)
 
-    if N_meas == 0 or K_assoc == 0:
-        return np.zeros((N_meas, K_assoc), dtype=np.float64)
+    map_pos_all = map_positions[candidate_indices]
+    map_dir_all = map_directions[candidate_indices]
+    map_kappa_all = map_kappas[candidate_indices]
 
-    # Gather all candidate data: (N_meas, K_assoc, 3) and (N_meas, K_assoc)
-    map_pos_all = map_positions[candidate_indices]  # (N_meas, K_assoc, 3)
-    map_dir_all = map_directions[candidate_indices]  # (N_meas, K_assoc, 3)
-    map_kappa_all = map_kappas[candidate_indices]  # (N_meas, K_assoc)
-
-    # Position cost: ||meas_pos[i] - map_pos[i,k]||^2
-    # (N_meas, 1, 3) - (N_meas, K_assoc, 3) -> (N_meas, K_assoc, 3)
     diff = meas_positions[:, None, :] - map_pos_all
-    d_pos = np.sum(diff ** 2, axis=-1)  # (N_meas, K_assoc)
+    d_pos = jnp.sum(diff * diff, axis=-1)
 
-    # Direction cost: Hellinger^2 for vMF (vectorized)
-    # eta1 = kappa1 * mu1, eta2 = kappa2 * mu2
-    # km = 0.5 * ||eta1 + eta2||
-    # H^2 = 1 - exp(A(km) - 0.5*(A(k1) + A(k2)))
-    meas_eta = meas_kappas[:, None, None] * meas_directions[:, None, :]  # (N_meas, 1, 3)
-    map_eta = map_kappa_all[:, :, None] * map_dir_all  # (N_meas, K_assoc, 3)
-    eta_sum = meas_eta + map_eta  # (N_meas, K_assoc, 3)
-    km = 0.5 * np.linalg.norm(eta_sum, axis=-1)  # (N_meas, K_assoc)
+    meas_eta = meas_kappas[:, None, None] * meas_directions[:, None, :]
+    map_eta = map_kappa_all[:, :, None] * map_dir_all
+    km = 0.5 * jnp.linalg.norm(meas_eta + map_eta, axis=-1)
 
-    # A_vmf(k) = log(4*pi) + log(sinh(k)) - log(k)
-    # For stability: log(sinh(k)) = k - log(2) for large k
-    def _A_vmf_vec(k):
-        """Vectorized A_vmf function."""
-        k = np.maximum(k, eig_min)
-        # For small k: log(sinh(k)) ≈ log(k)
-        # For large k: log(sinh(k)) ≈ k - log(2)
-        log_sinh_k = np.where(
-            k > 20.0,
-            k - np.log(2.0),
-            np.where(k >= 1e-2, np.log(np.sinh(k)), np.log(k + (k ** 3) / 6.0))
-        )
-        return np.log(4.0 * np.pi) + log_sinh_k - np.log(k)
-
-    km_safe = np.maximum(km, eig_min)
-    k1_safe = np.maximum(meas_kappas[:, None], eig_min)  # (N_meas, 1)
-    k2_safe = np.maximum(map_kappa_all, eig_min)  # (N_meas, K_assoc)
-
-    A_km = _A_vmf_vec(km_safe)
-    A_k1 = _A_vmf_vec(k1_safe)
-    A_k2 = _A_vmf_vec(k2_safe)
-
-    bc = np.exp(A_km - 0.5 * (A_k1 + A_k2))
-    d_dir = np.maximum(0.0, 1.0 - bc)  # (N_meas, K_assoc)
-
-    # Mask out direction cost where either kappa is zero
-    valid_dir = (meas_kappas[:, None] > 0) & (map_kappa_all > 0)
-    d_dir = np.where(valid_dir, d_dir, 0.0)
-
-    # Total cost
-    cost_matrix = d_pos + beta * d_dir
-
-    return cost_matrix
+    km_safe = jnp.maximum(km, eig_min)
+    k1_safe = jnp.maximum(meas_kappas[:, None], eig_min)
+    k2_safe = jnp.maximum(map_kappa_all, eig_min)
+    A_km = _A_vmf_vec_jax(km_safe, eps=eig_min)
+    A_k1 = _A_vmf_vec_jax(k1_safe, eps=eig_min)
+    A_k2 = _A_vmf_vec_jax(k2_safe, eps=eig_min)
+    bc = jnp.exp(A_km - 0.5 * (A_k1 + A_k2))
+    d_dir = jnp.maximum(0.0, 1.0 - bc)
+    valid_dir = (meas_kappas[:, None] > 0.0) & (map_kappa_all > 0.0)
+    d_dir = jnp.where(valid_dir, d_dir, 0.0)
+    return d_pos + float(beta) * d_dir
 
 
 # =============================================================================
@@ -192,15 +202,29 @@ def _compute_sparse_cost_matrix(
 
 @dataclass
 class AssociationConfig:
-    """Configuration for primitive association."""
+    """
+    Configuration for primitive association.
+
+    OT parameters (spec §5.7):
+    - epsilon: Entropic regularization (larger = smoother)
+    - tau_a, tau_b: Unbalanced KL relaxation (smaller = more unbalanced)
+    - k_sinkhorn: Fixed iteration count (no convergence check)
+
+    Mass policies (spec §5.7.2): Explicit declaration of OT marginal semantics.
+    """
     k_assoc: int = constants.GC_K_ASSOC
     k_sinkhorn: int = constants.GC_K_SINKHORN
-    beta: float = 0.5  # Direction weight
-    epsilon: float = 0.1  # Entropy regularization
+    beta: float = 0.5  # Direction weight in cost
+    epsilon: float = 0.1  # Entropic regularization
     tau_a: float = 0.5  # Unbalanced KL for measurement marginal
     tau_b: float = 0.5  # Unbalanced KL for map marginal
     cost_subtract_row_min: bool = True
     cost_scale_by_median: bool = False
+    # Explicit mass policies (spec §5.7.2)
+    a_policy: MeasurementMassPolicy = MeasurementMassPolicy.UNIFORM
+    b_policy: MapMassPolicy = MapMassPolicy.UNIFORM
+    # Mass regularization (replaces magic 1e-12 constants)
+    eps_mass: float = constants.GC_EPS_MASS
 
 
 def associate_primitives_ot(
@@ -231,15 +255,15 @@ def associate_primitives_ot(
     if config is None:
         config = AssociationConfig()
 
-    N_meas = measurement_batch.n_valid
     N_total = measurement_batch.n_total
     M_map = map_view.count
 
     # Handle empty cases (return fixed shape N_total x K_assoc for JAX-only flatten)
-    if N_meas == 0 or M_map == 0:
+    if measurement_batch.n_valid == 0 or M_map == 0:
         result = PrimitiveAssociationResult(
             responsibilities=jnp.zeros((N_total, config.k_assoc), dtype=jnp.float64),
-            candidate_indices=jnp.zeros((N_total, config.k_assoc), dtype=jnp.int64),
+            candidate_tile_ids=jnp.zeros((N_total, config.k_assoc), dtype=jnp.int64),
+            candidate_slots=jnp.zeros((N_total, config.k_assoc), dtype=jnp.int64),
             row_masses=jnp.zeros((N_total,), dtype=jnp.float64),
             cost_matrix=jnp.zeros((N_total, config.k_assoc), dtype=jnp.float64),
         )
@@ -251,110 +275,145 @@ def associate_primitives_ot(
         )
         return result, cert, effect
 
-    # Extract numpy arrays for computation
-    # Measurement batch
+    # Extract device arrays
     from fl_slam_poc.backend.structures.measurement_batch import (
         measurement_batch_mean_positions,
         measurement_batch_mean_directions,
         measurement_batch_kappas,
     )
 
-    meas_positions = np.array(measurement_batch_mean_positions(measurement_batch, eps_lift=eps_lift))
-    meas_directions = np.array(measurement_batch_mean_directions(measurement_batch, eps_mass=eps_mass))
-    meas_kappas = np.array(measurement_batch_kappas(measurement_batch))
+    meas_positions = measurement_batch_mean_positions(measurement_batch, eps_lift=eps_lift)  # (N_total, 3)
+    meas_directions = measurement_batch_mean_directions(measurement_batch, eps_mass=eps_mass)  # (N_total, 3)
+    meas_kappas = measurement_batch_kappas(measurement_batch)  # (N_total,)
+    valid_mask = measurement_batch.valid_mask.astype(jnp.float64)  # (N_total,)
 
-    # Covariances from info form
-    Lambda_reg = measurement_batch.Lambdas + eps_lift * jnp.eye(3, dtype=jnp.float64)[None, :, :]
-    meas_covariances = np.array(jax.vmap(jnp.linalg.inv)(Lambda_reg))
-
-    # Filter to valid measurements
-    valid_mask = np.array(measurement_batch.valid_mask)
-    valid_indices = np.where(valid_mask)[0][:N_meas]
-
-    meas_positions = meas_positions[valid_indices]
-    meas_directions = meas_directions[valid_indices]
-    meas_kappas = meas_kappas[valid_indices]
-    meas_covariances = meas_covariances[valid_indices]
-
-    # Map view
-    map_positions = np.array(map_view.positions)
-    map_directions = np.array(map_view.directions)
-    map_kappas = np.array(map_view.kappas)
-    map_covariances = np.array(map_view.covariances)
+    map_positions = map_view.positions
+    map_directions = map_view.directions
+    map_kappas = map_view.kappas
+    map_covariances = map_view.covariances
 
     # Generate candidates (MA hex web: hex cells + stencil, nearest k_assoc per measurement)
     hex_config = MAHexWebConfig()
-    candidate_indices = generate_candidates_ma_hex_web(
+    candidate_view_indices = generate_candidates_ma_hex_web_jax(
         meas_positions=meas_positions,
         map_positions=map_positions,
         map_covariances=map_covariances,
         k_assoc=config.k_assoc,
         config=hex_config,
     )
+    candidate_view_indices = jnp.where(
+        valid_mask[:, None] > 0.0, candidate_view_indices, 0
+    ).astype(jnp.int32)
+    candidate_slots = map_view.slot_indices[candidate_view_indices]
+    candidate_tile_ids = jnp.full(
+        candidate_slots.shape, int(map_view.tile_id), dtype=jnp.int32
+    )
 
-    # Compute sparse cost matrix
-    cost_matrix = _compute_sparse_cost_matrix(
+    # Compute sparse cost matrix (device-side)
+    cost_matrix = _compute_sparse_cost_matrix_jax(
         meas_positions=meas_positions,
-        meas_covariances=meas_covariances,
         meas_directions=meas_directions,
         meas_kappas=meas_kappas,
         map_positions=map_positions,
-        map_covariances=map_covariances,
         map_directions=map_directions,
         map_kappas=map_kappas,
-        candidate_indices=candidate_indices,
+        candidate_indices=candidate_view_indices,
         beta=config.beta,
     )
 
     # Cost normalization
     if config.cost_subtract_row_min:
-        row_min = np.min(cost_matrix, axis=1, keepdims=True)
+        row_min = jnp.min(cost_matrix, axis=1, keepdims=True)
         cost_matrix = cost_matrix - row_min
 
     if config.cost_scale_by_median:
-        C_flat = cost_matrix[np.isfinite(cost_matrix)]
-        med = float(np.median(C_flat)) if C_flat.size > 0 else 1.0
+        med = jnp.median(cost_matrix)
         cost_matrix = cost_matrix / (med + 1e-12)
 
-    # Uniform marginals
-    a = np.ones(N_meas, dtype=np.float64) / N_meas
-    b = np.ones(config.k_assoc, dtype=np.float64) / config.k_assoc
+    # Build marginals according to declared mass policies (spec §5.7.2)
+    eps_m = config.eps_mass
 
-    # Run Sinkhorn (unbalanced only; no balanced path)
-    pi = _sinkhorn_unbalanced_fixed_k(
+    # Measurement marginal 'a' based on policy
+    if config.a_policy == MeasurementMassPolicy.UNIFORM:
+        sum_a = jnp.maximum(jnp.sum(valid_mask), eps_m)
+        a = valid_mask / sum_a
+    elif config.a_policy == MeasurementMassPolicy.WEIGHT_PROPORTIONAL:
+        weighted = valid_mask * measurement_batch.weights.astype(jnp.float64)
+        sum_a = jnp.maximum(jnp.sum(weighted), eps_m)
+        a = weighted / sum_a
+    else:  # FEATURE_CONFIDENCE - fallback to uniform for now
+        sum_a = jnp.maximum(jnp.sum(valid_mask), eps_m)
+        a = valid_mask / sum_a
+
+    # Map marginal 'b' based on policy
+    if config.b_policy == MapMassPolicy.UNIFORM:
+        b = jnp.ones((config.k_assoc,), dtype=jnp.float64) / float(config.k_assoc)
+    elif config.b_policy == MapMassPolicy.PRIMITIVE_MASS:
+        # Note: candidate_indices selects per-measurement candidates; b applies globally
+        # For now, use uniform; full implementation requires per-measurement b
+        b = jnp.ones((config.k_assoc,), dtype=jnp.float64) / float(config.k_assoc)
+    else:  # MASS_TEMPERED - fallback to uniform for now
+        b = jnp.ones((config.k_assoc,), dtype=jnp.float64) / float(config.k_assoc)
+
+    sum_b = float(jnp.sum(b))
+
+    # Run Sinkhorn (unbalanced only; fixed iter; device-side)
+    pi = _sinkhorn_unbalanced_fixed_k_jax(
         C=cost_matrix,
         a=a,
         b=b,
         epsilon=config.epsilon,
         tau_a=config.tau_a,
         tau_b=config.tau_b,
-        K=config.k_sinkhorn,
+        K=int(config.k_sinkhorn),
     )
     triggers = ["sinkhorn_fixed_iter", "sinkhorn_unbalanced_kl_relax"]
 
-    # Normalize responsibilities per row (soft assignment)
-    row_masses = np.sum(pi, axis=1)
-    row_masses_safe = np.maximum(row_masses, 1e-12)
-    responsibilities = pi / row_masses_safe[:, None]
+    # Per spec §5.7.3: Use π directly as responsibilities (no row-normalization).
+    # Row-normalization would destroy the unbalanced OT semantics where
+    # row_masses = sum_k pi[i,k] encodes the transported mass per measurement.
+    # Novelty (spec §5.7.5) = declared budget - transported mass.
+    # Only mask invalid rows; do not divide by row_masses.
+    row_masses = jnp.sum(pi, axis=1)
+    responsibilities = pi * (valid_mask[:, None] > 0.0)  # Only mask invalid rows
 
-    # Pad to fixed shape (N_total, K_assoc) so flatten can be JAX-only (no host round-trip).
-    # Invalid rows get responsibilities=0, candidate_indices=0.
-    N_total = measurement_batch.n_total
-    responsibilities_full = np.zeros((N_total, config.k_assoc), dtype=np.float64)
-    responsibilities_full[valid_indices, :] = responsibilities
-    candidate_indices_full = np.zeros((N_total, config.k_assoc), dtype=np.int64)
-    candidate_indices_full[valid_indices, :] = candidate_indices
-    row_masses_full = np.zeros(N_total, dtype=np.float64)
-    row_masses_full[valid_indices] = row_masses
-    cost_matrix_full = np.zeros((N_total, config.k_assoc), dtype=np.float64)
-    cost_matrix_full[valid_indices, :] = cost_matrix
-
-    # Build result (fixed shape for JAX-only flatten)
     result = PrimitiveAssociationResult(
-        responsibilities=jnp.array(responsibilities_full, dtype=jnp.float64),
-        candidate_indices=jnp.array(candidate_indices_full, dtype=jnp.int64),
-        row_masses=jnp.array(row_masses_full, dtype=jnp.float64),
-        cost_matrix=jnp.array(cost_matrix_full, dtype=jnp.float64),
+        responsibilities=responsibilities.astype(jnp.float64),
+        candidate_tile_ids=candidate_tile_ids.astype(jnp.int64),
+        candidate_slots=candidate_slots.astype(jnp.int64),
+        row_masses=row_masses.astype(jnp.float64),
+        cost_matrix=cost_matrix.astype(jnp.float64),
+    )
+
+    # Compute OT diagnostics for cert (spec §5.7.4)
+    # Marginal defects: ||π·1 - a|| and ||π^T·1 - b||
+    col_masses = jnp.sum(pi, axis=0)  # sum over rows (measurements) for each candidate
+    marginal_defect_a = float(jnp.linalg.norm(row_masses - a))
+    marginal_defect_b = float(jnp.linalg.norm(col_masses - b))
+    transport_mass_total = float(jnp.sum(pi))
+
+    # Mass statistics for cert (spec §5.7.2)
+    n_nonzero_a = int(jnp.sum(a > eps_m))
+    n_nonzero_b = int(jnp.sum(b > eps_m))
+    # p95 of mass distributions
+    a_sorted = jnp.sort(a)
+    b_sorted = jnp.sort(b)
+    p95_idx_a = int(0.95 * len(a_sorted))
+    p95_idx_b = int(0.95 * len(b_sorted))
+    p95_a = float(a_sorted[min(p95_idx_a, len(a_sorted) - 1)])
+    p95_b = float(b_sorted[min(p95_idx_b, len(b_sorted) - 1)])
+
+    # ESS from transported mass: effective sample size of assignments
+    ess_ot = float(jnp.sum(row_masses) ** 2 / (jnp.sum(row_masses ** 2) + eps_m))
+
+    bytes_per_f64 = 8
+    alloc_bytes_est = int(N_total * config.k_assoc * bytes_per_f64 * 4)
+    compute = ComputeCert(
+        alloc_bytes_est=alloc_bytes_est,
+        largest_tensor_shape=(int(N_total), int(config.k_assoc)),
+        segment_sum_k=int(config.k_assoc),
+        psd_projection_count=0,
+        chol_solve_count=0,
     )
 
     cert = CertBundle.create_approx(
@@ -362,9 +421,34 @@ def associate_primitives_ot(
         anchor_id=anchor_id,
         triggers=triggers,
         frobenius_applied=False,
+        support=SupportCert(
+            ess_total=ess_ot,
+            support_frac=float(n_nonzero_a) / float(max(N_total, 1)),
+        ),
+        influence=InfluenceCert(
+            lift_strength=0.0,
+            psd_projection_delta=0.0,
+            mass_epsilon_ratio=float(eps_m) / (transport_mass_total + eps_m),
+            anchor_drift_rho=0.0,
+            dt_scale=1.0,
+            extrinsic_scale=1.0,
+            trust_alpha=1.0,
+        ),
+        compute=compute,
     )
+    # Store OT-specific diagnostics in cert metadata (custom fields via approximation_triggers for now)
+    # TODO: Add dedicated OTCert dataclass in future refactor
+    cert.approximation_triggers.append(f"ot_defect_a={marginal_defect_a:.6f}")
+    cert.approximation_triggers.append(f"ot_defect_b={marginal_defect_b:.6f}")
+    cert.approximation_triggers.append(f"ot_transport_mass={transport_mass_total:.6f}")
+    cert.approximation_triggers.append(f"ot_sum_a={float(sum_a):.6f}")
+    cert.approximation_triggers.append(f"ot_sum_b={sum_b:.6f}")
+    cert.approximation_triggers.append(f"ot_p95_a={p95_a:.6f}")
+    cert.approximation_triggers.append(f"ot_p95_b={p95_b:.6f}")
+    cert.approximation_triggers.append(f"ot_nonzero_a={n_nonzero_a}")
+    cert.approximation_triggers.append(f"ot_nonzero_b={n_nonzero_b}")
 
-    total_cost = float(np.sum(pi * cost_matrix))
+    total_cost = float(jnp.sum(pi * cost_matrix))
     effect = ExpectedEffect(
         objective_name="primitive_association_ot",
         predicted=total_cost,
@@ -379,65 +463,31 @@ def associate_primitives_ot(
 # =============================================================================
 
 
-def flatten_associations_for_fuse(
+def block_associations_for_fuse(
     result: PrimitiveAssociationResult,
-    measurement_batch: MeasurementBatch,
-    n_valid: int,
-    responsibility_threshold: float = 0.0,
-) -> Tuple[
-    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray
-]:
+    valid_mask: jnp.ndarray,
+    block_size: int = constants.GC_ASSOC_BLOCK_SIZE,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Flatten associations to fixed-size flat arrays for primitive_map_fuse.
-
-    Pure JAX (no host round-trip). Result has fixed shape (N_total, K_ASSOC);
-    invalid rows have responsibilities=0. We include all pairs (no hard gate);
-    responsibility_threshold=0 excludes only exactly-zero mass.
-    valid_flat marks rows that correspond to valid measurements (row < n_valid).
+    Blocked sparse representation for fuse. Fixed block size; no full flatten.
 
     Returns:
-        target_indices: (N_total * K_assoc,) map primitive indices
-        Lambdas_meas: (N_total * K_assoc, 3, 3)
-        thetas_meas: (N_total * K_assoc, 3)
-        etas_meas: (N_total * K_assoc, B, 3)
-        weights_meas: (N_total * K_assoc,)
-        responsibilities: (N_total * K_assoc,)
-        valid_flat: (N_total * K_assoc,) bool — True where row < n_valid
-        colors_meas: (N_total * K_assoc, 3) measurement RGB per flat row (for fuse color blend)
+        meas_idx: (N_blocks, block_size) measurement indices (clipped to N_total-1)
+        candidate_tile_ids: (N_blocks, block_size, K_assoc)
+        candidate_slots: (N_blocks, block_size, K_assoc)
+        responsibilities: (N_blocks, block_size, K_assoc) (invalid rows zeroed)
+        valid_rows: (N_blocks, block_size) True where row < n_valid
     """
     N_total, K_assoc = result.responsibilities.shape
-    flat_size = N_total * K_assoc
-
-    flat_idx = jnp.arange(flat_size, dtype=jnp.int32)
-    row = flat_idx // K_assoc
-    col = flat_idx % K_assoc
-
-    # Continuous: include all pairs; invalid rows have resp=0 (no arbitrary threshold)
-    resp_flat = result.responsibilities[row, col]
-    target_flat = result.candidate_indices[row, col]
-
-    # Optional: exclude exactly-zero responsibility (threshold=0) or use tiny eps
-    eps = jnp.maximum(responsibility_threshold, 1e-12)
-    include = resp_flat > eps
-    resp_flat = jnp.where(include, resp_flat, 0.0)
-
-    # Measurement data: row indexes batch (fixed layout)
-    Lambdas_flat = measurement_batch.Lambdas[row]
-    thetas_flat = measurement_batch.thetas[row]
-    etas_flat = measurement_batch.etas[row]
-    weights_flat = measurement_batch.weights[row]
-    colors_flat = measurement_batch.colors[row]  # (flat_size, 3) for fuse color blend
-
-    # Valid mask: only rows with row < n_valid correspond to real measurements
-    valid_flat = row < n_valid
-
-    return (
-        target_flat,
-        Lambdas_flat,
-        thetas_flat,
-        etas_flat,
-        weights_flat,
-        resp_flat,
-        valid_flat,
-        colors_flat,
-    )
+    block = int(max(1, block_size))
+    n_blocks = (N_total + block - 1) // block
+    idx = jnp.arange(n_blocks * block, dtype=jnp.int32)
+    meas_idx = idx.reshape(n_blocks, block)
+    meas_idx_clipped = jnp.minimum(meas_idx, N_total - 1)
+    in_range = meas_idx < N_total
+    valid_mask = jnp.asarray(valid_mask, dtype=bool).reshape(-1)
+    valid_rows = in_range & valid_mask[meas_idx_clipped]
+    candidate_tile_ids = result.candidate_tile_ids[meas_idx_clipped]
+    candidate_slots = result.candidate_slots[meas_idx_clipped]
+    responsibilities = result.responsibilities[meas_idx_clipped] * valid_rows[:, :, None]
+    return meas_idx_clipped, candidate_tile_ids, candidate_slots, responsibilities, valid_rows

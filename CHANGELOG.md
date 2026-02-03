@@ -4,6 +4,57 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-02-02: Backend params applied for primitive budgets (config mismatch fix)
+
+- Wired GC backend parameters for `n_feat`, `n_surfel`, `k_assoc`, `k_sinkhorn`, `primitive_map_max_size`, and `primitive_forgetting_factor` into `PipelineConfig` so `gc_unified.yaml` is actually honored at runtime.
+- This resolves the mismatch where the backend always used constants (512/1024) despite config reductions intended to avoid OOM.
+
+## 2026-02-03: Phase 5 config consolidation (YAML-first)
+
+- Expanded `gc_unified.yaml` to be the single source of truth for numeric epsilons, fusion conditioning, power tempering, excitation coupling, planar prior, OT params, primitive map thresholds, surfel extraction, diagnostics, and BEV flags.
+- Backend now wires these parameters into `PipelineConfig` and publishes them in the runtime manifest; added explicit fail-fast for `map_backend` and `pose_evidence_backend`.
+- Renamed `k_insert` parameter to `k_insert_tile` for per-tile budget clarity; removed unused `forgetting_factor` parameter.
+- Runtime manifest schema now includes `N_FEAT`, `N_SURFEL`, and `K_SINKHORN` fields.
+
+## 2026-02-03: Spec doc renamed to GC_SLAM.md
+
+- Renamed `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md` to `docs/GC_SLAM.md` and updated all references in README, AGENTS.md, CLAUDE.md, CHANGELOG, docs, fl_ws, and archive.
+
+## 2026-02-03: Scan I/O + device runtime certificate population
+
+- Added per-scan ScanIOCert population with per-stream window/capacity/drop stats (lidar, IMU, camera, odom).
+- Added best-effort DeviceRuntimeCert population for host/device transfer bytes, host sync counts, and JIT recompile estimates.
+- Instrumented lidar surfel extraction and timing syncs to contribute to runtime counters.
+- Updated GC_SLAM compute certificate spec to include `scan_io` and `device_runtime`.
+
+## 2026-02-03: Streaming fuse to avoid K-sized intermediates (OOM mitigation)
+
+- Replaced per-association materialization in `primitive_map_fuse` with streaming scatter-add into map-sized accumulators (fixed chunk size).
+- Added `GC_FUSE_CHUNK_SIZE` constant to control fuse chunking without changing the fixed-cost contract.
+- Added JAX MA-hex web candidate generation and a blocked association representation (fixed block size) wired into map fuse to avoid full flattening.
+- Removed remaining NumPy/host transfers in primitive association: cost + unbalanced Sinkhorn now run device-side in JAX (fixed-K, no convergence check).
+- Added a startup JAX warmup pass (optional via `warmup_enable`) to precompile association + fuse without mutating priors/state.
+- Splat export now includes per-primitive timestamps and IDs; post-run Rerun builder replays ellipsoids over time when timestamps are available.
+- Added `created_timestamps` to PrimitiveMap and export so post-run playback can show when splats first appeared (not when they were last updated).
+- Map updates are now additive: a fixed-budget novelty insertion runs every scan (replaces legacy "insert only when map empty").
+
+## 2026-02-03: M3DGR legacy cleanup + YAML fixups
+
+- Updated test fixtures to use `gc_unified.yaml` (removed references to missing M3DGR preset/base/manifest files).
+- Switched tool defaults and integration test to Kimera bag paths and `gc_rosbag.launch.py`.
+- Removed deprecated `gc_backend.yaml` from install data_files.
+- Updated M3DGR-specific docstrings/defaults in tooling to Kimera.
+
+## 2026-02-03: Import surface consolidation (operators/structures)
+
+- Added required re-exports in `backend/operators/__init__.py` and `backend/structures/__init__.py` for pipeline/backend_node use.
+- Switched `pipeline.py` and `backend_node.py` to import from package-level operators/structures.
+- Removed lazy imports in backend_node for measurement batch and primitive map view (single import surface).
+
+## 2026-02-03: Archive ROADMAP.md
+
+- Moved ROADMAP.md to archive and removed references from active docs.
+
 ## 2026-02-02: BEV15 future scaffolds + exact vMF view pushforward + Rerun RGBD/LiDAR
 
 - Kept BEV15 in the spec as a future view-layer target; clarified that vMF pushforward under view rotation is exact (`η' = R η`) and no S¹ collapse is used.
@@ -38,7 +89,7 @@ This file tracks all significant changes, design decisions, and implementation m
 
 ## 2026-02-02: Reality-aligned GC v2 interface spec (legacy purge)
 
-- Rewrote `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md` to match the current backend (PrimitiveMap + explicit backend selection + factor-based IMU/odom evidence + IW adaptive noise) and removed legacy descriptions that no longer reflect runtime behavior.
+- Rewrote `docs/GC_SLAM.md` to match the current backend (PrimitiveMap + explicit backend selection + factor-based IMU/odom evidence + IW adaptive noise) and removed legacy descriptions that no longer reflect runtime behavior.
 - Added a non-negotiable modeling contract section (dependent evidence, no gating/heuristics, “every raw bit” accounting) with explicit information-geometry and Frobenius/pre-Frobenius invariants, anchored to `docs/Comprehensive Information Geometry.md`.
 - Extended runtime manifest reporting to include `deskew_rotation_only` so ablation modes can’t be hidden.
 - Added certificate support for continuous “overconfidence sentinel” metrics (diagnostic-only; no gating), and populated them in fusion-scale certificates.
@@ -84,7 +135,7 @@ This file tracks all significant changes, design decisions, and implementation m
 
 ## 2026-02-02: Rename Golden Child → Geometric Compositional
 
-- **Spec:** `docs/GOLDEN_CHILD_INTERFACE_SPEC.md` renamed to `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`; all internal and cross-repo references updated.
+- **Spec:** `docs/GOLDEN_CHILD_INTERFACE_SPEC.md` renamed to `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`; all internal and cross-repo references updated. (Later renamed to `docs/GC_SLAM.md` 2026-02-03.)
 - **Backend:** Class `GoldenChildBackend` renamed to `GeometricCompositionalBackend` in `backend_node.py`; entry point script and docs updated.
 - **Tests:** `test_golden_child_invariants.py` renamed to `test_geometric_compositional_invariants.py`; PRODUCTION_READINESS and CHANGELOG references updated.
 - **Prose:** All "Golden Child" / "GOLDEN CHILD" / "GoldenChild" prose and identifiers replaced with "Geometric Compositional" / "GEOMETRIC COMPOSITIONAL" / "GeometricCompositional" across docs, config, tools, and archive. GC prefix (gc_backend, gc_rosbag, etc.) unchanged.
@@ -669,7 +720,7 @@ This diagnostic helps pinpoint the root cause of yaw sign mismatches that cause 
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/structures/inverse_wishart_jax.py`: process-noise block ordering and priors updated for `[trans, rot]`.
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/operators/map_update.py`: pose covariance extraction updated.
 - `fl_ws/src/fl_slam_poc/fl_slam_poc/backend/pipeline.py`: diagnostics block ordering updated to `[trans, rot]`.
-- `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`: state ordering table updated to `[trans, rot]`.
+- `docs/GC_SLAM.md`: state ordering table updated to `[trans, rot]`.
 - `docs/FRAME_AND_QUATERNION_CONVENTIONS.md`, `docs/Fusion_issues.md`, `docs/CODE_DIFF_SUMMARY.md`, `tools/DIAGNOSTIC_TOOLS.md`: documentation updated to the unified convention.
 - `tools/diagnose_coordinate_frames.py`: odom covariance ordering analysis updated for ROS-standard vs legacy-permuted ordering.
 - `tools/slam_dashboard.py`: pose heatmap labels updated to `[trans, rot]`.
@@ -1133,7 +1184,7 @@ Archived legacy constants and tightened runtime wiring to prevent confusing mult
 
 ### Reference
 
-docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md - Full specification
+docs/GC_SLAM.md - Full specification
 
 ---
 

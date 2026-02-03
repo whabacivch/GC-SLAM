@@ -329,7 +329,7 @@ If `Σ_eff,b = Σ_sensor + Σ_motion,b` is used in the likelihood, decide explic
 - Conservative (simple): update IW on residuals under `Σ_eff,b` (can over-inflate sensor noise).
 - Better (explicit approximation + certified): treat `Σ_motion,b` as known additive covariance and update IW for `Σ_sensor` using a corrected sufficient statistic (with a DomainProjection to SPD).
 
-This choice changes the model class and must be documented in `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md` terms (family in/out, approximation triggers, Frobenius applied).
+This choice changes the model class and must be documented in `docs/GC_SLAM.md` terms (family in/out, approximation triggers, Frobenius applied).
 
 ---
 

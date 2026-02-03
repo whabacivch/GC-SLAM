@@ -3,7 +3,7 @@ Binning operators for Geometric Compositional SLAM v2.
 
 Soft assignment and moment matching for directional bins.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Sections 5.4, 5.5
+Reference: docs/GC_SLAM.md Sections 5.4, 5.5
 """
 
 from __future__ import annotations

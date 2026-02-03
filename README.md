@@ -1,8 +1,8 @@
-# Frobenius-Legendre SLAM POC (Impact Project v1)
+# Geometric Compositional SLAM 
 
 **Compositional inference for dynamic SLAM using information‑geometric methods.**
 
-Embracing uncertainty is a cornerstone of robust robotics and SLAM: we use principled tools (Inverse‑Wishart adaptive noise, Frobenius corrections for approximations, information‑form fusion) so the system can adapt amid conflicting data rather than assuming perfect models.
+Embracing uncertainty is a cornerstone of robust robotics and SLAM: we use principled tools (Inverse‑Wishart adaptive noise, Frobenius corrections for approximations, information‑form fusion) so the system can adapt amid conflicting data rather than assuming perfect models. GC SLAM  is a geometric compositional system in which global structure, topology, and semantic understanding emerge from the algebraic composition of local information-geometric primitives, without discrete control flow or heuristic gating.
 
 ---
 
@@ -28,9 +28,7 @@ Embracing uncertainty is a cornerstone of robust robotics and SLAM: we use princ
 
 ## Visuals
 
-![Platform](docs/car.jpg)
-
-![Dead‑reckon path (raw data sanity check)](docs/raw_sensor_dump/dead_reckon_path.png)
+#fill in later with renders
 
 ---
 
@@ -205,10 +203,9 @@ Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for cu
 |-----|-------------|
 | **[AGENTS.md](AGENTS.md)** | Project invariants, quickstart, canonical references |
 | **[CHANGELOG.md](CHANGELOG.md)** | History and design decisions |
-| **[ROADMAP.md](ROADMAP.md)** | Priorities and planned work |
 | **docs/BAG_TOPICS_AND_USAGE.md** | Bag topics and pipeline usage (canonical) |
 | **docs/PIPELINE_TRACE_SINGLE_DOC.md** | Single pipeline trace: value-as-object, spine, IMU/odom/LiDAR, belief/IW, z/performance |
-| **docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md** | GC v2 interface and operator contracts |
+| **docs/GC_SLAM.md** | GC v2 interface and operator contracts |
 | **docs/IMU_BELIEF_MAP_AND_FUSION.md** | Pipeline reference: topics, steps, evidence, fusion |
 | **docs/FRAME_AND_QUATERNION_CONVENTIONS.md** | Frames, quaternions, SE(3) |
 | **docs/PIPELINE_DESIGN_GAPS.md** | Known limitations (cross-sensor consistency, unused covariances, nonlinear approximations) |
@@ -237,9 +234,6 @@ pip install -r requirements.txt
 
 ## References
 
-- Amari & Nagaoka (2000): *Methods of Information Geometry*
-- Barfoot (2017): *State Estimation for Robotics*
-- Forster et al. (2017): "On-Manifold Preintegration for Real-Time Visual-Inertial Odometry" (TRO)
 
 ---
 

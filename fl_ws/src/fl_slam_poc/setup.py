@@ -18,7 +18,6 @@ setup(
         (
             "share/" + package_name + "/config",
             [
-                "config/gc_backend.yaml",
                 "config/gc_dead_end_audit.yaml",
                 "config/gc_unified.yaml",
             ],

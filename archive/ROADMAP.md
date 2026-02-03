@@ -36,7 +36,7 @@ This roadmap is organized around the **Geometric Compositional SLAM v2** impleme
 
 ## Immediate Priority: Hardening & Design Gaps
 
-**Goal:** Align with full spec (`docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`), close remaining design gaps in `docs/PIPELINE_DESIGN_GAPS.md`, and improve robustness/metrics.
+**Goal:** Align with full spec (`docs/GC_SLAM.md`), close remaining design gaps in `docs/PIPELINE_DESIGN_GAPS.md`, and improve robustness/metrics.
 
 ### Done (current pipeline)
 - **IW process + measurement + LiDAR bucket**: Per-block IW states; readiness weights (no gates); datasheet priors; updates every scan. Files: `backend/structures/inverse_wishart_jax.py`, `operators/measurement_noise_iw_jax.py`, `operators/lidar_bucket_noise_iw_jax.py`, `operators/inverse_wishart_jax.py`.

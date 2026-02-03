@@ -7,7 +7,7 @@ Always uses lifted solve.
 Fully vectorized over bins - no Python for-loops in hot path.
 Uses Cholesky-based inverse (not jnp.linalg.inv).
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.8
+Reference: docs/GC_SLAM.md Section 5.8
 """
 
 from __future__ import annotations

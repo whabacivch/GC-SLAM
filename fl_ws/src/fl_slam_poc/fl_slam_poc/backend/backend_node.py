@@ -4,7 +4,7 @@ Geometric Compositional SLAM v2 Backend Node.
 Actually uses the GC operators to process LiDAR scans.
 This is NOT passthrough - it runs the full 14-step pipeline.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md
+Reference: docs/GC_SLAM.md
 """
 
 import json
@@ -37,8 +37,16 @@ from fl_slam_poc.common.belief import (
     se3_inverse,
 )
 from fl_slam_poc.common.geometry import se3_jax
-from fl_slam_poc.common.certificates import CertBundle
+from fl_slam_poc.common.certificates import CertBundle, ScanIOCert, DeviceRuntimeCert
 from fl_slam_poc.common.certificates import InfluenceCert, aggregate_certificates
+from fl_slam_poc.common.runtime_counters import (
+    reset_runtime_counters,
+    record_host_to_device,
+    record_device_to_host,
+    record_jit_recompile,
+    consume_runtime_counters,
+)
+from fl_slam_poc.common.ma_hex_web import generate_candidates_ma_hex_web_jax, MAHexWebConfig
 from fl_slam_poc.backend.pipeline import (
     PipelineConfig,
     RuntimeManifest,
@@ -46,32 +54,38 @@ from fl_slam_poc.backend.pipeline import (
     process_hypotheses,
     ScanPipelineResult,
 )
-from fl_slam_poc.backend.structures.inverse_wishart_jax import (
+from fl_slam_poc.backend.structures import (
+    AtlasMap,
+    create_empty_atlas_map,
+    extract_primitive_map_view,
+    create_empty_measurement_batch,
     ProcessNoiseIWState,
     create_datasheet_process_noise_state,
-)
-from fl_slam_poc.backend.operators.inverse_wishart_jax import (
-    process_noise_state_to_Q_jax,
-    process_noise_iw_apply_suffstats_jax,
-)
-from fl_slam_poc.backend.structures.measurement_noise_iw_jax import (
     MeasurementNoiseIWState,
     create_datasheet_measurement_noise_state,
+    primitive_map_fuse,
 )
-from fl_slam_poc.backend.operators.measurement_noise_iw_jax import (
+from fl_slam_poc.backend.operators import (
+    process_noise_state_to_Q_jax,
+    process_noise_iw_apply_suffstats_jax,
     measurement_noise_mean_jax,
     measurement_noise_apply_suffstats_jax,
 )
 from fl_slam_poc.backend.diagnostics import DiagnosticsLog
 
-# Stage 1: PrimitiveMap imports
-from fl_slam_poc.backend.structures.primitive_map import (
-    PrimitiveMap,
-    create_empty_primitive_map,
-)
 from fl_slam_poc.backend.map_publisher import PrimitiveMapPublisher
 from fl_slam_poc.backend.rerun_visualizer import RerunVisualizer
 from fl_slam_poc.backend.camera_batch_utils import feature_list_to_camera_batch
+from fl_slam_poc.backend.structures.measurement_batch import (
+    MeasurementBatch,
+    measurement_batch_mean_positions,
+    measurement_batch_mean_directions,
+    measurement_batch_kappas,
+)
+from fl_slam_poc.backend.operators.primitive_association import (
+    _compute_sparse_cost_matrix_jax,
+    _sinkhorn_unbalanced_fixed_k_jax,
+)
 from fl_slam_poc.frontend.sensors.visual_feature_extractor import (
     VisualFeatureExtractor,
     VisualFeatureExtractorConfig,
@@ -300,6 +314,11 @@ def parse_pointcloud2_vlp16(
     w = w_raw * (1.0 - wf) + wf
 
     pts = np.stack([x, y, z], axis=1)
+    record_host_to_device(pts)
+    record_host_to_device(t)
+    record_host_to_device(w)
+    record_host_to_device(ring)
+    record_host_to_device(tag)
     return (
         jnp.array(pts, dtype=jnp.float64),
         jnp.array(t, dtype=jnp.float64),
@@ -338,7 +357,6 @@ class GeometricCompositionalBackend(Node):
         self.declare_parameter("diagnostics_export_path", "results/gc_slam_diagnostics.npz")
         self.declare_parameter("splat_export_path", "")
         self.declare_parameter("status_check_period_sec", 5.0)
-        self.declare_parameter("forgetting_factor", 0.99)
         # No-TF extrinsics (T_{base<-sensor}) in [x, y, z, rx, ry, rz] rotvec (radians).
         # extrinsics_source: inline | file. When file: load from T_base_lidar_file, T_base_imu_file (fail if missing).
         self.declare_parameter("extrinsics_source", "inline")
@@ -360,6 +378,54 @@ class GeometricCompositionalBackend(Node):
         self.declare_parameter("deskew_rotation_only", False)
         # Timing/profiling
         self.declare_parameter("enable_timing", False)
+        # JAX warmup (compile before first scan; no state mutation)
+        self.declare_parameter("warmup_enable", True)
+        # Numerical epsilons (domain stabilization)
+        self.declare_parameter("eps_psd", constants.GC_EPS_PSD)
+        self.declare_parameter("eps_lift", constants.GC_EPS_LIFT)
+        self.declare_parameter("eps_mass", constants.GC_EPS_MASS)
+        # Fusion conditioning
+        self.declare_parameter("alpha_min", constants.GC_ALPHA_MIN)
+        self.declare_parameter("alpha_max", constants.GC_ALPHA_MAX)
+        self.declare_parameter("kappa_scale", constants.GC_KAPPA_SCALE)
+        self.declare_parameter("c0_cond", constants.GC_C0_COND)
+        # Power tempering
+        self.declare_parameter("power_beta_min", 0.25)
+        self.declare_parameter("power_beta_exc_c", 50.0)
+        self.declare_parameter("power_beta_z_c", 1.0)
+        # Excitation coupling
+        self.declare_parameter("c_dt", constants.GC_C_DT)
+        self.declare_parameter("c_ex", constants.GC_C_EX)
+        self.declare_parameter("c_frob", constants.GC_C_FROB)
+        # Planar prior (soft constraints)
+        self.declare_parameter("planar_z_ref", constants.GC_PLANAR_Z_REF)
+        self.declare_parameter("planar_z_sigma", constants.GC_PLANAR_Z_SIGMA)
+        self.declare_parameter("planar_vz_sigma", constants.GC_PLANAR_VZ_SIGMA)
+        self.declare_parameter("enable_planar_prior", True)
+        # Odom twist evidence
+        self.declare_parameter("enable_odom_twist", True)
+        self.declare_parameter("odom_twist_vel_sigma", constants.GC_ODOM_TWIST_VEL_SIGMA)
+        self.declare_parameter("odom_twist_wz_sigma", constants.GC_ODOM_TWIST_WZ_SIGMA)
+        self.declare_parameter("odom_z_variance_prior", constants.GC_ODOM_Z_VARIANCE_PRIOR)
+        # Association OT params
+        self.declare_parameter("ot_epsilon", 0.1)
+        self.declare_parameter("ot_tau_a", 0.5)
+        self.declare_parameter("ot_tau_b", 0.5)
+        # PrimitiveMap + association budgets (fixed-cost)
+        self.declare_parameter("n_feat", constants.GC_N_FEAT)
+        self.declare_parameter("n_surfel", constants.GC_N_SURFEL)
+        self.declare_parameter("k_assoc", constants.GC_K_ASSOC)
+        self.declare_parameter("k_sinkhorn", constants.GC_K_SINKHORN)
+        self.declare_parameter("primitive_map_max_size", constants.GC_PRIMITIVE_MAP_MAX_SIZE)
+        self.declare_parameter("primitive_forgetting_factor", constants.GC_PRIMITIVE_FORGETTING_FACTOR)
+        self.declare_parameter("k_insert_tile", constants.GC_K_INSERT_TILE)
+        self.declare_parameter("primitive_merge_threshold", constants.GC_PRIMITIVE_MERGE_THRESHOLD)
+        self.declare_parameter("primitive_cull_weight_threshold", constants.GC_PRIMITIVE_CULL_WEIGHT_THRESHOLD)
+        # Surfel extraction config
+        self.declare_parameter("surfel_voxel_size_m", 0.1)
+        self.declare_parameter("surfel_min_points_per_voxel", 3)
+        # Diagnostics
+        self.declare_parameter("save_full_diagnostics", False)
         # Smoothed initial reference: buffer first K odom, then set first_odom_pose = aggregate (PIPELINE_DESIGN_GAPS §5.4.1)
         self.declare_parameter("init_window_odom_count", 10)
         # PointCloud2 layout: vlp16 (Kimera/VLP-16). See docs/POINTCLOUD2_LAYOUTS.md.
@@ -375,11 +441,93 @@ class GeometricCompositionalBackend(Node):
         self.declare_parameter("use_rerun", True)
         self.declare_parameter("rerun_recording_path", "")
         self.declare_parameter("rerun_spawn", False)
+        # Manifest-only flags (view layer)
+        self.declare_parameter("bev_backend_enabled", False)
+        self.declare_parameter("bev_views_n", 0)
+        # Explicit backend selection (single-path)
+        self.declare_parameter("map_backend", constants.GC_MAP_BACKEND_PRIMITIVE_MAP)
+        self.declare_parameter("pose_evidence_backend", constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES)
 
     def _init_state(self):
         """Initialize Geometric Compositional state."""
         # Pipeline configuration
         self.config = PipelineConfig()
+
+        # Apply fixed-cost budgets from parameters (single source: config yaml)
+        self.config.n_feat = int(self.get_parameter("n_feat").value)
+        self.config.n_surfel = int(self.get_parameter("n_surfel").value)
+        self.config.k_assoc = int(self.get_parameter("k_assoc").value)
+        self.config.k_sinkhorn = int(self.get_parameter("k_sinkhorn").value)
+        self.config.k_insert_tile = int(self.get_parameter("k_insert_tile").value)
+        self.config.primitive_map_max_size = int(self.get_parameter("primitive_map_max_size").value)
+        self.config.primitive_forgetting_factor = float(
+            self.get_parameter("primitive_forgetting_factor").value
+        )
+        # Keep config budgets consistent for diagnostics/manifesting
+        self.config.N_FEAT = int(self.config.n_feat)
+        self.config.N_SURFEL = int(self.config.n_surfel)
+        self.config.K_SINKHORN = int(self.config.k_sinkhorn)
+
+        # Numerical epsilons
+        self.config.eps_psd = float(self.get_parameter("eps_psd").value)
+        self.config.eps_lift = float(self.get_parameter("eps_lift").value)
+        self.config.eps_mass = float(self.get_parameter("eps_mass").value)
+        # Fusion conditioning
+        self.config.alpha_min = float(self.get_parameter("alpha_min").value)
+        self.config.alpha_max = float(self.get_parameter("alpha_max").value)
+        self.config.kappa_scale = float(self.get_parameter("kappa_scale").value)
+        self.config.c0_cond = float(self.get_parameter("c0_cond").value)
+        # Power tempering
+        self.config.power_beta_min = float(self.get_parameter("power_beta_min").value)
+        self.config.power_beta_exc_c = float(self.get_parameter("power_beta_exc_c").value)
+        self.config.power_beta_z_c = float(self.get_parameter("power_beta_z_c").value)
+        # Excitation coupling
+        self.config.c_dt = float(self.get_parameter("c_dt").value)
+        self.config.c_ex = float(self.get_parameter("c_ex").value)
+        self.config.c_frob = float(self.get_parameter("c_frob").value)
+        # Planar prior
+        self.config.planar_z_ref = float(self.get_parameter("planar_z_ref").value)
+        self.config.planar_z_sigma = float(self.get_parameter("planar_z_sigma").value)
+        self.config.planar_vz_sigma = float(self.get_parameter("planar_vz_sigma").value)
+        self.config.enable_planar_prior = bool(self.get_parameter("enable_planar_prior").value)
+        # Odom twist evidence
+        self.config.enable_odom_twist = bool(self.get_parameter("enable_odom_twist").value)
+        self.config.odom_twist_vel_sigma = float(self.get_parameter("odom_twist_vel_sigma").value)
+        self.config.odom_twist_wz_sigma = float(self.get_parameter("odom_twist_wz_sigma").value)
+        self.odom_z_variance_prior = float(self.get_parameter("odom_z_variance_prior").value)
+        # OT params
+        self.config.ot_epsilon = float(self.get_parameter("ot_epsilon").value)
+        self.config.ot_tau_a = float(self.get_parameter("ot_tau_a").value)
+        self.config.ot_tau_b = float(self.get_parameter("ot_tau_b").value)
+        # Primitive map thresholds
+        self.config.primitive_merge_threshold = float(
+            self.get_parameter("primitive_merge_threshold").value
+        )
+        self.config.primitive_cull_weight_threshold = float(
+            self.get_parameter("primitive_cull_weight_threshold").value
+        )
+        # Surfel extraction
+        self.config.surfel_voxel_size_m = float(self.get_parameter("surfel_voxel_size_m").value)
+        self.config.surfel_min_points_per_voxel = int(
+            self.get_parameter("surfel_min_points_per_voxel").value
+        )
+        # Diagnostics
+        self.config.save_full_diagnostics = bool(self.get_parameter("save_full_diagnostics").value)
+
+        # Explicit backend selection (single-path, fail-fast)
+        self.map_backend = str(self.get_parameter("map_backend").value).strip()
+        self.pose_evidence_backend = str(self.get_parameter("pose_evidence_backend").value).strip()
+        if self.map_backend != constants.GC_MAP_BACKEND_PRIMITIVE_MAP:
+            raise ValueError(
+                f"map_backend must be {constants.GC_MAP_BACKEND_PRIMITIVE_MAP!r}; got {self.map_backend!r}"
+            )
+        if self.pose_evidence_backend != constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES:
+            raise ValueError(
+                f"pose_evidence_backend must be {constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES!r}; "
+                f"got {self.pose_evidence_backend!r}"
+            )
+        self.bev_backend_enabled = bool(self.get_parameter("bev_backend_enabled").value)
+        self.bev_views_n = int(self.get_parameter("bev_views_n").value)
         
         # Adaptive process noise IW state (datasheet priors) + derived Q
         self.process_noise_state: ProcessNoiseIWState = create_datasheet_process_noise_state()
@@ -392,16 +540,18 @@ class GeometricCompositionalBackend(Node):
         )
         self.config.Sigma_meas = measurement_noise_mean_jax(self.measurement_noise_state, idx=2)
 
-        self.forgetting_factor = float(self.get_parameter("forgetting_factor").value)
-
-        # PrimitiveMap is the canonical map (single-path primitives)
-        self.primitive_map = create_empty_primitive_map(
-            max_size=self.config.primitive_map_max_size,
+        # AtlasMap is the canonical map (single-path primitives; single tile in Phase 2.1)
+        self.primitive_map = create_empty_atlas_map(
+            m_tile=self.config.primitive_map_max_size,
         )
         self.get_logger().info(
-            f"PrimitiveMap initialized: max_size={self.config.primitive_map_max_size}, "
+            f"AtlasMap initialized: m_tile={self.config.primitive_map_max_size}, "
             f"n_feat={self.config.n_feat}, n_surfel={self.config.n_surfel}"
         )
+
+        # Optional JAX warmup to reduce first-scan latency (no state mutation).
+        if bool(self.get_parameter("warmup_enable").value):
+            self._jit_warmup_primitives()
 
         # Parse and cache no-TF extrinsics (inline or from file; fail-fast if file missing when source=file).
         extrinsics_source = str(self.get_parameter("extrinsics_source").value).strip().lower()
@@ -454,6 +604,7 @@ class GeometricCompositionalBackend(Node):
             raise ValueError("ringbuf_len must be >= 1; got %d" % ringbuf_len)
         self.camera_ringbuf: List[Tuple[float, np.ndarray, np.ndarray]] = []  # (stamp_sec, rgb, depth)
         self.camera_ringbuf_max = ringbuf_len
+        self.camera_drop_count = 0
         self.get_logger().info(
             "Camera: K=[fx=%s fy=%s cx=%s cy=%s], T_base_camera cached, ringbuf_len=%d"
             % (camera_K[0], camera_K[1], camera_K[2], camera_K[3], ringbuf_len)
@@ -519,6 +670,106 @@ class GeometricCompositionalBackend(Node):
         self.last_odom_stamp = 0.0
         self.last_odom_cov_se3 = None  # (6,6) in [x,y,z,roll,pitch,yaw] ~ [trans, rotvec]
 
+    def _jit_warmup_primitives(self) -> None:
+        """Warm up JAX compile for association + fuse without mutating state."""
+        t0 = time.perf_counter()
+        n_feat = int(self.config.n_feat)
+        n_surfel = int(self.config.n_surfel)
+        k_assoc = int(self.config.k_assoc)
+
+        batch = create_empty_measurement_batch(n_feat=n_feat, n_surfel=n_surfel)
+        Lambdas = batch.Lambdas.at[0].set(jnp.eye(3, dtype=jnp.float64))
+        thetas = batch.thetas.at[0].set(jnp.zeros((3,), dtype=jnp.float64))
+        etas = batch.etas.at[0, 0].set(jnp.array([1.0, 0.0, 0.0], dtype=jnp.float64))
+        weights = batch.weights.at[0].set(1.0)
+        valid_mask = batch.valid_mask.at[0].set(True)
+        timestamps = batch.timestamps.at[0].set(0.0)
+        colors = batch.colors.at[0].set(jnp.array([0.5, 0.5, 0.5], dtype=jnp.float64))
+
+        batch = MeasurementBatch(
+            Lambdas=Lambdas,
+            thetas=thetas,
+            etas=etas,
+            weights=weights,
+            sources=batch.sources,
+            source_indices=batch.source_indices,
+            valid_mask=valid_mask,
+            timestamps=timestamps,
+            colors=colors,
+            n_feat=batch.n_feat,
+            n_surfel=batch.n_surfel,
+            n_camera_valid=1,
+            n_lidar_valid=0,
+        )
+
+        meas_positions = measurement_batch_mean_positions(batch, eps_lift=self.config.eps_lift)
+        meas_directions = measurement_batch_mean_directions(batch, eps_mass=self.config.eps_mass)
+        meas_kappas = measurement_batch_kappas(batch)
+
+        map_positions = jnp.zeros((1, 3), dtype=jnp.float64)
+        map_directions = jnp.array([[1.0, 0.0, 0.0]], dtype=jnp.float64)
+        map_kappas = jnp.array([1.0], dtype=jnp.float64)
+        map_covariances = jnp.eye(3, dtype=jnp.float64)[None, :, :]
+
+        candidate_indices = generate_candidates_ma_hex_web_jax(
+            meas_positions=meas_positions,
+            map_positions=map_positions,
+            map_covariances=map_covariances,
+            k_assoc=k_assoc,
+            config=MAHexWebConfig(),
+        )
+        candidate_indices = jnp.where(batch.valid_mask[:, None], candidate_indices, 0).astype(jnp.int32)
+
+        cost_matrix = _compute_sparse_cost_matrix_jax(
+            meas_positions=meas_positions,
+            meas_directions=meas_directions,
+            meas_kappas=meas_kappas,
+            map_positions=map_positions,
+            map_directions=map_directions,
+            map_kappas=map_kappas,
+            candidate_indices=candidate_indices,
+        )
+        a = batch.valid_mask.astype(jnp.float64)
+        a = a / jnp.maximum(jnp.sum(a), 1e-12)
+        b = jnp.ones((k_assoc,), dtype=jnp.float64) / float(k_assoc)
+        _sinkhorn_unbalanced_fixed_k_jax(
+            C=cost_matrix,
+            a=a,
+            b=b,
+            epsilon=0.1,
+            tau_a=0.5,
+            tau_b=0.5,
+            K=int(self.config.k_sinkhorn),
+        )
+
+        block = min(constants.GC_ASSOC_BLOCK_SIZE, batch.n_total)
+        K_flat = int(block * k_assoc)
+        target_slots = jnp.zeros((K_flat,), dtype=jnp.int32)
+        Lambdas_meas = jnp.tile(jnp.eye(3, dtype=jnp.float64)[None, :, :], (K_flat, 1, 1))
+        thetas_meas = jnp.zeros((K_flat, 3), dtype=jnp.float64)
+        etas_meas = jnp.zeros((K_flat, constants.GC_VMF_N_LOBES, 3), dtype=jnp.float64)
+        weights_meas = jnp.ones((K_flat,), dtype=jnp.float64)
+        responsibilities = jnp.ones((K_flat,), dtype=jnp.float64)
+        valid_flat = jnp.ones((K_flat,), dtype=bool)
+        colors_meas = jnp.zeros((K_flat, 3), dtype=jnp.float64)
+
+        _ = primitive_map_fuse(
+            atlas_map=self.primitive_map,
+            tile_id=0,
+            target_slots=target_slots,
+            Lambdas_meas=Lambdas_meas,
+            thetas_meas=thetas_meas,
+            etas_meas=etas_meas,
+            weights_meas=weights_meas,
+            responsibilities=responsibilities,
+            timestamp=0.0,
+            valid_mask=valid_flat,
+            colors_meas=colors_meas,
+            eps_mass=self.config.eps_mass,
+        )
+        dt = time.perf_counter() - t0
+        self.get_logger().info(f"JAX warmup complete: {dt:.3f}s")
+
         # Odometry twist (velocity) for kinematic coupling
         # Initialize to zeros with huge covariance (negligible precision).
         # By construction, this means "no information" without needing a gate.
@@ -538,6 +789,9 @@ class GeometricCompositionalBackend(Node):
         # Previous value of 200 only covered 1s, causing dt_int ≈ 0 for most scans!
         self.imu_buffer: List[Tuple[float, jnp.ndarray, jnp.ndarray]] = []
         self.max_imu_buffer = 4000  # Covers ~20s at 200Hz IMU rate
+        self.imu_drop_count = 0
+        self.lidar_drop_count = 0
+        self.odom_drop_count = 0
         
         # Tracking
         self.imu_count = 0
@@ -546,6 +800,9 @@ class GeometricCompositionalBackend(Node):
         self.pipeline_runs = 0
         self.last_scan_stamp = 0.0
         self.node_start_time = time.time()
+
+        # Best-effort JIT shape signature cache for recompilation estimates.
+        self._jit_signature_cache: set[tuple] = set()
         
         # Certificate history
         self.cert_history: List[CertBundle] = []
@@ -558,6 +815,120 @@ class GeometricCompositionalBackend(Node):
 
         # Deferred publish: drain at start of next callback so pipeline hot path doesn't block on ROS
         self._pending_publish: Optional[Tuple[jnp.ndarray, float]] = None
+
+    def _buffer_time_window(self, buffer: list, time_index: int = 0) -> tuple[float, float, float]:
+        if not buffer:
+            return 0.0, 0.0, 0.0
+        stamps = [float(entry[time_index]) for entry in buffer]
+        return float(min(stamps)), float(max(stamps)), float(stamps[-1])
+
+    def _stream_stats(
+        self,
+        *,
+        buffer_len: int,
+        buffer_max: int,
+        drops_total: int,
+        window_start_sec: float,
+        window_end_sec: float,
+        last_stamp_sec: float,
+    ) -> dict:
+        return {
+            "buffer_len": float(buffer_len),
+            "buffer_max": float(buffer_max),
+            "drops_total": float(drops_total),
+            "window_start_sec": float(window_start_sec),
+            "window_end_sec": float(window_end_sec),
+            "last_stamp_sec": float(last_stamp_sec),
+        }
+
+    def _build_scan_io_cert(
+        self,
+        *,
+        scan_seq: int,
+        scan_stamp_sec: float,
+        scan_window_start_sec: float,
+        scan_window_end_sec: float,
+        n_lidar_points: int,
+    ) -> ScanIOCert:
+        imu_start, imu_end, imu_last = self._buffer_time_window(self.imu_buffer)
+        cam_start, cam_end, cam_last = self._buffer_time_window(self.camera_ringbuf)
+        odom_last = float(self.last_odom_stamp) if self.last_odom_stamp > 0.0 else 0.0
+        odom_len = 1 if self.last_odom_stamp > 0.0 else 0
+        streams = {
+            "lidar": self._stream_stats(
+                buffer_len=n_lidar_points,
+                buffer_max=int(self.config.N_POINTS_CAP),
+                drops_total=self.lidar_drop_count,
+                window_start_sec=scan_window_start_sec,
+                window_end_sec=scan_window_end_sec,
+                last_stamp_sec=scan_stamp_sec,
+            ),
+            "imu": self._stream_stats(
+                buffer_len=len(self.imu_buffer),
+                buffer_max=self.max_imu_buffer,
+                drops_total=self.imu_drop_count,
+                window_start_sec=imu_start,
+                window_end_sec=imu_end,
+                last_stamp_sec=imu_last,
+            ),
+            "camera_rgbd": self._stream_stats(
+                buffer_len=len(self.camera_ringbuf),
+                buffer_max=self.camera_ringbuf_max,
+                drops_total=self.camera_drop_count,
+                window_start_sec=cam_start,
+                window_end_sec=cam_end,
+                last_stamp_sec=cam_last,
+            ),
+            "odom": self._stream_stats(
+                buffer_len=odom_len,
+                buffer_max=1,
+                drops_total=self.odom_drop_count,
+                window_start_sec=odom_last,
+                window_end_sec=odom_last,
+                last_stamp_sec=odom_last,
+            ),
+        }
+        return ScanIOCert(
+            scan_seq=int(scan_seq),
+            scan_stamp_sec=float(scan_stamp_sec),
+            scan_window_start_sec=float(scan_window_start_sec),
+            scan_window_end_sec=float(scan_window_end_sec),
+            streams=streams,
+        )
+
+    def _record_jit_signature(
+        self,
+        *,
+        points: jnp.ndarray,
+        timestamps: jnp.ndarray,
+        weights: jnp.ndarray,
+        ring: jnp.ndarray,
+        tag: jnp.ndarray,
+        imu_stamps: np.ndarray,
+        imu_gyro: np.ndarray,
+        imu_accel: np.ndarray,
+        camera_batch: MeasurementBatch,
+    ) -> None:
+        signature = (
+            ("points", tuple(points.shape), str(points.dtype)),
+            ("timestamps", tuple(timestamps.shape), str(timestamps.dtype)),
+            ("weights", tuple(weights.shape), str(weights.dtype)),
+            ("ring", tuple(ring.shape), str(ring.dtype)),
+            ("tag", tuple(tag.shape), str(tag.dtype)),
+            ("imu_stamps", tuple(imu_stamps.shape), str(imu_stamps.dtype)),
+            ("imu_gyro", tuple(imu_gyro.shape), str(imu_gyro.dtype)),
+            ("imu_accel", tuple(imu_accel.shape), str(imu_accel.dtype)),
+            ("camera_Lambdas", tuple(camera_batch.Lambdas.shape), str(camera_batch.Lambdas.dtype)),
+            ("camera_thetas", tuple(camera_batch.thetas.shape), str(camera_batch.thetas.dtype)),
+            ("camera_etas", tuple(camera_batch.etas.shape), str(camera_batch.etas.dtype)),
+            ("camera_weights", tuple(camera_batch.weights.shape), str(camera_batch.weights.dtype)),
+            ("camera_valid", tuple(camera_batch.valid_mask.shape), str(camera_batch.valid_mask.dtype)),
+            ("camera_timestamps", tuple(camera_batch.timestamps.shape), str(camera_batch.timestamps.dtype)),
+            ("camera_colors", tuple(camera_batch.colors.shape), str(camera_batch.colors.dtype)),
+        )
+        if signature not in self._jit_signature_cache:
+            self._jit_signature_cache.add(signature)
+            record_jit_recompile(1)
 
     def _init_ros(self):
         """Initialize ROS interfaces."""
@@ -651,6 +1022,8 @@ class GeometricCompositionalBackend(Node):
                 self,
                 frame_id=self.odom_frame,
                 publish_ellipsoids=False,
+                eps_lift=float(self.config.eps_lift),
+                eps_mass=float(self.config.eps_mass),
                 rerun_visualizer=self.rerun_visualizer,
             )
             self.get_logger().info("PrimitiveMap publisher: /gc/map/points (PointCloud2)")
@@ -677,13 +1050,36 @@ class GeometricCompositionalBackend(Node):
     def _publish_runtime_manifest(self):
         """Publish RuntimeManifest at startup."""
         manifest = RuntimeManifest(
+            eps_psd=float(self.config.eps_psd),
+            eps_lift=float(self.config.eps_lift),
+            eps_mass=float(self.config.eps_mass),
+            alpha_min=float(self.config.alpha_min),
+            alpha_max=float(self.config.alpha_max),
+            kappa_scale=float(self.config.kappa_scale),
+            c0_cond=float(self.config.c0_cond),
+            c_dt=float(self.config.c_dt),
+            c_ex=float(self.config.c_ex),
+            c_frob=float(self.config.c_frob),
             imu_gravity_scale=float(self.config.imu_gravity_scale),
             deskew_rotation_only=bool(self.config.deskew_rotation_only),
             power_beta_min=float(self.config.power_beta_min),
             power_beta_exc_c=float(self.config.power_beta_exc_c),
             power_beta_z_c=float(self.config.power_beta_z_c),
-            pose_evidence_backend=constants.GC_POSE_EVIDENCE_BACKEND_PRIMITIVES,
-            map_backend=constants.GC_MAP_BACKEND_PRIMITIVE_MAP,
+            ot_epsilon=float(self.config.ot_epsilon),
+            ot_tau_a=float(self.config.ot_tau_a),
+            ot_tau_b=float(self.config.ot_tau_b),
+            ot_iters=int(self.config.k_sinkhorn),
+            N_POINTS_CAP=int(self.config.N_POINTS_CAP),
+            N_FEAT=int(self.config.n_feat),
+            N_SURFEL=int(self.config.n_surfel),
+            K_ASSOC=int(self.config.k_assoc),
+            K_SINKHORN=int(self.config.k_sinkhorn),
+            K_INSERT_TILE=int(self.config.k_insert_tile),
+            M_TILE=int(self.config.primitive_map_max_size),
+            bev_backend_enabled=bool(self.bev_backend_enabled),
+            bev_views_n=int(self.bev_views_n),
+            pose_evidence_backend=self.pose_evidence_backend,
+            map_backend=self.map_backend,
             topics={
                 "lidar": str(self.get_parameter("lidar_topic").value),
                 "odom": str(self.get_parameter("odom_topic").value),
@@ -736,6 +1132,7 @@ class GeometricCompositionalBackend(Node):
         # Keep buffer bounded
         if len(self.imu_buffer) > self.max_imu_buffer:
             self.imu_buffer.pop(0)
+            self.imu_drop_count += 1
 
     def on_odom(self, msg: Odometry):
         """Store latest odometry for delta computation."""
@@ -762,8 +1159,8 @@ class GeometricCompositionalBackend(Node):
         # parent/world frame of the body, consistent with LiDAR/Wahba and IMU operators.
         #
         # Planar robot: wheel odom often does not observe Z (cov ~1e6 for z/roll/pitch).
-        # Use actual pos.z from the message; trust is capped via GC_ODOM_Z_VARIANCE_PRIOR below.
-        # Anchor smoothing still uses GC_PLANAR_Z_REF as a reference height (line 807).
+        # Use actual pos.z from the message; trust is capped via odom_z_variance_prior below.
+        # Anchor smoothing uses planar_z_ref as a reference height.
         odom_pose_absolute = se3_from_rotvec_trans(
             jnp.array(rotvec, dtype=jnp.float64),
             jnp.array([pos.x, pos.y, pos.z], dtype=jnp.float64),
@@ -799,7 +1196,7 @@ class GeometricCompositionalBackend(Node):
                     axis=0, weights=weights,
                 )
                 # Planar: anchor Z is a reference, not average of odom Z (odom Z is unobserved).
-                trans_mean[2] = float(constants.GC_PLANAR_Z_REF)
+                trans_mean[2] = float(self.config.planar_z_ref)
                 R_matrices = [Rotation.from_rotvec(np.array(p[3:6], dtype=np.float64)).as_matrix() for p in poses]
                 M = np.average(R_matrices, axis=0, weights=weights)
                 R_polar = _polar_so3(M)
@@ -825,7 +1222,7 @@ class GeometricCompositionalBackend(Node):
         # Note: Covariance is unchanged by the relative transformation (same uncertainty)
         cov = np.array(msg.pose.covariance, dtype=np.float64).reshape(6, 6)
         # Cap z variance to limit trust in odom z (planar robots often have bad/unobserved z)
-        cov[2, 2] = max(cov[2, 2], constants.GC_ODOM_Z_VARIANCE_PRIOR)
+        cov[2, 2] = max(cov[2, 2], float(self.odom_z_variance_prior))
         self.last_odom_cov_se3 = jnp.array(cov, dtype=jnp.float64)
 
         # Read twist (velocity) from odometry message
@@ -868,6 +1265,7 @@ class GeometricCompositionalBackend(Node):
             self.camera_ringbuf.append((stamp_sec, rgb, depth))
             if len(self.camera_ringbuf) > self.camera_ringbuf_max:
                 self.camera_ringbuf.pop(0)
+                self.camera_drop_count += 1
         except Exception as e:
             self.get_logger().warn("Camera RGBD buffer failed: %s" % e)
 
@@ -879,6 +1277,15 @@ class GeometricCompositionalBackend(Node):
         """
         self.scan_count += 1
         self.get_logger().info(f"on_lidar callback #{self.scan_count} received")
+
+        # Drain deferred publish from previous scan before resetting counters.
+        if self._pending_publish is not None:
+            pose_6d, stamp = self._pending_publish
+            self._publish_state_from_pose(pose_6d, stamp)
+            self._pending_publish = None
+
+        # Reset per-scan runtime counters (host/device transfer + sync estimates).
+        reset_runtime_counters()
 
         # Do not skip scans when odom/IMU are missing. Use LiDAR when we have it.
         # When odom is missing we pass identity pose + large covariance (negligible odom evidence).
@@ -897,10 +1304,13 @@ class GeometricCompositionalBackend(Node):
         # No-TF mode: transform LiDAR points into the base/body frame before any inference.
         # p_base = R_base_lidar @ p_lidar + t_base_lidar
         if points.shape[0] > 0:
+            record_device_to_host(points, syncs=1)
             pts_np = np.array(points)
             pts_base = (self.R_base_lidar @ pts_np.T).T + self.t_base_lidar[None, :]
+            record_host_to_device(pts_base)
             points = jnp.array(pts_base, dtype=jnp.float64)
         n_points = points.shape[0]
+        n_points_raw = int(n_points)
 
         if n_points == 0:
             # Keep pipeline total by supplying a zero-weight dummy point.
@@ -940,6 +1350,7 @@ class GeometricCompositionalBackend(Node):
         t_scan = stamp_sec  # CORRECT: scan time is header.stamp, not per-point timestamps
 
         if self.rerun_visualizer is not None and points.shape[0] > 0:
+            record_device_to_host(points, syncs=1)
             self.rerun_visualizer.log_lidar(np.array(points, dtype=np.float64), t_scan)
 
         # Preserve previous scan time for scan-to-scan interval handling.
@@ -954,19 +1365,28 @@ class GeometricCompositionalBackend(Node):
         # So we MUST use timebase_sec as scan_start_time and header.stamp as scan_end_time
         # to capture the accumulation window, even though we can't deskew individual points.
         stamp_j = jnp.array(stamp_sec, dtype=jnp.float64)
-        timestamps_min = float(jnp.min(timestamps))
-        timestamps_max = float(jnp.max(timestamps))
+        timestamps_min_dev = jnp.min(timestamps)
+        record_device_to_host(timestamps_min_dev, syncs=1)
+        timestamps_min = float(timestamps_min_dev)
+        timestamps_max_dev = jnp.max(timestamps)
+        record_device_to_host(timestamps_max_dev, syncs=1)
+        timestamps_max = float(timestamps_max_dev)
         
         # If all timestamps are the same (rosette pattern with time_offset=0),
         # use timebase_sec (from timestamps) as scan_start and header.stamp as scan_end.
         if jnp.abs(timestamps_max - timestamps_min) < 1e-9:  # All timestamps identical
             # Rosette pattern: use accumulation window
             scan_start_time = timestamps_min  # = timebase_sec
+            record_device_to_host(stamp_j, syncs=1)
             scan_end_time = float(stamp_j)    # = header.stamp
         else:
             # Per-point timestamps available: use actual min/max
-            scan_start_time = float(jnp.minimum(stamp_j, timestamps_min))
-            scan_end_time = float(jnp.maximum(stamp_j, timestamps_max))
+            scan_start_time_dev = jnp.minimum(stamp_j, timestamps_min)
+            record_device_to_host(scan_start_time_dev, syncs=1)
+            scan_start_time = float(scan_start_time_dev)
+            scan_end_time_dev = jnp.maximum(stamp_j, timestamps_max)
+            record_device_to_host(scan_end_time_dev, syncs=1)
+            scan_end_time = float(scan_end_time_dev)
 
         # Compute dt since last scan (using t_scan, not scan_end_time)
         dt_raw = (
@@ -975,7 +1395,9 @@ class GeometricCompositionalBackend(Node):
             else (scan_end_time - scan_start_time)
         )
         eps_dt = np.finfo(np.float64).eps
-        dt_sec = float(jnp.sqrt(jnp.array(dt_raw, dtype=jnp.float64) ** 2 + eps_dt))
+        dt_sec_dev = jnp.sqrt(jnp.array(dt_raw, dtype=jnp.float64) ** 2 + eps_dt)
+        record_device_to_host(dt_sec_dev, syncs=1)
+        dt_sec = float(dt_sec_dev)
         self.last_scan_stamp = t_scan  # CORRECT: update using t_scan (header.stamp)
 
         # =====================================================================
@@ -994,17 +1416,9 @@ class GeometricCompositionalBackend(Node):
             f"IMU_interval=({t_last_scan:.9f}, {t_scan:.9f})"
         )
 
-        # Drain deferred publish from previous scan (keeps pipeline hot path free of ROS publish)
-        if self._pending_publish is not None:
-            pose_6d, stamp = self._pending_publish
-            self._publish_state_from_pose(pose_6d, stamp)
-            self._pending_publish = None
-
         # Camera is a first-class sensor, but the pipeline must remain total (no gating).
         # If the ring buffer is empty, run with an empty camera batch and rely on LiDAR/IMU/odom.
         if not self.camera_ringbuf:
-            from fl_slam_poc.backend.structures.measurement_batch import create_empty_measurement_batch
-
             self.get_logger().warn(
                 f"Scan {self.scan_count}: camera ring buffer empty; using empty camera MeasurementBatch (no gating)."
             )
@@ -1033,6 +1447,7 @@ class GeometricCompositionalBackend(Node):
                 rgb, depth, color_order="RGB", timestamp_ns=int(stamp_rgb * 1e9)
             )
             # LiDAR points in base frame -> camera frame for lidar_depth_evidence
+            record_device_to_host(points, syncs=1)
             points_base = np.array(points, dtype=np.float64)
             if points_base.shape[0] > 0:
                 points_cam = (self.R_base_camera.T @ (points_base.T - self.t_base_camera[:, None])).T
@@ -1109,6 +1524,20 @@ class GeometricCompositionalBackend(Node):
         imu_stamps_j = jnp.array(imu_stamps, dtype=jnp.float64)
         imu_gyro_j = jnp.array(imu_gyro, dtype=jnp.float64)
         imu_accel_j = jnp.array(imu_accel, dtype=jnp.float64)
+        record_host_to_device(imu_stamps)
+        record_host_to_device(imu_gyro)
+        record_host_to_device(imu_accel)
+        self._record_jit_signature(
+            points=points,
+            timestamps=timestamps,
+            weights=weights,
+            ring=ring,
+            tag=tag,
+            imu_stamps=imu_stamps,
+            imu_gyro=imu_gyro,
+            imu_accel=imu_accel,
+            camera_batch=camera_batch,
+        )
 
         # Diagnostic: log IMU buffer state
         n_valid_imu = int(np.sum(imu_stamps > 0.0))
@@ -1156,9 +1585,11 @@ class GeometricCompositionalBackend(Node):
             if self.current_belief is not None:
                 _diag_bel_x, _diag_bel_y, _diag_bel_yaw, _diag_bel_vx, _diag_bel_vy = _belief_xyyaw_vel(self.current_belief)
             if self.last_odom_pose is not None:
+                record_device_to_host(self.last_odom_pose, syncs=1)
                 op = np.array(self.last_odom_pose, dtype=np.float64).ravel()[:6]
                 _diag_odom_x, _diag_odom_y = float(op[0]), float(op[1])
                 _diag_odom_yaw = _yaw_deg_from_pose_6d(op)
+            record_device_to_host(self.last_odom_twist, syncs=1)
             ot = np.array(self.last_odom_twist, dtype=np.float64).ravel()[:6]
             _diag_odom_vx, _diag_odom_vy, _diag_odom_wz = float(ot[0]), float(ot[1]), float(ot[5])
 
@@ -1247,6 +1678,14 @@ class GeometricCompositionalBackend(Node):
                 eps_psd=self.config.eps_psd,
             )
 
+            scan_io_cert = self._build_scan_io_cert(
+                scan_seq=self.scan_count,
+                scan_stamp_sec=t_scan,
+                scan_window_start_sec=scan_start_time,
+                scan_window_end_sec=scan_end_time,
+                n_lidar_points=n_points_raw,
+            )
+
             # Store certificate
             if results:
                 iw_process_cert = CertBundle.create_approx(
@@ -1279,6 +1718,15 @@ class GeometricCompositionalBackend(Node):
                         trust_alpha=1.0,
                     ),
                 )
+                runtime_counts = consume_runtime_counters()
+                device_runtime_cert = DeviceRuntimeCert(
+                    host_sync_count_est=runtime_counts.host_sync_count_est,
+                    device_to_host_bytes_est=runtime_counts.device_to_host_bytes_est,
+                    host_to_device_bytes_est=runtime_counts.host_to_device_bytes_est,
+                    jit_recompile_count=runtime_counts.jit_recompile_count,
+                )
+                results[0].aggregated_cert.compute.scan_io = scan_io_cert
+                results[0].aggregated_cert.compute.device_runtime = device_runtime_cert
                 self.cert_history.append(aggregate_certificates([results[0].aggregated_cert, iw_process_cert, iw_meas_cert]))
                 if len(self.cert_history) > 100:
                     self.cert_history.pop(0)
@@ -1410,7 +1858,7 @@ class GeometricCompositionalBackend(Node):
         """Publish periodic status."""
         elapsed = time.time() - self.node_start_time
         
-        prim_count = int(self.primitive_map.count) if self.primitive_map is not None else 0
+        prim_count = int(self.primitive_map.total_count) if self.primitive_map is not None else 0
         status = {
             "elapsed_sec": elapsed,
             "odom_count": self.odom_count,
@@ -1463,11 +1911,16 @@ class GeometricCompositionalBackend(Node):
 
         # Export primitive map for post-run JAXsplat (or other) visualization
         splat_path = str(self.get_parameter("splat_export_path").value).strip()
-        if splat_path and self.primitive_map is not None and self.primitive_map.count > 0:
+        if splat_path and self.primitive_map is not None and self.primitive_map.total_count > 0:
             try:
                 import os
-                from fl_slam_poc.backend.structures.primitive_map import extract_primitive_map_view
-                view = extract_primitive_map_view(self.primitive_map)
+                if self.primitive_map.n_tiles != 1:
+                    raise ValueError(
+                        f"splat export expects single-tile atlas, got {self.primitive_map.n_tiles}"
+                    )
+                tile_id = self.primitive_map.tile_ids[0]
+                tile = self.primitive_map.tiles[tile_id]
+                view = extract_primitive_map_view(tile=tile)
                 n = view.count
                 # Convert to numpy for NPZ (JAX arrays may be on device)
                 positions = np.asarray(view.positions)
@@ -1476,6 +1929,17 @@ class GeometricCompositionalBackend(Node):
                 weights = np.asarray(view.weights)
                 directions = np.asarray(view.directions)
                 kappas = np.asarray(view.kappas)
+                view_ids = np.asarray(view.primitive_ids)
+                # Match view primitive IDs back to map timestamps
+                id_to_idx = {int(pid): i for i, pid in enumerate(np.asarray(tile.primitive_ids))}
+                timestamps = np.array(
+                    [float(tile.timestamps[id_to_idx[int(pid)]]) for pid in view_ids],
+                    dtype=np.float64,
+                )
+                created_timestamps = np.array(
+                    [float(tile.created_timestamps[id_to_idx[int(pid)]]) for pid in view_ids],
+                    dtype=np.float64,
+                )
                 os.makedirs(os.path.dirname(splat_path) or ".", exist_ok=True)
                 np.savez_compressed(
                     splat_path,
@@ -1485,6 +1949,9 @@ class GeometricCompositionalBackend(Node):
                     weights=weights,
                     directions=directions,
                     kappas=kappas,
+                    timestamps=timestamps,
+                    created_timestamps=created_timestamps,
+                    primitive_ids=view_ids,
                     n=n,
                 )
                 self.get_logger().info(f"Splat export saved: {splat_path} ({n} primitives)")

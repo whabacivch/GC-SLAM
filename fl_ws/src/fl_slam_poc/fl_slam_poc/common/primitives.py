@@ -11,7 +11,7 @@ Design invariants:
 - Magnitude fields record the effect (can be 0 if no change)
 - Uses JAX for all math operations
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 3
+Reference: docs/GC_SLAM.md Section 3
 """
 
 from __future__ import annotations

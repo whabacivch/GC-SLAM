@@ -63,7 +63,7 @@ class VisualPoseEvidenceResult:
     # Cost statistics
     total_weighted_cost: float
     n_associations: int
-    mean_responsibility: float
+    mean_transported_mass: float  # mean(row_masses) = mean(sum_k pi[i,k]); not normalized
 
 
 # =============================================================================
@@ -77,7 +77,7 @@ def _compute_translation_evidence_wls(
     meas_precisions: jnp.ndarray,     # (N, 3, 3) measurement precisions
     map_positions: jnp.ndarray,       # (M, 3) map positions in world frame
     responsibilities: jnp.ndarray,    # (N, K) OT responsibilities
-    candidate_indices: jnp.ndarray,   # (N, K) map indices per measurement
+    candidate_view_indices: jnp.ndarray,   # (N, K) map view indices per measurement
     R_pred: jnp.ndarray,              # (3, 3) predicted rotation world<-body
     t_pred: jnp.ndarray,              # (3,) predicted translation
     eps_lift: float = 1e-12,
@@ -113,7 +113,7 @@ def _compute_translation_evidence_wls(
         meas_world = jnp.einsum("ij,nj->ni", R_pred, meas_positions)
 
         # Gather all map positions at once: (N, K, 3)
-        map_pos_all = map_positions[candidate_indices]
+        map_pos_all = map_positions[candidate_view_indices]
 
         # Residuals: map_pos - R_pred @ meas_pos - t_pred: (N, K, 3)
         residuals_all = map_pos_all - meas_world[:, None, :] - t_pred[None, None, :]
@@ -169,7 +169,7 @@ def _compute_rotation_evidence_vmf(
     map_directions: jnp.ndarray,      # (M, 3) map directions in world frame
     map_kappas: jnp.ndarray,          # (M,) map vMF concentrations
     responsibilities: jnp.ndarray,    # (N, K) OT responsibilities
-    candidate_indices: jnp.ndarray,   # (N, K) map indices
+    candidate_view_indices: jnp.ndarray,   # (N, K) map view indices
     R_pred: jnp.ndarray,              # (3, 3) predicted rotation
     eps_lift: float = 1e-12,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, float]:
@@ -201,8 +201,8 @@ def _compute_rotation_evidence_vmf(
 
     def _compute():
         # Gather all map data at once: (N, K, 3) and (N, K)
-        map_dir_all = map_directions[candidate_indices]  # (N, K, 3)
-        map_kappa_all = map_kappas[candidate_indices]    # (N, K)
+        map_dir_all = map_directions[candidate_view_indices]  # (N, K, 3)
+        map_kappa_all = map_kappas[candidate_view_indices]    # (N, K)
 
         # Weight = pi * sqrt(kappa_meas * kappa_map): (N, K)
         kappa_weight_all = jnp.sqrt(meas_kappas[:, None] * map_kappa_all + 1e-12)
@@ -278,7 +278,7 @@ def visual_pose_evidence(
     responsibilities evaluated at linearization point (z_lin_pose or belief_pred).
 
     Args:
-        association_result: OT association (responsibilities, candidate_indices)
+        association_result: OT association (responsibilities, candidate_tile_ids, candidate_slots)
         measurement_batch: Current scan measurements
         map_view: Map primitives view (M_{t-1}; pre-update map)
         belief_pred: Predicted belief
@@ -307,7 +307,7 @@ def visual_pose_evidence(
             h_rot=jnp.zeros((3,), dtype=jnp.float64),
             total_weighted_cost=0.0,
             n_associations=0,
-            mean_responsibility=0.0,
+            mean_transported_mass=0.0,
         )
         cert = CertBundle.create_exact(chart_id=chart_id, anchor_id=anchor_id)
         effect = ExpectedEffect(
@@ -347,7 +347,17 @@ def visual_pose_evidence(
 
     # Filter associations to valid measurement rows
     responsibilities = association_result.responsibilities[valid_indices]
-    candidate_indices = association_result.candidate_indices[valid_indices]
+    candidate_tile_ids = association_result.candidate_tile_ids[valid_indices]
+    candidate_slots = association_result.candidate_slots[valid_indices]
+    if int(jnp.max(jnp.abs(candidate_tile_ids - int(map_view.tile_id)))) != 0:
+        raise ValueError(
+            f"visual_pose_evidence: candidate_tile_ids contain tiles != {map_view.tile_id}"
+        )
+    slot_to_view = -jnp.ones((map_view.m_tile,), dtype=jnp.int32)
+    slot_to_view = slot_to_view.at[map_view.slot_indices].set(
+        jnp.arange(map_view.count, dtype=jnp.int32)
+    )
+    candidate_view_indices = slot_to_view[candidate_slots]
     row_masses = association_result.row_masses[valid_indices]
     N_assoc, K_assoc = responsibilities.shape
 
@@ -362,7 +372,7 @@ def visual_pose_evidence(
         meas_precisions=meas_precisions,
         map_positions=map_positions,
         responsibilities=responsibilities,
-        candidate_indices=candidate_indices,
+        candidate_view_indices=candidate_view_indices,
         R_pred=R_pred,
         t_pred=t_pred,
         eps_lift=eps_lift,
@@ -375,7 +385,7 @@ def visual_pose_evidence(
         map_directions=map_directions,
         map_kappas=map_kappas,
         responsibilities=responsibilities,
-        candidate_indices=candidate_indices,
+        candidate_view_indices=candidate_view_indices,
         R_pred=R_pred,
         eps_lift=eps_lift,
     )
@@ -395,8 +405,10 @@ def visual_pose_evidence(
     h_pose = h_pose.at[3:6].set(h_rot)
 
     # Compute diagnostics
+    # Note: row_masses = sum_k pi[i,k] is transported mass per measurement (not normalized)
+    # per spec §5.7.3 (π used directly without row-normalization).
     total_cost = trans_cost + rot_cost
-    mean_resp = float(jnp.mean(row_masses)) if N_assoc > 0 else 0.0
+    mean_transported = float(jnp.mean(row_masses)) if N_assoc > 0 else 0.0
 
     result = VisualPoseEvidenceResult(
         L_pose=L_pose,
@@ -407,7 +419,7 @@ def visual_pose_evidence(
         h_rot=h_rot,
         total_weighted_cost=total_cost,
         n_associations=int(N_assoc * K_assoc),
-        mean_responsibility=mean_resp,
+        mean_transported_mass=mean_transported,
     )
 
     # Certificate with linearization trigger

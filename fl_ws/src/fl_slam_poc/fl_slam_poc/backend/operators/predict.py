@@ -11,7 +11,7 @@ For A = -λI, the closed-form OU propagation is:
 
 This is continuous, smooth, and bounded: as Δt → ∞, Σ → Q/(2λ) (not ∞).
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.2
+Reference: docs/GC_SLAM.md Section 5.2
 """
 
 from __future__ import annotations

@@ -104,4 +104,4 @@ Canonical topic mappings are configured in:
 - **Sigma_g and fusion**: `docs/SIGMA_G_AND_FUSION_EXPLAINED.md`
 - **Wiring audit**: wiring auditor produces end-of-run summary (see launch)
 - **Fusion status**: All sensors (LiDAR + IMU + Odom) are fused; evidence sum includes L_imu_preint.
-- **Geometric Compositional spec**: `docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md`
+- **Geometric Compositional spec**: `docs/GC_SLAM.md`

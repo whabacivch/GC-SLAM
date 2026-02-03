@@ -17,8 +17,10 @@ from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Header
 
 from fl_slam_poc.backend.structures.primitive_map import (
-    PrimitiveMap,
+    AtlasMap,
     extract_primitive_map_view,
+    renderable_batch_from_view,
+    RenderablePrimitiveBatch,
 )
 from fl_slam_poc.common import constants
 
@@ -126,15 +128,21 @@ class PrimitiveMapPublisher:
                 10,
             )
 
-    def publish(self, primitive_map: PrimitiveMap, stamp_sec: float) -> None:
+    def publish(self, primitive_map: AtlasMap, stamp_sec: float) -> RenderablePrimitiveBatch:
         """
         Publish primitive map as PointCloud2 (and optionally MarkerArray).
 
         Extracts PrimitiveMapView from primitive_map; publishes positions and
-        weights. Empty map results in an empty PointCloud2.
+        weights. Returns RenderablePrimitiveBatch with full fields.
         """
+        if primitive_map.n_tiles != 1:
+            raise ValueError(
+                f"PrimitiveMapPublisher expects single-tile atlas, got {primitive_map.n_tiles}"
+            )
+        tile_id = primitive_map.tile_ids[0]
+        tile = primitive_map.tiles[tile_id]
         view = extract_primitive_map_view(
-            primitive_map,
+            tile=tile,
             max_primitives=self._max_primitives,
             eps_lift=self._eps_lift,
             eps_mass=self._eps_mass,
@@ -157,7 +165,7 @@ class PrimitiveMapPublisher:
                 from visualization_msgs.msg import MarkerArray as MarkerArrayMsg
 
                 self._pub_markers.publish(MarkerArrayMsg())
-            return
+            return renderable_batch_from_view(view, eps_lift=self._eps_lift)
 
         positions = np.array(view.positions)
         weights = np.array(view.weights)
@@ -179,3 +187,5 @@ class PrimitiveMapPublisher:
             # Optional: build ellipsoid markers from view.covariances
             # Deferred: full MarkerArray from covariances can be added later
             pass
+
+        return renderable_batch_from_view(view, eps_lift=self._eps_lift)

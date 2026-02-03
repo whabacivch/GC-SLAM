@@ -44,7 +44,7 @@ def create_datasheet_measurement_noise_state(
       nu = p + 1 + nu_extra,  Psi = Sigma_prior * nu_extra
 
     lidar_sigma_meas: optional scalar (m²) for isotropic LiDAR covariance prior.
-      If None, uses C.GC_LIDAR_SIGMA_MEAS (M3DGR). Use 1e-3 for Kimera/VLP-16.
+      If None, uses C.GC_LIDAR_SIGMA_MEAS (e.g., Kimera/VLP-16: 1e-3).
     """
     block_dims = MEAS_BLOCK_DIMS
     p = block_dims.astype(jnp.float64)

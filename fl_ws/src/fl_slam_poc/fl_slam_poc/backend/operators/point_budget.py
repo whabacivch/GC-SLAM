@@ -4,7 +4,7 @@ PointBudgetResample operator for Geometric Compositional SLAM v2.
 Deterministically resample points to enforce N_POINTS_CAP.
 All points contribute through mass redistribution.
 
-Reference: docs/GEOMETRIC_COMPOSITIONAL_INTERFACE_SPEC.md Section 5.1
+Reference: docs/GC_SLAM.md Section 5.1
 """
 
 from __future__ import annotations

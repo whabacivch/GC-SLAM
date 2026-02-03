@@ -15,7 +15,7 @@ if _PKG_ROOT not in sys.path:
 # =============================================================================
 # Production Config Fixtures
 # =============================================================================
-# These fixtures load the actual production configuration used in M3DGR pipeline,
+# These fixtures load the actual production configuration used in the GC pipeline,
 # ensuring tests validate the same code paths as production.
 
 
@@ -34,10 +34,9 @@ def _load_yaml_file(path: str) -> Dict[str, Any]:
 @pytest.fixture
 def prod_config() -> Dict[str, Any]:
     """
-    Load production config for M3DGR dataset.
+    Load production config for the current GC pipeline (Kimera default).
     
-    This fixture merges the base config with the M3DGR preset, providing the
-    same configuration that would be used in production.
+    This fixture loads the unified config used by launch and runtime.
     
     Returns:
         Merged configuration dict
@@ -46,43 +45,31 @@ def prod_config() -> Dict[str, Any]:
         def test_something(prod_config):
             assert prod_config["enable_imu"] == True
     """
-    # Try to find config files relative to this test file
+    # Try to find config relative to this test file
     test_dir = os.path.dirname(__file__)
     pkg_root = os.path.dirname(test_dir)
-    
     config_dir = os.path.join(pkg_root, "config")
-    config_base_path = os.path.join(config_dir, "fl_slam_poc_base.yaml")
-    config_preset_path = os.path.join(config_dir, "presets", "m3dgr.yaml")
+    config_path = os.path.join(config_dir, "gc_unified.yaml")
     
     # Fallback: try installed package location
-    if not os.path.exists(config_base_path):
+    if not os.path.exists(config_path):
         try:
             from ament_index_python.packages import get_package_share_directory
             pkg_share = get_package_share_directory("fl_slam_poc")
-            config_base_path = os.path.join(pkg_share, "config", "fl_slam_poc_base.yaml")
-            config_preset_path = os.path.join(pkg_share, "config", "presets", "m3dgr.yaml")
+            config_path = os.path.join(pkg_share, "config", "gc_unified.yaml")
         except ImportError:
             # ament_index not available (running outside ROS2 environment)
             pass
     
-    # Load and merge configs
-    base_config = _load_yaml_file(config_base_path) if os.path.exists(config_base_path) else {}
-    preset_config = _load_yaml_file(config_preset_path) if os.path.exists(config_preset_path) else {}
-    
-    # Merge: preset overrides base
-    merged = {**base_config, **preset_config}
-    return merged
+    return _load_yaml_file(config_path) if os.path.exists(config_path) else {}
 
 
 @pytest.fixture
 def m3dgr_topic_config() -> Dict[str, str]:
     """
-    Return the expected topic names for M3DGR dataset.
+    Return the expected topic names for the Kimera GC pipeline.
     
-    This fixture reflects the **GC v2 evaluation wiring** (gc_rosbag.launch.py).
-    
-    Topic naming (Kimera default): pointcloud_passthrough, odom_normalizer, imu_normalizer
-        → /gc/sensors/* (canonical for backend).
+    This fixture reflects the GC v2 evaluation wiring (gc_rosbag.launch.py).
     """
     return {
         "raw_lidar_topic": "/acl_jackal/lidar_points",
@@ -97,23 +84,15 @@ def m3dgr_topic_config() -> Dict[str, str]:
 @pytest.fixture
 def config_manifest() -> Dict[str, Any]:
     """
-    Load the config manifest for dataset validation.
-    
-    This provides the canonical specification of what features and topics
-    are required/expected for each dataset.
+    Load the unified GC config for test validation.
     """
-    import yaml
-    
     test_dir = os.path.dirname(__file__)
     pkg_root = os.path.dirname(test_dir)
-    manifest_path = os.path.join(pkg_root, "config", "config_manifest.yaml")
-    
-    if not os.path.exists(manifest_path):
-        pytest.skip("config_manifest.yaml not found")
+    config_path = os.path.join(pkg_root, "config", "gc_unified.yaml")
+    if not os.path.exists(config_path):
+        pytest.skip("gc_unified.yaml not found")
         return {}
-    
-    with open(manifest_path) as f:
-        return yaml.safe_load(f) or {}
+    return _load_yaml_file(config_path)
 
 
 # =============================================================================
