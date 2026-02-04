@@ -68,7 +68,7 @@ Body axes convention (GC assumes a standard mobile base convention):
 
 ### Frame names (Kimera)
 
-See [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md) for Kimera frame names, axis confirmation, and diagnostic results.
+See [KIMERA_DATASET_AND_PIPELINE.md](KIMERA_DATASET_AND_PIPELINE.md) for Kimera frame names, axis confirmation, and diagnostic results.
 
 ### Odometry Message Semantics (nav_msgs/Odometry) - MUST MATCH SE(3) MATH
 
@@ -416,7 +416,7 @@ serve as audit evidence for the **CONFIRMED (Kimera)** labels above:
 
 - Run `tools/diagnose_coordinate_frames.py` on a Kimera bag (LiDAR Z-up, odom twist, IMU gravity).
 - Run `tools/validate_frame_conventions.py` when available (frame IDs, accel units, odom twist semantics).
-See [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md) for diagnostic commands and results (e.g. 10_14_acl_jackal-005).
+See [KIMERA_DATASET_AND_PIPELINE.md](KIMERA_DATASET_AND_PIPELINE.md) for diagnostic commands and results (e.g. 10_14_acl_jackal-005).
 - (Legacy Dynamic01 artifacts removed; use Kimera diagnostics above.)
   (Legacy Dynamic01 turn-invariant test; Kimera uses diagnose_coordinate_frames above.)
   - Result (archived): turn-invariant test

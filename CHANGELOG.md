@@ -4,11 +4,16 @@ Project: Frobenius-Legendre SLAM POC (Impact Project_v1)
 
 This file tracks all significant changes, design decisions, and implementation milestones for the FL-SLAM project.
 
+## 2026-02-04: Kimera documentation consolidated into single doc
+
+- **Created:** `docs/KIMERA_DATASET_AND_PIPELINE.md` as single source of truth for the Kimera dataset: hardware (summary table + Velodyne VLP-16, IMU D435i, Jackal odom, camera D435i), bag/topics, frames, calibration, PointCloud2 layout (VLP-16), inspection, message schemas, and config.
+- **Removed:** `docs/BAG_TOPICS_AND_USAGE.md`, `docs/KIMERA_FRAME_MAPPING.md`, `docs/KIMERA_BAG_INSPECTION.md`, `docs/POINTCLOUD2_LAYOUTS.md`, `docs/VELODYNE_VLP16.md`, `docs/KIMERA_CALIBRATION_AND_FRAME.md`, `docs/PIPELINE_DEPTH_CONTRACT.md` (content merged into KIMERA_DATASET_AND_PIPELINE or PIPELINE_ORDER_AND_EVIDENCE).
+- **References:** All code and doc references updated to `KIMERA_DATASET_AND_PIPELINE.md` (backend_node, gc_rosbag.launch.py, check_extrinsics, first_n_messages_summary, run_and_evaluate_gc.sh, diagnose_trajectory_axes). FRAME_AND_QUATERNION_CONVENTIONS, README, DIAGNOSTIC_TOOLS, DATASET_DOWNLOAD_GUIDE already pointed to or now point to the consolidated doc.
+
 ## 2026-02-04: Docs consolidated (Kimera calibration, pipeline depth)
 
 - **Removed:** `docs/KIMERA_CALIBRATION_AND_FRAME.md` and `docs/PIPELINE_DEPTH_CONTRACT.md`.
-- **Merged:** Kimera calibration content (directory layout, how GC gets extrinsics, GT vs estimate/ATE) into `docs/KIMERA_FRAME_MAPPING.md`. Depth contract (camera_depth authoritative, one fused depth path) merged into `docs/PIPELINE_ORDER_AND_EVIDENCE.md`.
-- **Trimmed:** `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` Kimera frame names to a pointer to KIMERA_FRAME_MAPPING; `docs/PIPELINE_DESIGN_GAPS.md` §5.6 shortened to a pointer. References updated in README, DATASET_DOWNLOAD_GUIDE, and doc cross-links.
+- **Merged:** Kimera calibration content into `docs/KIMERA_FRAME_MAPPING.md`. Depth contract merged into `docs/PIPELINE_ORDER_AND_EVIDENCE.md`. (Superseded by full consolidation above: KIMERA_FRAME_MAPPING etc. later merged into `docs/KIMERA_DATASET_AND_PIPELINE.md`.)
 
 ## 2026-02-04: Pipeline NaN checks migrated to JAX
 
@@ -3329,6 +3334,7 @@ Status monitoring: Will report DEAD_RECKONING if no loop factors
 - Added merge-reduce tile-size cap and merged no-op handling with explicit budget trigger.
 - Added constants index for auditability.
 - Added test helpers for certificate construction to reduce duplication.
+- Updated Kimera IMU extrinsic rotation from bag gravity fit (5k samples) to reduce Z drift.
 
 ## 2026-02-03
 ### Phase 6 (Real Tiling)

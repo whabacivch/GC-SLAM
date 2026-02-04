@@ -2,7 +2,7 @@
 
 This document lists all available tools to diagnose coordinate frame issues.
 
-**Canonical bag:** All examples use the same bag as `tools/run_and_evaluate_gc.sh`: `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005`. See docs/BAG_TOPICS_AND_USAGE.md.
+**Canonical bag:** All examples use the same bag as `tools/run_and_evaluate_gc.sh`: `rosbags/Kimera_Data/ros2/10_14_acl_jackal-005`. See docs/KIMERA_DATASET_AND_PIPELINE.md.
 
 ## Quick Start
 
@@ -139,7 +139,7 @@ This will tell you:
 
 ### LiDAR Frame Convention
 - **Single source of truth**: `docs/FRAME_AND_QUATERNION_CONVENTIONS.md` (LiDAR subsection). For Kimera it states `acl_jackal2/velodyne_link` is **Z-up** and `T_base_lidar` from calibration.
-- **Conflict**: `docs/BAG_TOPICS_AND_USAGE.md` previously said Z-down (generic Livox); reconciled to defer to FRAME_AND_QUATERNION and the diagnostic.
+- **Conflict**: Previously documented Z-down (generic Livox); reconciled to defer to FRAME_AND_QUATERNION and the diagnostic.
 - **Code**: `T_base_lidar` rotation = `[0, 0, 0]` in `gc_rosbag.launch.py` and `config/gc_unified.yaml` (assumes Z-up).
 - **Evaluation**: If ATE rotation is ~180° with dominant roll error, run `diagnose_coordinate_frames.py`; if it reports Z-down, set `T_base_lidar` rotation to `[3.141593, 0.0, 0.0]` and update the frame doc. See `docs/PIPELINE_DESIGN_GAPS.md` §5.5.
 

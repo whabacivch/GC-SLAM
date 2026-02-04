@@ -150,7 +150,7 @@ def generate_launch_description():
     pointcloud_layout_arg = DeclareLaunchArgument(
         "pointcloud_layout",
         default_value="vlp16",
-        description="PointCloud2 layout: vlp16 (Kimera VLP-16). See docs/POINTCLOUD2_LAYOUTS.md.",
+        description="PointCloud2 layout: vlp16 (Kimera VLP-16). See docs/KIMERA_DATASET_AND_PIPELINE.md (§6).",
     )
     # Extrinsics: loaded from config yaml (single source of truth).
     # Launch args available for override but should not be used - config yaml is authoritative.

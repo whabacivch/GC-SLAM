@@ -96,7 +96,7 @@ Canonical topic mappings are configured in:
 
 ## References
 
-- **Topic usage**: `docs/BAG_TOPICS_AND_USAGE.md`
+- **Topic usage**: `docs/KIMERA_DATASET_AND_PIPELINE.md`
 - **Pipeline reference** (raw topics → frontend → backend → fusion): `docs/IMU_BELIEF_MAP_AND_FUSION.md`
 - **Sigma_g and fusion**: `docs/SIGMA_G_AND_FUSION_EXPLAINED.md`
 - **Wiring audit**: wiring auditor produces end-of-run summary (see launch)

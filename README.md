@@ -34,13 +34,13 @@ Embracing uncertainty is a cornerstone of robust robotics and SLAM: we use princ
 
 ## Status
 
-The **primary implementation** is **Geometric Compositional SLAM v2** — a strict, branch-free, fixed-cost SLAM backend. Evaluation uses the **Kimera** dataset (see `docs/KIMERA_FRAME_MAPPING.md`).
+The **primary implementation** is **Geometric Compositional SLAM v2** — a strict, branch-free, fixed-cost SLAM backend. Evaluation uses the **Kimera** dataset (see `docs/KIMERA_DATASET_AND_PIPELINE.md`).
 
 - **22D augmented state:** pose (6D) + velocity (3D) + gyro bias (3D) + accel bias (3D) + time offset (1D) + LiDAR–IMU extrinsic (6D)
 - **Sensors fused:** LiDAR (Matrix Fisher rotation + planar translation evidence), IMU (time-resolved vMF tilt + gyro rotation + preintegration factor), odometry (pose + twist with kinematic consistency)
 - **Adaptive noise:** Inverse-Wishart for process Q and measurement Σ (gyro, accel, LiDAR); updates every scan (no gates)
 - **14-step pipeline per scan:** Predict → Deskew → IMU+odom → z_lin → surfel+camera → association → visual_pose_evidence(M_{t-1}, z_lin) → fuse → recompose → map update(z_t) → cull/forget → anchor drift. See `docs/PIPELINE_ORDER_AND_EVIDENCE.md`.
-- **Canonical topic/bag reference:** `docs/BAG_TOPICS_AND_USAGE.md`
+- **Canonical topic/bag reference:** `docs/KIMERA_DATASET_AND_PIPELINE.md`
 
 **Known limitations** (see `docs/PIPELINE_DESIGN_GAPS.md`): cross-sensor consistency likelihoods are still diagnostics (gyro↔odom↔LiDAR yaw); IMU message covariances and LiDAR intensity are not consumed; nonlinear evidence still uses local quadraticization (vMF/MF → Gaussian info). Pipeline trace and causality: `docs/PIPELINE_TRACE_SINGLE_DOC.md`.
 
@@ -203,7 +203,7 @@ Performance is under active iteration; see `docs/PIPELINE_DESIGN_GAPS.md` for cu
 |-----|-------------|
 | **[AGENTS.md](AGENTS.md)** | Project invariants, quickstart, canonical references |
 | **[CHANGELOG.md](CHANGELOG.md)** | History and design decisions |
-| **docs/BAG_TOPICS_AND_USAGE.md** | Bag topics and pipeline usage (canonical) |
+| **docs/KIMERA_DATASET_AND_PIPELINE.md** | Kimera dataset, topics, frames, hardware, pipeline (canonical) |
 | **docs/PIPELINE_TRACE_SINGLE_DOC.md** | Single pipeline trace: value-as-object, spine, IMU/odom/LiDAR, belief/IW, z/performance |
 | **docs/GC_SLAM.md** | GC v2 interface and operator contracts |
 | **docs/IMU_BELIEF_MAP_AND_FUSION.md** | Pipeline reference: topics, steps, evidence, fusion |

@@ -189,7 +189,7 @@ These remaining gaps (IMU cov, LiDAR intensity, consistency-based weighting) can
 
 ### 5.6 Frame or axis convention mismatch (investigation)
 
-See [FRAME_AND_QUATERNION_CONVENTIONS.md](FRAME_AND_QUATERNION_CONVENTIONS.md) and [KIMERA_FRAME_MAPPING.md](KIMERA_FRAME_MAPPING.md). Code: `backend_node.py` applies `pts_base = R_base_lidar @ pts_np.T + t_base_lidar`; `gc_kimera.yaml` sets `T_base_lidar`. Run `tools/diagnose_coordinate_frames.py` on the bag; if it reports Z-down, set `T_base_lidar` rotation to `[π, 0, 0]`.
+See [FRAME_AND_QUATERNION_CONVENTIONS.md](FRAME_AND_QUATERNION_CONVENTIONS.md) and [KIMERA_DATASET_AND_PIPELINE.md](KIMERA_DATASET_AND_PIPELINE.md). Code: `backend_node.py` applies `pts_base = R_base_lidar @ pts_np.T + t_base_lidar`; `gc_kimera.yaml` sets `T_base_lidar`. Run `tools/diagnose_coordinate_frames.py` on the bag; if it reports Z-down, set `T_base_lidar` rotation to `[π, 0, 0]`.
 
 ---
 

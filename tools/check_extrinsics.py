@@ -9,7 +9,7 @@ Usage:
 Loads the backend section from the given YAML; prints T_base_lidar, T_base_imu
 (6D [x,y,z,rx,ry,rz] rotvec rad) and which frames they relate:
   base_frame, and note that lidar_frame / imu_frame are the PointCloud2 and IMU
-  header.frame_id from the bag (see docs/KIMERA_FRAME_MAPPING.md).
+  header.frame_id from the bag (see docs/KIMERA_DATASET_AND_PIPELINE.md).
 """
 
 import argparse
@@ -108,7 +108,7 @@ def main() -> int:
     print(f"  {T_base_imu}")
     print("  → relates: base_frame <- imu_frame_id (IMU header.frame_id from bag)")
     print()
-    print("See docs/KIMERA_FRAME_MAPPING.md for Kimera frame names.")
+    print("See docs/KIMERA_DATASET_AND_PIPELINE.md for Kimera frame names and hardware.")
     print("=" * 60)
     return 0
 

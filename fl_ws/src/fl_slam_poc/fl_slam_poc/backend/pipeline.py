@@ -166,7 +166,6 @@ class PipelineConfig:
     enable_timing: bool = False  # If True, record per-stage timings (ms) in diagnostics
 
     # Diagnostics: minimal tape only (full ScanDiagnostics removed)
-    save_full_diagnostics: bool = False  # Deprecated; minimal tape is always recorded
 
     # Parallelize independent stages (IMU+odom evidence vs surfel/association prep)
     enable_parallel_stages: bool = False

@@ -3,7 +3,7 @@
 Emit "first N messages" summary for PointCloud2, Imu, Odometry (or given topics).
 
 Output: markdown or JSON per bag. Use to check field names, frame_id, and sample
-values across bags (e.g. Kimera vs M3DGR). See docs/POINTCLOUD2_LAYOUTS.md.
+values across bags. See docs/KIMERA_DATASET_AND_PIPELINE.md (§6 PointCloud2 layout).
 
 Usage:
   python tools/first_n_messages_summary.py /path/to/bag_dir

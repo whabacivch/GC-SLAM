@@ -2,12 +2,7 @@
 Stage-0 Per-Scan Diagnostics for Geometric Compositional SLAM v2.
 
 This module provides data structures and utilities for capturing per-scan
-diagnostic data needed for the debugging dashboard.
-
-Minimal tape schema (canonical):
-- Pose6 conditioning + L_pose6 heatmap data
-- Certificate-derived support/mismatch/excitation/influence summaries
-- Fusion alpha + trigger magnitude
+minimal tape diagnostics (canonical). Full ScanDiagnostics has been removed.
 """
 
 from __future__ import annotations
@@ -15,276 +10,16 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 import numpy as np
-
-
-@dataclass
-class ScanDiagnostics:
-    """Per-scan diagnostic data for the debugging dashboard."""
-
-    # Scan metadata
-    scan_number: int
-    timestamp: float
-    dt_sec: float
-    n_points_raw: int
-    n_points_budget: int
-
-    # Pose (in world frame)
-    p_W: np.ndarray  # (3,) position
-    R_WL: np.ndarray  # (3,3) rotation matrix (world <- lidar)
-
-    # Evidence matrices
-    L_total: np.ndarray  # (22, 22) total information matrix
-    h_total: np.ndarray  # (22,) total information vector
-
-    # Individual evidence components (for decomposition)
-    L_lidar: Optional[np.ndarray] = None  # (22, 22)
-    L_odom: Optional[np.ndarray] = None   # (22, 22)
-    L_imu: Optional[np.ndarray] = None    # (22, 22)
-    L_gyro: Optional[np.ndarray] = None   # (22, 22)
-    L_imu_preint: Optional[np.ndarray] = None  # (22, 22) IMU preintegration factor
-
-    # Diagnostic scalars
-    logdet_L_total: float = 0.0
-    trace_L_total: float = 0.0
-    L_dt: float = 0.0  # L[15,15] - dt observability
-    trace_L_ex: float = 0.0  # trace(L[16:22, 16:22]) - extrinsic observability
-
-    # Excitation scalars
-    s_dt: float = 0.0  # dt excitation scale
-    s_ex: float = 0.0  # extrinsic excitation scale
-
-    # PSD projection diagnostics
-    psd_delta_fro: float = 0.0  # Frobenius norm of projection delta
-    psd_min_eig_before: float = 0.0
-    psd_min_eig_after: float = 0.0
-
-    # Noise trace summaries
-    trace_Q_mode: float = 0.0  # trace of process noise Q
-    trace_Sigma_lidar_mode: float = 0.0  # trace of LiDAR measurement noise
-    trace_Sigma_g_mode: float = 0.0  # trace of gyro measurement noise
-    trace_Sigma_a_mode: float = 0.0  # trace of accel measurement noise
-
-    # Rotation binding diagnostics (degrees)
-    rot_err_lidar_deg_pred: float = 0.0
-    rot_err_lidar_deg_post: float = 0.0
-    rot_err_odom_deg_pred: float = 0.0
-    rot_err_odom_deg_post: float = 0.0
-
-    # Fusion diagnostics
-    fusion_alpha: float = 1.0
-
-    # Certificate summaries
-    total_trigger_magnitude: float = 0.0
-    conditioning_number: float = 1.0
-    conditioning_pose6: float = 1.0
-    
-    # IMU discretization diagnostics
-    dt_scan: float = 0.0  # LiDAR scan duration
-    dt_int: float = 0.0  # IMU-covered time (Σ_i Δt_i over actual sample intervals)
-    num_imu_samples: int = 0  # Number of IMU samples used
-
-    # Frame coherence probes (base-frame IMU sanity)
-    accel_dir_dot_mu0: float = 0.0  # xbar · mu0 in body frame (should be near +1 when consistent)
-    accel_mag_mean: float = 0.0     # mean ||a|| (m/s^2), should be near 9.81 when stationary
-
-    # IMU propagation probes (weighted by dt_eff over scan-to-scan window)
-    imu_a_body_mean: np.ndarray = field(default_factory=lambda: np.zeros((3,), dtype=np.float64))
-    imu_a_world_nog_mean: np.ndarray = field(default_factory=lambda: np.zeros((3,), dtype=np.float64))
-    imu_a_world_mean: np.ndarray = field(default_factory=lambda: np.zeros((3,), dtype=np.float64))
-    imu_dt_eff_sum: float = 0.0
-
-    # IMU dt diagnostics (scan-to-scan window; raw + weighted)
-    imu_dt_valid_min: float = 0.0
-    imu_dt_valid_max: float = 0.0
-    imu_dt_valid_mean: float = 0.0
-    imu_dt_valid_median: float = 0.0
-    imu_dt_valid_std: float = 0.0
-    imu_dt_valid_nonpos: int = 0
-    imu_dt_weighted_mean: float = 0.0
-    imu_dt_weighted_std: float = 0.0
-    imu_dt_weighted_sum: float = 0.0
-
-    # IMU preintegration factor residuals
-    preint_r_vel: np.ndarray = field(default_factory=lambda: np.zeros((3,), dtype=np.float64))
-    preint_r_pos: np.ndarray = field(default_factory=lambda: np.zeros((3,), dtype=np.float64))
-
-    # Invariant test: yaw increments from different sources (degrees)
-    dyaw_gyro: float = 0.0   # Gyro-integrated yaw change
-    dyaw_odom: float = 0.0   # Odom yaw change
-
-    # Twist-derived validation scalars
-    distance_pose: float = 0.0      # ||t_curr - t_prev|| from belief pose delta (m)
-    distance_twist: float = 0.0     # ||v_body|| * dt_sec from odom twist (m)
-    speed_odom: float = 0.0         # ||v_body|| scalar speed from odom twist (m/s)
-    speed_pose: float = 0.0         # distance_pose / dt_sec (m/s)
-
-    # IMU jerk diagnostics (m/s³)
-    imu_jerk_norm_mean: float = 0.0  # mean ||a_{i+1} - a_i|| / dt_i over scan window
-    imu_jerk_norm_max: float = 0.0   # max jerk norm in scan window
-
-    # Timing diagnostics (milliseconds)
-    t_total_ms: float = 0.0
-    t_point_budget_ms: float = 0.0
-    t_imu_preint_scan_ms: float = 0.0
-    t_imu_preint_int_ms: float = 0.0
-    t_deskew_ms: float = 0.0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "scan_number": self.scan_number,
-            "timestamp": self.timestamp,
-            "dt_sec": self.dt_sec,
-            "n_points_raw": self.n_points_raw,
-            "n_points_budget": self.n_points_budget,
-            "p_W": self.p_W.tolist(),
-            "R_WL": self.R_WL.tolist(),
-            "L_total": self.L_total.tolist(),
-            "h_total": self.h_total.tolist(),
-            "L_lidar": self.L_lidar.tolist() if self.L_lidar is not None else None,
-            "L_odom": self.L_odom.tolist() if self.L_odom is not None else None,
-            "L_imu": self.L_imu.tolist() if self.L_imu is not None else None,
-            "L_gyro": self.L_gyro.tolist() if self.L_gyro is not None else None,
-            "L_imu_preint": self.L_imu_preint.tolist() if self.L_imu_preint is not None else None,
-            "logdet_L_total": self.logdet_L_total,
-            "trace_L_total": self.trace_L_total,
-            "L_dt": self.L_dt,
-            "trace_L_ex": self.trace_L_ex,
-            "s_dt": self.s_dt,
-            "s_ex": self.s_ex,
-            "psd_delta_fro": self.psd_delta_fro,
-            "psd_min_eig_before": self.psd_min_eig_before,
-            "psd_min_eig_after": self.psd_min_eig_after,
-            "trace_Q_mode": self.trace_Q_mode,
-            "trace_Sigma_lidar_mode": self.trace_Sigma_lidar_mode,
-            "trace_Sigma_g_mode": self.trace_Sigma_g_mode,
-            "trace_Sigma_a_mode": self.trace_Sigma_a_mode,
-            "rot_err_lidar_deg_pred": self.rot_err_lidar_deg_pred,
-            "rot_err_lidar_deg_post": self.rot_err_lidar_deg_post,
-            "rot_err_odom_deg_pred": self.rot_err_odom_deg_pred,
-            "rot_err_odom_deg_post": self.rot_err_odom_deg_post,
-            "fusion_alpha": self.fusion_alpha,
-            "total_trigger_magnitude": self.total_trigger_magnitude,
-            "conditioning_number": self.conditioning_number,
-            "conditioning_pose6": self.conditioning_pose6,
-            "dt_scan": self.dt_scan,
-            "dt_int": self.dt_int,
-            "num_imu_samples": self.num_imu_samples,
-            "accel_dir_dot_mu0": self.accel_dir_dot_mu0,
-            "accel_mag_mean": self.accel_mag_mean,
-            "imu_a_body_mean": self.imu_a_body_mean.tolist(),
-            "imu_a_world_nog_mean": self.imu_a_world_nog_mean.tolist(),
-            "imu_a_world_mean": self.imu_a_world_mean.tolist(),
-            "imu_dt_eff_sum": self.imu_dt_eff_sum,
-            "imu_dt_valid_min": self.imu_dt_valid_min,
-            "imu_dt_valid_max": self.imu_dt_valid_max,
-            "imu_dt_valid_mean": self.imu_dt_valid_mean,
-            "imu_dt_valid_median": self.imu_dt_valid_median,
-            "imu_dt_valid_std": self.imu_dt_valid_std,
-            "imu_dt_valid_nonpos": self.imu_dt_valid_nonpos,
-            "imu_dt_weighted_mean": self.imu_dt_weighted_mean,
-            "imu_dt_weighted_std": self.imu_dt_weighted_std,
-            "imu_dt_weighted_sum": self.imu_dt_weighted_sum,
-            "preint_r_vel": self.preint_r_vel.tolist(),
-            "preint_r_pos": self.preint_r_pos.tolist(),
-            "dyaw_gyro": self.dyaw_gyro,
-            "dyaw_odom": self.dyaw_odom,
-            "distance_pose": self.distance_pose,
-            "distance_twist": self.distance_twist,
-            "speed_odom": self.speed_odom,
-            "speed_pose": self.speed_pose,
-            "imu_jerk_norm_mean": self.imu_jerk_norm_mean,
-            "imu_jerk_norm_max": self.imu_jerk_norm_max,
-            "t_total_ms": self.t_total_ms,
-            "t_point_budget_ms": self.t_point_budget_ms,
-            "t_imu_preint_scan_ms": self.t_imu_preint_scan_ms,
-            "t_imu_preint_int_ms": self.t_imu_preint_int_ms,
-            "t_deskew_ms": self.t_deskew_ms,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "ScanDiagnostics":
-        """Create from dictionary (JSON deserialization)."""
-        return cls(
-            scan_number=d["scan_number"],
-            timestamp=d["timestamp"],
-            dt_sec=d["dt_sec"],
-            n_points_raw=d["n_points_raw"],
-            n_points_budget=d["n_points_budget"],
-            p_W=np.array(d["p_W"]),
-            R_WL=np.array(d["R_WL"]),
-            L_total=np.array(d["L_total"]),
-            h_total=np.array(d["h_total"]),
-            L_lidar=np.array(d["L_lidar"]) if d.get("L_lidar") is not None else None,
-            L_odom=np.array(d["L_odom"]) if d.get("L_odom") is not None else None,
-            L_imu=np.array(d["L_imu"]) if d.get("L_imu") is not None else None,
-            L_gyro=np.array(d["L_gyro"]) if d.get("L_gyro") is not None else None,
-            L_imu_preint=np.array(d["L_imu_preint"]) if d.get("L_imu_preint") is not None else None,
-            logdet_L_total=d.get("logdet_L_total", 0.0),
-            trace_L_total=d.get("trace_L_total", 0.0),
-            L_dt=d.get("L_dt", 0.0),
-            trace_L_ex=d.get("trace_L_ex", 0.0),
-            s_dt=d.get("s_dt", 0.0),
-            s_ex=d.get("s_ex", 0.0),
-            psd_delta_fro=d.get("psd_delta_fro", 0.0),
-            psd_min_eig_before=d.get("psd_min_eig_before", 0.0),
-            psd_min_eig_after=d.get("psd_min_eig_after", 0.0),
-            trace_Q_mode=d.get("trace_Q_mode", 0.0),
-            trace_Sigma_lidar_mode=d.get("trace_Sigma_lidar_mode", 0.0),
-            trace_Sigma_g_mode=d.get("trace_Sigma_g_mode", 0.0),
-            trace_Sigma_a_mode=d.get("trace_Sigma_a_mode", 0.0),
-            rot_err_lidar_deg_pred=d.get("rot_err_lidar_deg_pred", 0.0),
-            rot_err_lidar_deg_post=d.get("rot_err_lidar_deg_post", 0.0),
-            rot_err_odom_deg_pred=d.get("rot_err_odom_deg_pred", 0.0),
-            rot_err_odom_deg_post=d.get("rot_err_odom_deg_post", 0.0),
-            fusion_alpha=d.get("fusion_alpha", 1.0),
-            total_trigger_magnitude=d.get("total_trigger_magnitude", 0.0),
-            conditioning_number=d.get("conditioning_number", 1.0),
-            conditioning_pose6=d.get("conditioning_pose6", 1.0),
-            dt_scan=d.get("dt_scan", 0.0),
-            dt_int=d.get("dt_int", 0.0),
-            num_imu_samples=d.get("num_imu_samples", 0),
-            accel_dir_dot_mu0=d.get("accel_dir_dot_mu0", 0.0),
-            accel_mag_mean=d.get("accel_mag_mean", 0.0),
-            imu_a_body_mean=np.array(d.get("imu_a_body_mean", [0.0, 0.0, 0.0])),
-            imu_a_world_nog_mean=np.array(d.get("imu_a_world_nog_mean", [0.0, 0.0, 0.0])),
-            imu_a_world_mean=np.array(d.get("imu_a_world_mean", [0.0, 0.0, 0.0])),
-            imu_dt_eff_sum=d.get("imu_dt_eff_sum", 0.0),
-            imu_dt_valid_min=d.get("imu_dt_valid_min", 0.0),
-            imu_dt_valid_max=d.get("imu_dt_valid_max", 0.0),
-            imu_dt_valid_mean=d.get("imu_dt_valid_mean", 0.0),
-            imu_dt_valid_median=d.get("imu_dt_valid_median", 0.0),
-            imu_dt_valid_std=d.get("imu_dt_valid_std", 0.0),
-            imu_dt_valid_nonpos=d.get("imu_dt_valid_nonpos", 0),
-            imu_dt_weighted_mean=d.get("imu_dt_weighted_mean", 0.0),
-            imu_dt_weighted_std=d.get("imu_dt_weighted_std", 0.0),
-            imu_dt_weighted_sum=d.get("imu_dt_weighted_sum", 0.0),
-            preint_r_vel=np.array(d.get("preint_r_vel", [0.0, 0.0, 0.0])),
-            preint_r_pos=np.array(d.get("preint_r_pos", [0.0, 0.0, 0.0])),
-            dyaw_gyro=float(d.get("dyaw_gyro", 0.0)),
-            dyaw_odom=float(d.get("dyaw_odom", 0.0)),
-            distance_pose=float(d.get("distance_pose", 0.0)),
-            distance_twist=float(d.get("distance_twist", 0.0)),
-            speed_odom=float(d.get("speed_odom", 0.0)),
-            speed_pose=float(d.get("speed_pose", 0.0)),
-            imu_jerk_norm_mean=float(d.get("imu_jerk_norm_mean", 0.0)),
-            imu_jerk_norm_max=float(d.get("imu_jerk_norm_max", 0.0)),
-            t_total_ms=float(d.get("t_total_ms", 0.0)),
-            t_point_budget_ms=float(d.get("t_point_budget_ms", 0.0)),
-            t_imu_preint_scan_ms=float(d.get("t_imu_preint_scan_ms", 0.0)),
-            t_imu_preint_int_ms=float(d.get("t_imu_preint_int_ms", 0.0)),
-            t_deskew_ms=float(d.get("t_deskew_ms", 0.0)),
-        )
 
 
 @dataclass
 class MinimalScanTape:
     """
     Minimal per-scan tape for crash-tolerant, low-overhead diagnostics.
-    Hot path stores only this; full ScanDiagnostics is legacy-only.
+    Hot path stores only this; full ScanDiagnostics is removed.
     """
     scan_number: int
     timestamp: float
@@ -324,12 +59,90 @@ class MinimalScanTape:
     t_point_budget_ms: float = 0.0
     t_deskew_ms: float = 0.0
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scan_number": self.scan_number,
+            "timestamp": self.timestamp,
+            "dt_sec": self.dt_sec,
+            "n_points_raw": self.n_points_raw,
+            "n_points_budget": self.n_points_budget,
+            "fusion_alpha": self.fusion_alpha,
+            "cond_pose6": self.cond_pose6,
+            "conditioning_number": self.conditioning_number,
+            "eigmin_pose6": self.eigmin_pose6,
+            "L_pose6": self.L_pose6.tolist(),
+            "total_trigger_magnitude": self.total_trigger_magnitude,
+            "cert_exact": self.cert_exact,
+            "cert_frobenius_applied": self.cert_frobenius_applied,
+            "cert_n_triggers": self.cert_n_triggers,
+            "support_ess_total": self.support_ess_total,
+            "support_frac": self.support_frac,
+            "mismatch_nll_per_ess": self.mismatch_nll_per_ess,
+            "mismatch_directional_score": self.mismatch_directional_score,
+            "excitation_dt_effect": self.excitation_dt_effect,
+            "excitation_extrinsic_effect": self.excitation_extrinsic_effect,
+            "influence_psd_projection_delta": self.influence_psd_projection_delta,
+            "influence_mass_epsilon_ratio": self.influence_mass_epsilon_ratio,
+            "influence_anchor_drift_rho": self.influence_anchor_drift_rho,
+            "influence_dt_scale": self.influence_dt_scale,
+            "influence_extrinsic_scale": self.influence_extrinsic_scale,
+            "influence_trust_alpha": self.influence_trust_alpha,
+            "influence_power_beta": self.influence_power_beta,
+            "overconfidence_excitation_total": self.overconfidence_excitation_total,
+            "overconfidence_ess_to_excitation": self.overconfidence_ess_to_excitation,
+            "overconfidence_cond_to_support": self.overconfidence_cond_to_support,
+            "overconfidence_dt_asymmetry": self.overconfidence_dt_asymmetry,
+            "overconfidence_z_to_xy_ratio": self.overconfidence_z_to_xy_ratio,
+            "t_total_ms": self.t_total_ms,
+            "t_point_budget_ms": self.t_point_budget_ms,
+            "t_deskew_ms": self.t_deskew_ms,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "MinimalScanTape":
+        return cls(
+            scan_number=int(d["scan_number"]),
+            timestamp=float(d["timestamp"]),
+            dt_sec=float(d["dt_sec"]),
+            n_points_raw=int(d["n_points_raw"]),
+            n_points_budget=int(d["n_points_budget"]),
+            fusion_alpha=float(d["fusion_alpha"]),
+            cond_pose6=float(d["cond_pose6"]),
+            conditioning_number=float(d["conditioning_number"]),
+            eigmin_pose6=float(d["eigmin_pose6"]),
+            L_pose6=np.array(d["L_pose6"], dtype=np.float64),
+            total_trigger_magnitude=float(d["total_trigger_magnitude"]),
+            cert_exact=bool(d.get("cert_exact", True)),
+            cert_frobenius_applied=bool(d.get("cert_frobenius_applied", False)),
+            cert_n_triggers=int(d.get("cert_n_triggers", 0)),
+            support_ess_total=float(d.get("support_ess_total", 0.0)),
+            support_frac=float(d.get("support_frac", 0.0)),
+            mismatch_nll_per_ess=float(d.get("mismatch_nll_per_ess", 0.0)),
+            mismatch_directional_score=float(d.get("mismatch_directional_score", 0.0)),
+            excitation_dt_effect=float(d.get("excitation_dt_effect", 0.0)),
+            excitation_extrinsic_effect=float(d.get("excitation_extrinsic_effect", 0.0)),
+            influence_psd_projection_delta=float(d.get("influence_psd_projection_delta", 0.0)),
+            influence_mass_epsilon_ratio=float(d.get("influence_mass_epsilon_ratio", 0.0)),
+            influence_anchor_drift_rho=float(d.get("influence_anchor_drift_rho", 0.0)),
+            influence_dt_scale=float(d.get("influence_dt_scale", 1.0)),
+            influence_extrinsic_scale=float(d.get("influence_extrinsic_scale", 1.0)),
+            influence_trust_alpha=float(d.get("influence_trust_alpha", 1.0)),
+            influence_power_beta=float(d.get("influence_power_beta", 1.0)),
+            overconfidence_excitation_total=float(d.get("overconfidence_excitation_total", 0.0)),
+            overconfidence_ess_to_excitation=float(d.get("overconfidence_ess_to_excitation", 0.0)),
+            overconfidence_cond_to_support=float(d.get("overconfidence_cond_to_support", 0.0)),
+            overconfidence_dt_asymmetry=float(d.get("overconfidence_dt_asymmetry", 0.0)),
+            overconfidence_z_to_xy_ratio=float(d.get("overconfidence_z_to_xy_ratio", 0.0)),
+            t_total_ms=float(d.get("t_total_ms", 0.0)),
+            t_point_budget_ms=float(d.get("t_point_budget_ms", 0.0)),
+            t_deskew_ms=float(d.get("t_deskew_ms", 0.0)),
+        )
+
 
 @dataclass
 class DiagnosticsLog:
-    """Container for all per-scan diagnostics from a run."""
+    """Container for minimal per-scan tape diagnostics."""
 
-    scans: List[ScanDiagnostics] = field(default_factory=list)
     tape: List[MinimalScanTape] = field(default_factory=list)
 
     # Run metadata
@@ -338,21 +151,15 @@ class DiagnosticsLog:
     end_time: float = 0.0
     total_scans: int = 0
 
-    def append(self, diag: ScanDiagnostics):
-        """Add a scan's full diagnostics."""
-        self.scans.append(diag)
-        self.total_scans = len(self.scans)
-
-    def append_tape(self, entry: MinimalScanTape):
+    def append_tape(self, entry: MinimalScanTape) -> None:
         """Add a scan's minimal tape entry (hot path)."""
         self.tape.append(entry)
         self.total_scans = len(self.tape)
 
-    def save_jsonl(self, path: str):
+    def save_jsonl(self, path: str) -> None:
         """Save as JSON Lines (one JSON object per line for streaming)."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
-            # Write header with metadata
             header = {
                 "_type": "header",
                 "run_id": self.run_id,
@@ -360,10 +167,8 @@ class DiagnosticsLog:
                 "total_scans": self.total_scans,
             }
             f.write(json.dumps(header) + "\n")
-
-            # Write each scan
-            for diag in self.scans:
-                f.write(json.dumps(diag.to_dict()) + "\n")
+            for entry in self.tape:
+                f.write(json.dumps(entry.to_dict()) + "\n")
 
     @classmethod
     def load_jsonl(cls, path: str) -> "DiagnosticsLog":
@@ -379,30 +184,17 @@ class DiagnosticsLog:
                     log.run_id = d.get("run_id", "")
                     log.start_time = d.get("start_time", 0.0)
                 else:
-                    log.scans.append(ScanDiagnostics.from_dict(d))
-        log.total_scans = len(log.scans)
+                    log.tape.append(MinimalScanTape.from_dict(d))
+        log.total_scans = len(log.tape)
         return log
 
-    def save_npz(self, path: str):
-        """Save as compressed NumPy archive (more efficient for large runs).
-        If only tape entries exist, saves minimal format; otherwise full ScanDiagnostics format.
-        """
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-
-        n_full = len(self.scans)
-        n_tape = len(self.tape)
-        if n_full > 0:
-            raise ValueError(
-                "Full ScanDiagnostics NPZ export has been removed; "
-                "use minimal tape diagnostics only."
-            )
-        if n_tape > 0:
-            self._save_npz_tape(path, n_tape)
-        else:
-            np.savez_compressed(path, n_scans=0)
-
-    def _save_npz_tape(self, path: str, n: int):
+    def save_npz(self, path: str) -> None:
         """Save minimal tape format (crash-tolerant, low overhead)."""
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        n = len(self.tape)
+        if n == 0:
+            np.savez_compressed(path, format="minimal_tape", n_scans=0)
+            return
         data = {
             "format": "minimal_tape",
             "n_scans": n,
@@ -448,135 +240,55 @@ class DiagnosticsLog:
 
     @classmethod
     def load_npz(cls, path: str) -> "DiagnosticsLog":
-        """Load from NumPy archive."""
+        """Load minimal tape from NumPy archive."""
         data = np.load(path, allow_pickle=True)
-
-        if str(data.get("format", "")) == "minimal_tape":
-            n = int(data["n_scans"])
-            if n == 0:
-                return cls()
-            log = cls()
-            log.run_id = str(data.get("run_id", ""))
-            log.start_time = float(data.get("start_time", 0.0))
-            for i in range(n):
-                tape_entry = MinimalScanTape(
-                    scan_number=int(data["scan_numbers"][i]),
-                    timestamp=float(data["timestamps"][i]),
-                    dt_sec=float(data["dt_secs"][i]),
-                    n_points_raw=int(data["n_points_raw"][i]),
-                    n_points_budget=int(data["n_points_budget"][i]),
-                    fusion_alpha=float(data["fusion_alpha"][i]),
-                    cond_pose6=float(data["cond_pose6"][i]),
-                    conditioning_number=float(data["conditioning_number"][i]),
-                    eigmin_pose6=float(data["eigmin_pose6"][i]),
-                    L_pose6=data["L_pose6"][i],
-                    total_trigger_magnitude=float(data["total_trigger_magnitude"][i]),
-                    cert_exact=bool(data["cert_exact"][i]) if "cert_exact" in data else True,
-                    cert_frobenius_applied=bool(data["cert_frobenius_applied"][i]) if "cert_frobenius_applied" in data else False,
-                    cert_n_triggers=int(data["cert_n_triggers"][i]) if "cert_n_triggers" in data else 0,
-                    support_ess_total=float(data["support_ess_total"][i]) if "support_ess_total" in data else 0.0,
-                    support_frac=float(data["support_frac"][i]) if "support_frac" in data else 0.0,
-                    mismatch_nll_per_ess=float(data["mismatch_nll_per_ess"][i]) if "mismatch_nll_per_ess" in data else 0.0,
-                    mismatch_directional_score=float(data["mismatch_directional_score"][i]) if "mismatch_directional_score" in data else 0.0,
-                    excitation_dt_effect=float(data["excitation_dt_effect"][i]) if "excitation_dt_effect" in data else 0.0,
-                    excitation_extrinsic_effect=float(data["excitation_extrinsic_effect"][i]) if "excitation_extrinsic_effect" in data else 0.0,
-                    influence_psd_projection_delta=float(data["influence_psd_projection_delta"][i]) if "influence_psd_projection_delta" in data else 0.0,
-                    influence_mass_epsilon_ratio=float(data["influence_mass_epsilon_ratio"][i]) if "influence_mass_epsilon_ratio" in data else 0.0,
-                    influence_anchor_drift_rho=float(data["influence_anchor_drift_rho"][i]) if "influence_anchor_drift_rho" in data else 0.0,
-                    influence_dt_scale=float(data["influence_dt_scale"][i]) if "influence_dt_scale" in data else 1.0,
-                    influence_extrinsic_scale=float(data["influence_extrinsic_scale"][i]) if "influence_extrinsic_scale" in data else 1.0,
-                    influence_trust_alpha=float(data["influence_trust_alpha"][i]) if "influence_trust_alpha" in data else 1.0,
-                    influence_power_beta=float(data["influence_power_beta"][i]) if "influence_power_beta" in data else 1.0,
-                    overconfidence_excitation_total=float(data["overconfidence_excitation_total"][i]) if "overconfidence_excitation_total" in data else 0.0,
-                    overconfidence_ess_to_excitation=float(data["overconfidence_ess_to_excitation"][i]) if "overconfidence_ess_to_excitation" in data else 0.0,
-                    overconfidence_cond_to_support=float(data["overconfidence_cond_to_support"][i]) if "overconfidence_cond_to_support" in data else 0.0,
-                    overconfidence_dt_asymmetry=float(data["overconfidence_dt_asymmetry"][i]) if "overconfidence_dt_asymmetry" in data else 0.0,
-                    overconfidence_z_to_xy_ratio=float(data["overconfidence_z_to_xy_ratio"][i]) if "overconfidence_z_to_xy_ratio" in data else 0.0,
-                    t_total_ms=float(data["t_total_ms"][i]) if "t_total_ms" in data else 0.0,
-                    t_point_budget_ms=float(data["t_point_budget_ms"][i]) if "t_point_budget_ms" in data else 0.0,
-                    t_deskew_ms=float(data["t_deskew_ms"][i]) if "t_deskew_ms" in data else 0.0,
-                )
-                log.tape.append(tape_entry)
-            log.total_scans = len(log.tape)
-            return log
+        if str(data.get("format", "")) != "minimal_tape":
+            raise ValueError("Unsupported diagnostics format; only minimal_tape is supported.")
 
         n = int(data["n_scans"])
         if n == 0:
             return cls()
-
         log = cls()
         log.run_id = str(data.get("run_id", ""))
         log.start_time = float(data.get("start_time", 0.0))
-
         for i in range(n):
-            diag = ScanDiagnostics(
+            tape_entry = MinimalScanTape(
                 scan_number=int(data["scan_numbers"][i]),
                 timestamp=float(data["timestamps"][i]),
                 dt_sec=float(data["dt_secs"][i]),
-                dt_scan=float(data["dt_scan"][i]) if "dt_scan" in data else 0.0,
-                dt_int=float(data["dt_int"][i]) if "dt_int" in data else 0.0,
-                num_imu_samples=int(data["num_imu_samples"][i]) if "num_imu_samples" in data else 0,
                 n_points_raw=int(data["n_points_raw"][i]),
                 n_points_budget=int(data["n_points_budget"][i]),
-                p_W=data["p_W"][i],
-                R_WL=data["R_WL"][i],
-                L_total=data["L_total"][i],
-                h_total=data["h_total"][i],
-                L_lidar=data["L_lidar"][i] if "L_lidar" in data else None,
-                L_odom=data["L_odom"][i] if "L_odom" in data else None,
-                L_imu=data["L_imu"][i] if "L_imu" in data else None,
-                L_gyro=data["L_gyro"][i] if "L_gyro" in data else None,
-                logdet_L_total=float(data["logdet_L_total"][i]),
-                trace_L_total=float(data["trace_L_total"][i]),
-                L_dt=float(data["L_dt"][i]),
-                trace_L_ex=float(data["trace_L_ex"][i]),
-                s_dt=float(data["s_dt"][i]),
-                s_ex=float(data["s_ex"][i]),
-                psd_delta_fro=float(data["psd_delta_fro"][i]),
-                psd_min_eig_before=float(data["psd_min_eig_before"][i]),
-                psd_min_eig_after=float(data["psd_min_eig_after"][i]),
-                trace_Q_mode=float(data["trace_Q_mode"][i]),
-                trace_Sigma_lidar_mode=float(data["trace_Sigma_lidar_mode"][i]),
-                trace_Sigma_g_mode=float(data["trace_Sigma_g_mode"][i]),
-                trace_Sigma_a_mode=float(data["trace_Sigma_a_mode"][i]),
-                rot_err_lidar_deg_pred=float(data["rot_err_lidar_deg_pred"][i]) if "rot_err_lidar_deg_pred" in data else 0.0,
-                rot_err_lidar_deg_post=float(data["rot_err_lidar_deg_post"][i]) if "rot_err_lidar_deg_post" in data else 0.0,
-                rot_err_odom_deg_pred=float(data["rot_err_odom_deg_pred"][i]) if "rot_err_odom_deg_pred" in data else 0.0,
-                rot_err_odom_deg_post=float(data["rot_err_odom_deg_post"][i]) if "rot_err_odom_deg_post" in data else 0.0,
                 fusion_alpha=float(data["fusion_alpha"][i]),
-                total_trigger_magnitude=float(data["total_trigger_magnitude"][i]),
+                cond_pose6=float(data["cond_pose6"][i]),
                 conditioning_number=float(data["conditioning_number"][i]),
-                conditioning_pose6=float(data["conditioning_pose6"][i]) if "conditioning_pose6" in data else 1.0,
-                accel_dir_dot_mu0=float(data["accel_dir_dot_mu0"][i]) if "accel_dir_dot_mu0" in data else 0.0,
-                accel_mag_mean=float(data["accel_mag_mean"][i]) if "accel_mag_mean" in data else 0.0,
-                imu_a_body_mean=data["imu_a_body_mean"][i] if "imu_a_body_mean" in data else np.zeros((3,), dtype=np.float64),
-                imu_a_world_nog_mean=data["imu_a_world_nog_mean"][i] if "imu_a_world_nog_mean" in data else np.zeros((3,), dtype=np.float64),
-                imu_a_world_mean=data["imu_a_world_mean"][i] if "imu_a_world_mean" in data else np.zeros((3,), dtype=np.float64),
-                imu_dt_eff_sum=float(data["imu_dt_eff_sum"][i]) if "imu_dt_eff_sum" in data else 0.0,
-                imu_dt_valid_min=float(data["imu_dt_valid_min"][i]) if "imu_dt_valid_min" in data else 0.0,
-                imu_dt_valid_max=float(data["imu_dt_valid_max"][i]) if "imu_dt_valid_max" in data else 0.0,
-                imu_dt_valid_mean=float(data["imu_dt_valid_mean"][i]) if "imu_dt_valid_mean" in data else 0.0,
-                imu_dt_valid_median=float(data["imu_dt_valid_median"][i]) if "imu_dt_valid_median" in data else 0.0,
-                imu_dt_valid_std=float(data["imu_dt_valid_std"][i]) if "imu_dt_valid_std" in data else 0.0,
-                imu_dt_valid_nonpos=int(data["imu_dt_valid_nonpos"][i]) if "imu_dt_valid_nonpos" in data else 0,
-                imu_dt_weighted_mean=float(data["imu_dt_weighted_mean"][i]) if "imu_dt_weighted_mean" in data else 0.0,
-                imu_dt_weighted_std=float(data["imu_dt_weighted_std"][i]) if "imu_dt_weighted_std" in data else 0.0,
-                imu_dt_weighted_sum=float(data["imu_dt_weighted_sum"][i]) if "imu_dt_weighted_sum" in data else 0.0,
-                dyaw_gyro=float(data["dyaw_gyro"][i]) if "dyaw_gyro" in data else 0.0,
-                dyaw_odom=float(data["dyaw_odom"][i]) if "dyaw_odom" in data else 0.0,
-                distance_pose=float(data["distance_pose"][i]) if "distance_pose" in data else 0.0,
-                distance_twist=float(data["distance_twist"][i]) if "distance_twist" in data else 0.0,
-                speed_odom=float(data["speed_odom"][i]) if "speed_odom" in data else 0.0,
-                speed_pose=float(data["speed_pose"][i]) if "speed_pose" in data else 0.0,
-                imu_jerk_norm_mean=float(data["imu_jerk_norm_mean"][i]) if "imu_jerk_norm_mean" in data else 0.0,
-                imu_jerk_norm_max=float(data["imu_jerk_norm_max"][i]) if "imu_jerk_norm_max" in data else 0.0,
+                eigmin_pose6=float(data["eigmin_pose6"][i]),
+                L_pose6=data["L_pose6"][i],
+                total_trigger_magnitude=float(data["total_trigger_magnitude"][i]),
+                cert_exact=bool(data["cert_exact"][i]) if "cert_exact" in data else True,
+                cert_frobenius_applied=bool(data["cert_frobenius_applied"][i]) if "cert_frobenius_applied" in data else False,
+                cert_n_triggers=int(data["cert_n_triggers"][i]) if "cert_n_triggers" in data else 0,
+                support_ess_total=float(data["support_ess_total"][i]) if "support_ess_total" in data else 0.0,
+                support_frac=float(data["support_frac"][i]) if "support_frac" in data else 0.0,
+                mismatch_nll_per_ess=float(data["mismatch_nll_per_ess"][i]) if "mismatch_nll_per_ess" in data else 0.0,
+                mismatch_directional_score=float(data["mismatch_directional_score"][i]) if "mismatch_directional_score" in data else 0.0,
+                excitation_dt_effect=float(data["excitation_dt_effect"][i]) if "excitation_dt_effect" in data else 0.0,
+                excitation_extrinsic_effect=float(data["excitation_extrinsic_effect"][i]) if "excitation_extrinsic_effect" in data else 0.0,
+                influence_psd_projection_delta=float(data["influence_psd_projection_delta"][i]) if "influence_psd_projection_delta" in data else 0.0,
+                influence_mass_epsilon_ratio=float(data["influence_mass_epsilon_ratio"][i]) if "influence_mass_epsilon_ratio" in data else 0.0,
+                influence_anchor_drift_rho=float(data["influence_anchor_drift_rho"][i]) if "influence_anchor_drift_rho" in data else 0.0,
+                influence_dt_scale=float(data["influence_dt_scale"][i]) if "influence_dt_scale" in data else 1.0,
+                influence_extrinsic_scale=float(data["influence_extrinsic_scale"][i]) if "influence_extrinsic_scale" in data else 1.0,
+                influence_trust_alpha=float(data["influence_trust_alpha"][i]) if "influence_trust_alpha" in data else 1.0,
+                influence_power_beta=float(data["influence_power_beta"][i]) if "influence_power_beta" in data else 1.0,
+                overconfidence_excitation_total=float(data["overconfidence_excitation_total"][i]) if "overconfidence_excitation_total" in data else 0.0,
+                overconfidence_ess_to_excitation=float(data["overconfidence_ess_to_excitation"][i]) if "overconfidence_ess_to_excitation" in data else 0.0,
+                overconfidence_cond_to_support=float(data["overconfidence_cond_to_support"][i]) if "overconfidence_cond_to_support" in data else 0.0,
+                overconfidence_dt_asymmetry=float(data["overconfidence_dt_asymmetry"][i]) if "overconfidence_dt_asymmetry" in data else 0.0,
+                overconfidence_z_to_xy_ratio=float(data["overconfidence_z_to_xy_ratio"][i]) if "overconfidence_z_to_xy_ratio" in data else 0.0,
                 t_total_ms=float(data["t_total_ms"][i]) if "t_total_ms" in data else 0.0,
                 t_point_budget_ms=float(data["t_point_budget_ms"][i]) if "t_point_budget_ms" in data else 0.0,
-                t_imu_preint_scan_ms=float(data["t_imu_preint_scan_ms"][i]) if "t_imu_preint_scan_ms" in data else 0.0,
-                t_imu_preint_int_ms=float(data["t_imu_preint_int_ms"][i]) if "t_imu_preint_int_ms" in data else 0.0,
                 t_deskew_ms=float(data["t_deskew_ms"][i]) if "t_deskew_ms" in data else 0.0,
             )
-            log.scans.append(diag)
-
-        log.total_scans = n
+            log.tape.append(tape_entry)
+        log.total_scans = len(log.tape)
         return log

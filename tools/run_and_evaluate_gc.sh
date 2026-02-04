@@ -19,7 +19,7 @@ BAG_PLAY_RATE="${BAG_PLAY_RATE:-0.5}"
 BAG_DURATION="${BAG_DURATION:-60}"
 
 # ============================================================================
-# Canonical bag: single Kimera bag used for all testing. See docs/BAG_TOPICS_AND_USAGE.md.
+# Canonical bag: single Kimera bag used for all testing. See docs/KIMERA_DATASET_AND_PIPELINE.md.
 # ============================================================================
 BAG_PATH="${BAG_PATH:-$PROJECT_ROOT/rosbags/Kimera_Data/ros2/10_14_acl_jackal-005}"
 GT_FILE="${GT_FILE:-$PROJECT_ROOT/rosbags/Kimera_Data/ground_truth/1014/acl_jackal_gt.tum}"
@@ -501,7 +501,7 @@ if [ -f "$RESULTS_DIR/metrics.txt" ]; then
     # If ATE/RPE are huge, likely GT vs estimate frame/axis mismatch (e.g. different Z-up vs planar)
     if [ -n "$ATE_TRANS" ] && [ -n "$RPE_1M" ]; then
         if awk "BEGIN { exit !($ATE_TRANS > 10 || $RPE_1M > 1) }" 2>/dev/null; then
-            echo -e "  ${YELLOW}Note: Very large ATE/RPE often mean GT and estimate use different frame or axis conventions. See docs/KIMERA_FRAME_MAPPING.md.${NC}"
+            echo -e "  ${YELLOW}Note: Very large ATE/RPE often mean GT and estimate use different frame or axis conventions. See docs/KIMERA_DATASET_AND_PIPELINE.md.${NC}"
         fi
     fi
 fi

@@ -9,7 +9,7 @@ This project uses the **Kimera** dataset for evaluation. Other datasets are arch
 - **Source:** [MIT-SPARK/Kimera-Multi-Data](https://github.com/MIT-SPARK/Kimera-Multi-Data)
 - **Location:** `rosbags/Kimera_Data/`
 - **Config:** `fl_ws/src/fl_slam_poc/config/gc_kimera.yaml`
-- **Frame mapping and calibration:** [KIMERA_FRAME_MAPPING.md](../KIMERA_FRAME_MAPPING.md)
+- **Dataset, frames, calibration, topics:** [KIMERA_DATASET_AND_PIPELINE.md](../KIMERA_DATASET_AND_PIPELINE.md)
 
 ### Canonical bag (only one we use; same as run_and_evaluate_gc.sh)
 

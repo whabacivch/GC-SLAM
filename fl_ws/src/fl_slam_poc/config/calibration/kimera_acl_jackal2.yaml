@@ -13,7 +13,7 @@
 #
 # D435i accelerometer reads -Y when stationary (gravity in +Y in optical frame).
 # Base frame is Z-up: stationary accel should be [0, 0, +g] to cancel gravity_W.
-# Rotation Rx(-90°) maps IMU -Y to base +Z: rotvec = [-pi/2, 0, 0] = [-1.570796, 0, 0]
+# Rotation is fit from bag IMU gravity direction (5k samples).
 #
 # =============================================================================
 
@@ -24,4 +24,4 @@ T_base_lidar: [-0.065447, -0.100474, 0.108987, -0.002723, -0.069383, 0.028979]
 # IMU extrinsic: Intel RealSense D435i in forward_imu_optical_frame
 # Rx(-90°) converts optical frame (gravity +Y, accel reads -Y) to base frame (Z-up)
 # Translation from T_cameralink_gyro calibration
-T_base_imu: [-0.016020, -0.030220, 0.007400, -1.570796, 0.0, 0.0]
+T_base_imu: [-0.016020, -0.030220, 0.007400, -1.602673, 0.002595, 0.0]

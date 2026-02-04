@@ -215,7 +215,7 @@ PARAM_SPECS: List[ParamSpec] = [
     ParamSpec("save_full_diagnostics", False, _cast_bool),
     # Smoothed initial reference: buffer first K odom, then set first_odom_pose = aggregate (PIPELINE_DESIGN_GAPS §5.4.1)
     ParamSpec("init_window_odom_count", 10, int),
-    # PointCloud2 layout: vlp16 (Kimera/VLP-16). See docs/POINTCLOUD2_LAYOUTS.md.
+    # PointCloud2 layout: vlp16 (Kimera/VLP-16). See docs/KIMERA_DATASET_AND_PIPELINE.md (§6 PointCloud2 layout).
     ParamSpec("pointcloud_layout", "vlp16", str),
     # Odom vs belief diagnostic: when non-empty, write CSV (raw odom, belief start, belief end) per scan.
     ParamSpec("odom_belief_diagnostic_file", "", str),
@@ -383,7 +383,7 @@ def parse_pointcloud2_vlp16(
     Parse VLP-16 (Velodyne Puck) PointCloud2: x, y, z, ring; optional t/time.
     Outputs (points, timestamps, weights, ring, tag) for pipeline.
     tag=0; timebase from header.stamp; time_offset from per-point t if present else 0.
-    See docs/POINTCLOUD2_LAYOUTS.md.
+    See docs/KIMERA_DATASET_AND_PIPELINE.md (§6 PointCloud2 layout).
     """
     n_points = msg.width * msg.height
     if n_points <= 0:
@@ -814,7 +814,7 @@ class GeometricCompositionalBackend(Node):
         if self.pointcloud_layout not in ("vlp16",):
             raise ValueError(
                 f"pointcloud_layout must be 'vlp16'; got {self.pointcloud_layout!r}. "
-                "See docs/POINTCLOUD2_LAYOUTS.md."
+                "See docs/KIMERA_DATASET_AND_PIPELINE.md (§6 PointCloud2 layout)."
             )
         self.get_logger().info(f"PointCloud2 layout: {self.pointcloud_layout}")
 

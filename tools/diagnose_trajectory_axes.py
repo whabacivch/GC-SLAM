@@ -110,7 +110,7 @@ def main() -> int:
                 print("MISMATCH: Odom has motion in XY but exported trajectory has motion in Z.")
                 print("This usually means an axis or frame convention error (e.g. odom frame")
                 print("uses different axes than assumed, or state/export swaps X/Y with Z).")
-                print("See docs/FRAME_AND_QUATERNION_CONVENTIONS.md and docs/KIMERA_FRAME_MAPPING.md.")
+                print("See docs/FRAME_AND_QUATERNION_CONVENTIONS.md and docs/KIMERA_DATASET_AND_PIPELINE.md.")
             elif odom_main == "Z" and tum_main == "XY":
                 print("")
                 print("MISMATCH: Odom has motion in Z but exported trajectory has motion in XY.")

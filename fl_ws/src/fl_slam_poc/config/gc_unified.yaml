@@ -26,8 +26,8 @@ gc_backend:
     - -0.01602
     - -0.03022
     - 0.0074
-    - -1.570796
-    - 0.0
+    - -1.602673
+    - 0.002595
     - 0.0
     trajectory_export_path: /tmp/gc_slam_trajectory.tum
     status_check_period_sec: 5.0
